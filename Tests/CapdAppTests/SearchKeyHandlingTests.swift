@@ -1,7 +1,9 @@
+import AppKit
 import SwiftUI
 import Testing
 
 @testable import CapdAppUI
+@testable import CapdKit
 
 @MainActor
 @Suite("Search key handling")
@@ -24,16 +26,56 @@ struct SearchKeyHandlingTests {
         #expect(SearchView.tagCycleForward(for: .return, modifiers: []) == nil)
     }
 
-    @Test("Unmodified horizontal arrows adjust ratings")
-    func horizontalArrowsAdjustRatings() {
-        #expect(SearchView.ratingDelta(for: .leftArrow, modifiers: []) == -1)
-        #expect(SearchView.ratingDelta(for: .rightArrow, modifiers: []) == 1)
-    }
+    @Test("Command-number rates while the search field has focus")
+    func commandNumberRatesFromSearchField() async throws {
+        let capture = Capture(
+            id: 1,
+            kind: .link,
+            url: "https://example.com",
+            title: "Example",
+            rating: 3,
+            createdAt: Date())
+        let hit = SearchHit(capture: capture, snippet: nil, score: nil)
+        var recordedRating: Int?
+        let model = SearchModel(
+            environment: SearchEnvironment(
+                search: { _ in [hit] },
+                totalCount: { 1 },
+                setRating: { _, rating in recordedRating = rating },
+                delete: { _ in },
+                openURL: { _ in },
+                copyText: { _ in },
+                assetFileURL: { _ in nil },
+                showHUD: { _ in }))
+        model.queryText = "example"
+        await model.settle()
 
-    @Test("Modified horizontal arrows retain text-field behavior")
-    func modifiedHorizontalArrowsAreIgnored() {
-        #expect(SearchView.ratingDelta(for: .leftArrow, modifiers: [.command]) == nil)
-        #expect(SearchView.ratingDelta(for: .rightArrow, modifiers: [.option]) == nil)
-        #expect(SearchView.ratingDelta(for: .upArrow, modifiers: []) == nil)
+        let hosting = NSHostingView(rootView: SearchView(model: model))
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 640, height: 470),
+            styleMask: [.borderless], backing: .buffered, defer: false)
+        window.contentView = hosting
+        hosting.layoutSubtreeIfNeeded()
+        window.makeKeyAndOrderFront(nil)
+        window.makeFirstResponder(hosting)
+        try await Task.sleep(for: .milliseconds(50))
+        #expect(window.firstResponder is NSTextView)
+
+        let event = try #require(
+            NSEvent.keyEvent(
+                with: .keyDown,
+                location: .zero,
+                modifierFlags: .command,
+                timestamp: 0,
+                windowNumber: window.windowNumber,
+                context: nil,
+                characters: "5",
+                charactersIgnoringModifiers: "5",
+                isARepeat: false,
+                keyCode: 23))
+
+        #expect(window.performKeyEquivalent(with: event))
+        #expect(recordedRating == 5)
+        window.orderOut(nil)
     }
 }

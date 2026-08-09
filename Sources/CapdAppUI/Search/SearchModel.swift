@@ -307,16 +307,13 @@ final class SearchModel {
         dismiss()
     }
 
-    func changeRating(by delta: Int) {
-        guard !isAnswerMode, delta != 0 else { return }
+    func setRating(_ rating: Int) {
+        guard !isAnswerMode, Capture.ratingRange.contains(rating) else { return }
         let captureIndex = selectedIndex - (showsAskOption ? 1 : 0)
         guard hits.indices.contains(captureIndex) else { return }
 
         let hit = hits[captureIndex]
         guard let id = hit.capture.id else { return }
-        let rating = min(
-            max(hit.capture.rating + delta, Capture.ratingRange.lowerBound),
-            Capture.ratingRange.upperBound)
         guard rating != hit.capture.rating else { return }
 
         do {

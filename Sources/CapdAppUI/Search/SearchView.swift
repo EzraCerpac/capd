@@ -28,13 +28,24 @@ struct SearchView: View {
         .overlay(PanelStyle.shape.strokeBorder(Theme.border, lineWidth: 1))
         .contentShape(PanelStyle.shape)
         .background {
-            // A key equivalent, so the chord never reaches the field editor during
-            // keyDown; plain ⌘⌫ is left to it as delete-to-start-of-line.
-            Button(action: model.deleteSelected) { EmptyView() }
-                .keyboardShortcut(.delete, modifiers: [.command, .shift])
-                .buttonStyle(.plain)
-                .opacity(0)
-                .accessibilityHidden(true)
+            ZStack {
+                Button(action: model.deleteSelected) { EmptyView() }
+                    .keyboardShortcut(.delete, modifiers: [.command, .shift])
+                ForEach(Capture.ratingRange, id: \.self) { rating in
+                    Button {
+                        model.setRating(rating)
+                    } label: {
+                        EmptyView()
+                    }
+                    .keyboardShortcut(
+                        KeyEquivalent(Character(String(rating))), modifiers: .command
+                    )
+                    .disabled(!model.canRateSelection)
+                }
+            }
+            .buttonStyle(.plain)
+            .opacity(0)
+            .accessibilityHidden(true)
         }
     }
 
@@ -109,13 +120,6 @@ struct SearchView: View {
             return .handled
         }
 
-        if model.canRateSelection,
-            let delta = Self.ratingDelta(for: press.key, modifiers: press.modifiers)
-        {
-            model.changeRating(by: delta)
-            return .handled
-        }
-
         switch press.key {
         case .upArrow:
             model.moveSelection(by: -1)
@@ -144,18 +148,6 @@ struct SearchView: View {
             return false
         }
         return nil
-    }
-
-    static func ratingDelta(
-        for key: KeyEquivalent,
-        modifiers: EventModifiers
-    ) -> Int? {
-        guard modifiers.isEmpty else { return nil }
-        switch key {
-        case .leftArrow: return -1
-        case .rightArrow: return 1
-        default: return nil
-        }
     }
 
     @ViewBuilder private var content: some View {
@@ -242,7 +234,11 @@ struct SearchView: View {
                                 content: SearchRowContent(model.hits[index], now: now),
                                 isSelected: model.isCaptureSelected(index),
                                 activeTag: model.activeTag,
-                                namespace: selectionNamespace
+                                namespace: selectionNamespace,
+                                setRating: { rating in
+                                    model.select(index)
+                                    model.setRating(rating)
+                                }
                             )
                             .id(index + (model.showsAskOption ? 1 : 0))
                             .onTapGesture {
@@ -498,6 +494,8 @@ struct SearchView: View {
                 } else {
                     ShortcutHint(label: "Open", keys: ["↩"])
                     statusDivider
+                    ShortcutHint(label: "Rate", keys: ["⌘", "1–5"])
+                    statusDivider
                     ShortcutHint(label: "Copy URL", keys: ["⌘", "↩"])
                     statusDivider
                     ShortcutHint(label: "Delete", keys: ["⌘", "⇧", "⌫"])
@@ -579,6 +577,7 @@ private struct SearchResultRow: View {
     let isSelected: Bool
     let activeTag: String?
     let namespace: Namespace.ID
+    let setRating: (Int) -> Void
 
     @State private var isHovered = false
 
@@ -614,7 +613,7 @@ private struct SearchResultRow: View {
             ForEach(content.tags, id: \.self) { tag in
                 TagChip(tag: tag, isActive: tag == activeTag)
             }
-            RatingBubbles(rating: content.rating)
+            RatingBubbles(rating: content.rating, setRating: setRating)
             Text(content.age)
                 .font(Theme.mono(10, weight: .regular))
                 .foregroundStyle(Theme.textTertiary)
@@ -653,18 +652,26 @@ private struct SearchResultRow: View {
 
 private struct RatingBubbles: View {
     let rating: Int
+    let setRating: (Int) -> Void
 
     var body: some View {
-        HStack(spacing: 3) {
+        HStack(spacing: 0) {
             ForEach(Capture.ratingRange, id: \.self) { value in
-                Circle()
-                    .fill(value <= rating ? color : Theme.textTertiary.opacity(0.45))
-                    .frame(width: 5, height: 5)
+                Button {
+                    setRating(value)
+                } label: {
+                    Circle()
+                        .fill(value <= rating ? color : Theme.textTertiary.opacity(0.45))
+                        .frame(width: 5, height: 5)
+                        .frame(width: 9, height: 14)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help("Rate \(value) out of 5 (⌘\(value))")
+                .accessibilityLabel("Rate \(value) out of 5")
+                .accessibilityAddTraits(value == rating ? .isSelected : [])
             }
         }
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel("Rating")
-        .accessibilityValue("\(rating) out of 5")
     }
 
     private var color: Color {

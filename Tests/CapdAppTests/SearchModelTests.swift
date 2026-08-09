@@ -105,32 +105,34 @@ struct SearchModelTests {
         await model.settle()
         model.select(1)
 
-        model.changeRating(by: 1)
-        #expect(model.selectedHit?.capture.rating == 4)
+        model.setRating(5)
+        #expect(model.selectedHit?.capture.rating == 5)
         await model.settle()
 
-        #expect(log.ratings == [RatingAction(id: 2, rating: 4)])
+        #expect(log.ratings == [RatingAction(id: 2, rating: 5)])
         #expect(model.hits.map(\.capture.id) == [2, 1])
         #expect(model.selectedIndex == 0)
         #expect(model.selectedHit?.capture.id == 2)
     }
 
-    @Test("Ratings clamp at the ends of the scale")
-    func ratingClamps() async {
+    @Test("Invalid and unchanged ratings are ignored")
+    func invalidAndUnchangedRatingsAreIgnored() async {
         let log = ActionLog()
         let model = SearchModel(
             environment: .stub(
-                search: { _ in [makeHit(id: 1, rating: 5)] },
+                search: { _ in [makeHit(id: 1, rating: 3)] },
                 setRating: { id, rating in
                     log.ratings.append(RatingAction(id: id, rating: rating))
                 }))
         model.queryText = "x"
         await model.settle()
 
-        model.changeRating(by: 1)
+        model.setRating(0)
+        model.setRating(3)
+        model.setRating(6)
 
         #expect(log.ratings.isEmpty)
-        #expect(model.selectedHit?.capture.rating == 5)
+        #expect(model.selectedHit?.capture.rating == 3)
     }
 
     @Test("Only a selected capture can be rated")
