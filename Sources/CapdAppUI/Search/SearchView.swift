@@ -465,12 +465,6 @@ struct SearchView: View {
                 Text("Answer unavailable")
                     .font(Theme.mono(10, weight: .regular))
                     .foregroundStyle(Theme.textSecondary)
-            } else {
-                Text("\(model.hits.count.formatted()) of \(model.totalCount.formatted()) captures")
-                    .font(Theme.mono(10, weight: .regular))
-                    .foregroundStyle(Theme.textSecondary)
-                    .contentTransition(.numericText())
-                    .animation(.easeOut(duration: 0.2), value: model.hits.count)
             }
             Spacer()
             if model.libraryAnswer != nil {
