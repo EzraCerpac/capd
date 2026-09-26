@@ -8,21 +8,23 @@ package enum Browser: String, CaseIterable {
     case zen = "app.zen-browser.zen"
     case librewolf = "org.mozilla.librewolf"
     case waterfox = "net.waterfox.waterfox"
+    case search = "com.officecommun.search"
 
     package init?(bundleID: String) {
         self.init(rawValue: bundleID)
     }
 
-    /// Gecko speaks no Apple Events beyond the basics: the tab URL comes over
-    /// Accessibility instead, and the body over the network fetch.
-    package var isGecko: Bool {
+    package var usesAccessibilityTabReader: Bool {
         switch self {
         case .safari, .chrome, .arc: false
-        case .firefox, .zen, .librewolf, .waterfox: true
+        case .firefox, .zen, .librewolf, .waterfox, .search: true
         }
     }
 
     package var supportsTabExtraction: Bool {
-        !isGecko
+        switch self {
+        case .safari, .chrome, .arc: true
+        case .firefox, .zen, .librewolf, .waterfox, .search: false
+        }
     }
 }
