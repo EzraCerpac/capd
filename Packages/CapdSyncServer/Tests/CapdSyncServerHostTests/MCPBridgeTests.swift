@@ -12,6 +12,51 @@ import Testing
 @testable import CapdSyncServerHost
 
 @Suite("Separate assistant bridge") struct MCPBridgeTests {
+    @Test func stalledSyncBodiesCannotConsumePrivateBridgeAdmission() async throws {
+        let f = try BridgeFixture()
+        defer { f.clean() }
+        let authority = try f.authority()
+        #expect(await authority.handle(try f.sync(.baseline)).status == 200)
+        let admissions = HostHTTP.Admissions()
+        let stalled = StalledSyncBodies()
+        let streams = (0..<8).map { _ in
+            RequestBody(asyncSequence: AsyncStream<ByteBuffer>(unfolding: { await stalled.next() }))
+        }
+        let rpc = try f.rpc()
+        await withTaskGroup(of: Void.self) { group in
+            for body in streams {
+                group.addTask {
+                    let response = await HostHTTP.handleSyncBody(
+                        body, headers: [:], authority: authority, admission: admissions.sync)
+                    #expect(response.status.code == 401)
+                }
+            }
+            var saturated = false
+            for _ in 0..<1000 {
+                if await stalled.count == 8 {
+                    saturated = true
+                    break
+                }
+                await Task.yield()
+            }
+            #expect(saturated)
+            let refusedSync = await HostHTTP.handleSyncBody(
+                RequestBody(buffer: ByteBuffer()), headers: [:], authority: authority,
+                admission: admissions.sync)
+            #expect(refusedSync.status.code == 503)
+            let bridge = await HostHTTP.handleMCPBody(
+                RequestBody(buffer: ByteBuffer(bytes: rpc.body)), headers: rpc.headers,
+                authority: authority, admission: admissions.mcp, deadline: .now() + .seconds(5))
+            #expect(bridge.status.code == 200)
+            for _ in 0..<8 { #expect(await admissions.mcp.acquire()) }
+            #expect(!(await admissions.mcp.acquire()))
+            for _ in 0..<8 { await admissions.mcp.release() }
+            await stalled.finish()
+        }
+        for _ in 0..<8 { #expect(await admissions.sync.acquire()) }
+        #expect(!(await admissions.sync.acquire()))
+        for _ in 0..<8 { await admissions.sync.release() }
+    }
     @Test(arguments: ["missing", "malformed", "permissions", "service", "credential", "writer"])
     func invalidInitialPolicyFailsBeforeListenersAndStorage(variant: String) async throws {
         let f = try BridgeFixture()
@@ -359,6 +404,21 @@ import Testing
         #expect(reply.status == 504)
         #expect(String(decoding: reply.body, as: UTF8.self).contains("Outcome may be unknown"))
         #expect(!work.mayExecute())
+    }
+}
+
+private actor StalledSyncBodies {
+    private var waiters: [CheckedContinuation<ByteBuffer?, Never>] = []
+    private var finished = false
+    var count: Int { waiters.count }
+    func next() async -> ByteBuffer? {
+        guard !finished else { return nil }
+        return await withCheckedContinuation { waiters.append($0) }
+    }
+    func finish() {
+        finished = true
+        for waiter in waiters { waiter.resume(returning: nil) }
+        waiters.removeAll()
     }
 }
 

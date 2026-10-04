@@ -6,6 +6,32 @@ import XCTest
 @testable import CapdMCP
 
 final class ReviewBoundaryAndJWTTests: XCTestCase {
+    func testJWTPolicyRequiresDistinctDevicesAcrossWriters() throws {
+        let key = P256.Signing.PrivateKey()
+        let binding = SyncLibraryBinding(libraryID: UUID(), serviceID: UUID())
+        let principal = MCPJWTPrincipal(subject: "subject-a", clientID: "client-a")
+        let sharedDevice = UUID()
+        let writer = MCPJWTAuthorization(
+            scopes: [MCPToolbox.readScope, MCPToolbox.writeScope], deviceID: sharedDevice)
+        func policy(_ principals: [MCPJWTPrincipal: MCPJWTAuthorization]) throws -> MCPJWTPolicy {
+            try MCPJWTPolicy(
+                issuer: "https://auth.example.invalid",
+                audience: "https://capd.example.invalid/mcp",
+                binding: binding, keys: ["synthetic-key": key.publicKey.x963Representation],
+                principals: principals)
+        }
+        for other in [
+            MCPJWTPrincipal(subject: "subject-b", clientID: "client-a"),
+            MCPJWTPrincipal(subject: "subject-a", clientID: "client-b"),
+        ] {
+            XCTAssertThrowsError(try policy([principal: writer, other: writer]))
+            let independent = MCPJWTAuthorization(scopes: writer.scopes, deviceID: UUID())
+            XCTAssertNoThrow(try policy([principal: writer, other: independent]))
+            let reader = MCPJWTAuthorization(scopes: [MCPToolbox.readScope], deviceID: sharedDevice)
+            XCTAssertNoThrow(try policy([principal: writer, other: reader]))
+            XCTAssertNoThrow(try policy([principal: reader, other: reader]))
+        }
+    }
     func testBearerSchemeIsCaseInsensitiveAndTokenRemainsCaseSensitive() throws {
         let fixture = try MCPTests.Fixture()
         defer { try? FileManager.default.removeItem(at: fixture.directory) }

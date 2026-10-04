@@ -9,6 +9,30 @@ import ServiceLifecycle
 
 public enum HostHTTP {
     enum MCPBodyError: Error { case expired }
+    struct Admissions {
+        let sync = Admission()
+        let mcp = Admission()
+    }
+
+    static func handleSyncBody(
+        _ body: RequestBody, headers: [String: String], authority: Authority,
+        admission: Admission
+    ) async -> Response {
+        guard await admission.acquire() else { return failure(.unavailable, status: 503) }
+        let reply: Response
+        do {
+            let buffer = try await body.collect(upTo: SyncHTTPHandler.maximumBodyBytes)
+            reply = response(
+                await authority.handle(
+                    SyncHTTPRequest(
+                        method: "POST", path: "/v1/sync", headers: headers,
+                        body: Data(buffer.readableBytesView))))
+        } catch {
+            reply = bodyFailure(error)
+        }
+        await admission.release()
+        return reply
+    }
 
     static func collectMCPBody(_ body: RequestBody, deadline: DispatchTime) async throws
         -> ByteBuffer
@@ -130,26 +154,15 @@ public enum HostHTTP {
         let authority = try Authority(
             configurationURL: configurationURL, dataDirectory: dataDirectory,
             mcpConfigurationURL: mcpConfigurationURL)
-        let admission = Admission()
+        let admissions = Admissions()
         let router = Router()
         router.post("/v1/sync") { request, _ -> Response in
             guard let headers = headers(request.headers) else {
                 return failure(.malformedRequest, status: 400)
             }
-            guard await admission.acquire() else { return failure(.unavailable, status: 503) }
-            let reply: Response
-            do {
-                let buffer = try await request.body.collect(upTo: SyncHTTPHandler.maximumBodyBytes)
-                reply = response(
-                    await authority.handle(
-                        SyncHTTPRequest(
-                            method: "POST", path: "/v1/sync", headers: headers,
-                            body: Data(buffer.readableBytesView))))
-            } catch {
-                reply = bodyFailure(error)
-            }
-            await admission.release()
-            return reply
+            return await handleSyncBody(
+                request.body, headers: headers, authority: authority,
+                admission: admissions.sync)
         }
         let application = Application(
             router: router,
@@ -180,7 +193,7 @@ public enum HostHTTP {
             }
             return await handleMCPBody(
                 request.body, headers: headers, authority: authority,
-                admission: admission, deadline: deadline)
+                admission: admissions.mcp, deadline: deadline)
         }
         let mcpApplication = Application(
             router: mcpRouter,

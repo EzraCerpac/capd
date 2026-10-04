@@ -52,6 +52,7 @@ public struct MCPJWTPolicy: Sendable {
         }
         let allowed: Set<String> = [MCPToolbox.readScope, MCPToolbox.writeScope]
         let zeroDeviceID = UUID(uuid: (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0))
+        var writerDevices: Set<UUID> = []
         for (p, a) in principals {
             guard !p.subject.isEmpty, p.subject.utf8.count <= 256, !p.clientID.isEmpty,
                 p.clientID.utf8.count <= 256,
@@ -60,6 +61,9 @@ public struct MCPJWTPolicy: Sendable {
                     || (a.scopes.contains(MCPToolbox.readScope)
                         && a.deviceID.map { $0 != zeroDeviceID } == true)
             else { throw MCPFailure.forbidden }
+            if a.scopes.contains(MCPToolbox.writeScope), let deviceID = a.deviceID {
+                guard writerDevices.insert(deviceID).inserted else { throw MCPFailure.forbidden }
+            }
         }
         guard revokedTokenIDs.allSatisfy({ !$0.isEmpty && $0.utf8.count <= 256 }) else {
             throw MCPFailure.forbidden

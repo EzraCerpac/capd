@@ -89,4 +89,6 @@ Pass both `--mcp-bridge-config PATH` and `--mcp-socket PATH` to enable the separ
 
 The strict bridge policy contains `version: 1`, `serviceID`, `libraryID`, an HTTPS `resource` ending in `/mcp`, `principalID`, `credentialSHA256`, `scopes`, `revoked`, and a `writerDeviceID` when `capd:write` is granted. Read access requires `capd:read`; create/edit access requires both scopes. The verifier and writer identity must differ from every ordinary sync enrollment. Keep the policy owner-only and replace it atomically; each request reloads policy on the authority queue.
 
+The ordinary sync listener and private MCP socket each admit up to eight bodies independently. Incomplete sync bodies cannot consume the private bridge's admission slots.
+
 `capd-mcp-stdio --credential-file PATH --socket PATH` bridges JSON-RPC over stdin/stdout to that socket. Its credential file is separate from device-sync credentials and any external tunnel credential. No new public HTTP route or OAuth issuer is enabled by these flags. See `../CapdMCP/README.md` for tool schemas and limits.
