@@ -78,13 +78,18 @@ public final class Authority: @unchecked Sendable {
         if !fm.fileExists(atPath: directory.appendingPathComponent("service.json").path) {
             let contents = try fm.contentsOfDirectory(atPath: directory.path)
             let lock = directory.appendingPathComponent(".server.lock")
-            let onlyAbandonedLock =
-                contents == [".server.lock"]
-                && (try? lock.resourceValues(forKeys: [
+            let onlyAbandonedLock: Bool
+            if contents == [".server.lock"] {
+                let lockValues: URLResourceValues? = try? lock.resourceValues(forKeys: [
                     .isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey,
-                ]))
-                .map { $0.isRegularFile == true && $0.isSymbolicLink != true && $0.fileSize == 0 }
-                    == true
+                ])
+                let isRegularFile: Bool = lockValues?.isRegularFile == true
+                let isSymbolicLink: Bool = lockValues?.isSymbolicLink == true
+                let isEmptyFile: Bool = lockValues?.fileSize == 0
+                onlyAbandonedLock = isRegularFile && !isSymbolicLink && isEmptyFile
+            } else {
+                onlyAbandonedLock = false
+            }
             guard contents.isEmpty || onlyAbandonedLock else {
                 throw HostError.invalidDataDirectory
             }
