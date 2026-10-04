@@ -10,6 +10,7 @@ struct LibraryView: View {
     }
     @State private var model = LibraryModel()
     @State private var capturing = false
+    @State private var asking = false
     @State private var showingSyncSettings = false
     @Environment(\.scenePhase) private var scenePhase
 
@@ -78,11 +79,16 @@ struct LibraryView: View {
                         .accessibilityIdentifier("deviceSyncSettings")
                 }
                 ToolbarItem(placement: .topBarTrailing) {
+                    Button("Ask Cap", systemImage: "sparkles") { asking = true }
+                        .accessibilityIdentifier("askCapButton")
+                }
+                ToolbarItem(placement: .topBarTrailing) {
                     Button("Capture", systemImage: "plus") { capturing = true }
                         .accessibilityIdentifier("captureButton")
                 }
             }
             .sheet(isPresented: $capturing) { CaptureForm(model: model) }
+            .sheet(isPresented: $asking) { AskLibraryView(library: model) }
             .sheet(isPresented: $showingSyncSettings) {
                 SyncSettingsView(
                     state: model.syncState, retry: { model.retrySync() },
