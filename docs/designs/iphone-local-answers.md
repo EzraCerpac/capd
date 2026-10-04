@@ -20,6 +20,11 @@ input and context-overflow handling. Cancellation discards late results.
 Availability does not guarantee that the model service can complete generation.
 The preserved adapter retains its bounds and generation-failure behavior.
 
+Local checks use Xcode 27 / Swift 6.4; no older SDK is installed here. The SDK
+27-specific error mapping is guarded by `compiler(>=6.4)` while the existing
+legacy mapping and failure fallback remain. This does not claim an Xcode 26.3
+build was tested.
+
 ## Evidence
 
 Questions are limited to 500 characters. Up to eight significant terms yield at
