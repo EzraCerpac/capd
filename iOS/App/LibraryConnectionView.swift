@@ -139,13 +139,13 @@ struct LibraryConnectionView: View {
                             isOn: $authorized)
                         Button("Verify and connect") {
                             let token = credential
-                            credential = ""
                             Task {
                                 if await connection.connect(
                                     credential: token, reviewHash: reviewHash,
                                     receiptHash: receiptHash, reviewed: reviewed,
                                     authorized: authorized, archiveOriginal: archiveOriginal)
                                 {
+                                    credential = ""
                                     dismiss()
                                 }
                             }
