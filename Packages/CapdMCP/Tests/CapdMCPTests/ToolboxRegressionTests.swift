@@ -1,5 +1,6 @@
 import CapdSync
 import Foundation
+import SQLite3
 import XCTest
 
 @testable import CapdMCP
@@ -150,6 +151,50 @@ final class ToolboxRegressionTests: XCTestCase {
         XCTAssertEqual(f.call("edit_capture", resolution)["isError"], .bool(false))
         XCTAssertEqual(try f.server.baseline().cursor, before.cursor)
         XCTAssertEqual(try f.server.baseline().captures, before.captures)
+    }
+
+    func testReceiptRequestIdentityContainsOnlyCanonicalDigest() throws {
+        let f = try MCPTests.Fixture()
+        defer { try? FileManager.default.removeItem(at: f.directory) }
+        let create = f.create(id: UUID(), text: "private text", note: "private note")
+        XCTAssertEqual(f.call("create_capture", create)["isError"], .bool(false))
+        var edit = editArguments(id: UUID(uuidString: create["id"]!.string!)!)
+        edit["note"] = .string("private edit")
+        edit["add_tags"] = .array([.string("private tag")])
+        XCTAssertEqual(f.call("edit_capture", edit)["isError"], .bool(false))
+        var db: OpaquePointer?
+        XCTAssertEqual(
+            sqlite3_open(f.directory.appendingPathComponent("authority.sqlite").path, &db),
+            SQLITE_OK)
+        defer { sqlite3_close(db) }
+        var statement: OpaquePointer?
+        XCTAssertEqual(
+            sqlite3_prepare_v2(
+                db, "SELECT operation FROM sync_receipts ORDER BY rowid", -1, &statement, nil),
+            SQLITE_OK)
+        defer { sqlite3_finalize(statement) }
+        for (name, arguments) in [("create_capture", create), ("edit_capture", edit)] {
+            XCTAssertEqual(sqlite3_step(statement), SQLITE_ROW)
+            let bytes = try XCTUnwrap(sqlite3_column_blob(statement, 0))
+            let data = Data(bytes: bytes, count: Int(sqlite3_column_bytes(statement, 0)))
+            let operation = try JSONDecoder().decode(SyncOperation.self, from: data)
+            let expected = try MCPToolbox.requestIdentity(name: name, arguments: arguments)
+            XCTAssertEqual(operation.requestIdentity, expected)
+            let digest = try XCTUnwrap(operation.requestIdentity?.object?["sha256"]?.string)
+            XCTAssertEqual(digest.count, 64)
+            XCTAssertTrue(digest.allSatisfy { "0123456789abcdef".contains($0) })
+            XCTAssertEqual(operation.requestIdentity?.object?.count, 1)
+            var reordered: Object = [:]
+            for key in arguments.keys.sorted().reversed() { reordered[key] = arguments[key] }
+            XCTAssertEqual(
+                try MCPToolbox.requestIdentity(name: name, arguments: reordered), expected)
+            XCTAssertEqual(f.call(name, reordered)["isError"], .bool(false))
+            var changed = arguments
+            changed["note"] = .string("changed content")
+            XCTAssertEqual(
+                f.call(name, changed)["structuredContent"]?.object?["error"],
+                .string("operation_id_reused"))
+        }
     }
 
     private func editArguments(id: UUID, revision: Int64 = 1) -> Object {

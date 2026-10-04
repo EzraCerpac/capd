@@ -4,6 +4,8 @@ import CryptoKit
 import Darwin
 import Foundation
 import HTTPTypes
+import Hummingbird
+import NIOCore
 import SQLite3
 import Testing
 
@@ -94,6 +96,82 @@ import Testing
         authority = try f.authority()
         #expect(await authority!.handleMCP(try f.create()).status == 503)
         #expect(try Data(contentsOf: file) == before)
+    }
+
+    @Test(arguments: ["blobs", "marker", "wrong-owner", "marker-symlink"])
+    func incompleteBlobStorageIsRefusedWithoutRepair(missing: String) async throws {
+        let f = try BridgeFixture()
+        defer { f.clean() }
+        var authority: Authority? = try f.authority()
+        #expect(await authority!.handle(try f.sync(.baseline)).status == 200)
+        authority = nil
+        let blobs = f.libraryRoot.appendingPathComponent("blobs")
+        let marker = blobs.appendingPathComponent("library-owner")
+        if missing == "blobs" {
+            try FileManager.default.removeItem(at: blobs)
+        } else {
+            try FileManager.default.removeItem(at: marker)
+            if missing == "wrong-owner" {
+                try JSONEncoder().encode(
+                    SyncLibraryBinding(libraryID: UUID(), serviceID: f.service)
+                ).write(to: marker)
+            } else if missing == "marker-symlink" {
+                let target = f.root.appendingPathComponent("external-owner")
+                try JSONEncoder().encode(
+                    SyncLibraryBinding(libraryID: f.library, serviceID: f.service)
+                ).write(to: target)
+                try FileManager.default.createSymbolicLink(at: marker, withDestinationURL: target)
+            }
+        }
+        let database = f.libraryRoot.appendingPathComponent("authority.sqlite")
+        let before = try Data(contentsOf: database)
+        authority = try f.authority()
+        #expect(await authority!.handleMCP(try f.rpc()).status == 503)
+        #expect(await authority!.handleMCP(try f.create()).status == 503)
+        #expect(try Data(contentsOf: database) == before)
+        if missing == "blobs" { #expect(!FileManager.default.fileExists(atPath: blobs.path)) }
+        if missing == "marker" { #expect(!FileManager.default.fileExists(atPath: marker.path)) }
+        if missing == "marker-symlink" {
+            #expect(
+                try FileManager.default.destinationOfSymbolicLink(atPath: marker.path)
+                    == f.root.appendingPathComponent("external-owner").path)
+        }
+    }
+
+    @Test func stalledBodiesExpireAndReleaseAllAdmissionSlots() async throws {
+        let f = try BridgeFixture()
+        defer { f.clean() }
+        let authority = try f.authority()
+        let admission = Admission()
+        let streams = (0..<8).map { _ in RequestBody.makeStream() }
+        await withTaskGroup(of: Void.self) { group in
+            for (body, _) in streams {
+                group.addTask {
+                    let response = await HostHTTP.handleMCPBody(
+                        body, headers: [:], authority: authority, admission: admission,
+                        deadline: .now() + .milliseconds(20))
+                    #expect(response.status.code == 504)
+                }
+            }
+        }
+        for _ in 0..<8 { #expect(await admission.acquire()) }
+        #expect(!(await admission.acquire()))
+        for _ in 0..<8 { await admission.release() }
+        #expect(await authority.handle(try f.sync(.baseline)).status == 200)
+        #expect(try f.baseline(await authority.handle(try f.sync(.baseline))).captures.isEmpty)
+        for (_, source) in streams { source.finish() }
+        let body = RequestBody(buffer: ByteBuffer(string: "synthetic"))
+        #expect(
+            try await HostHTTP.collectMCPBody(body, deadline: .now() + .seconds(1))
+                == ByteBuffer(string: "synthetic"))
+        do {
+            _ = try await HostHTTP.collectMCPBody(
+                RequestBody(buffer: ByteBuffer(repeating: 0, count: 65_537)),
+                deadline: .now() + .seconds(1))
+            Issue.record("Oversized body unexpectedly accepted")
+        } catch {
+            #expect(error is NIOTooManyBytesError)
+        }
     }
 
     @Test func sameCachedAuthorityAndOrdinarySyncRetryDeletion() async throws {

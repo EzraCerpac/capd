@@ -85,7 +85,22 @@ public final class Authority: @unchecked Sendable {
     private func validateLibraryStorage(_ id: UUID, requireExisting: Bool) throws {
         let root = libraryRoot(id)
         try Self.validateStoragePath(root, directory: true, mustExist: requireExisting)
-        try Self.validateStoragePath(root.appendingPathComponent("blobs"), directory: true)
+        let blobs = root.appendingPathComponent("blobs")
+        try Self.validateStoragePath(blobs, directory: true, mustExist: requireExisting)
+        if requireExisting {
+            let marker = blobs.appendingPathComponent("library-owner")
+            let fd = open(marker.path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK)
+            guard fd >= 0 else { throw HostError.invalidDataDirectory }
+            let file = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
+            defer { try? file.close() }
+            var status = stat()
+            guard fstat(fd, &status) == 0, status.st_mode & S_IFMT == S_IFREG,
+                (1...1_024).contains(status.st_size),
+                let bytes = try file.read(upToCount: 1_025), bytes.count <= 1_024,
+                try JSONDecoder().decode(SyncLibraryBinding.self, from: bytes)
+                    == SyncLibraryBinding(libraryID: id, serviceID: serviceID)
+            else { throw HostError.invalidDataDirectory }
+        }
         for name in [
             "authority.sqlite", "authority.sqlite-wal", "authority.sqlite-shm",
             "authority.sqlite-journal",

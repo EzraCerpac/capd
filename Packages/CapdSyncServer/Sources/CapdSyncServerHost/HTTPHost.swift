@@ -8,6 +8,46 @@ import NIOCore
 import ServiceLifecycle
 
 public enum HostHTTP {
+    enum MCPBodyError: Error { case expired }
+
+    static func collectMCPBody(_ body: RequestBody, deadline: DispatchTime) async throws
+        -> ByteBuffer
+    {
+        try await withThrowingTaskGroup(of: ByteBuffer.self) { group in
+            group.addTask { try await body.collect(upTo: 65_536) }
+            group.addTask {
+                let now = DispatchTime.now().uptimeNanoseconds
+                if deadline.uptimeNanoseconds > now {
+                    try await Task.sleep(nanoseconds: deadline.uptimeNanoseconds - now)
+                }
+                throw MCPBodyError.expired
+            }
+            defer { group.cancelAll() }
+            return try await group.next()!
+        }
+    }
+
+    static func handleMCPBody(
+        _ body: RequestBody, headers: [String: String], authority: Authority,
+        admission: Admission, deadline: DispatchTime
+    ) async -> Response {
+        guard await admission.acquire() else { return mcpResponse(MCPWork.failure(503)) }
+        let reply: Response
+        do {
+            let buffer = try await collectMCPBody(body, deadline: deadline)
+            reply = mcpResponse(
+                await authority.handleMCP(
+                    MCPHTTPRequest(
+                        method: "POST", path: "/mcp", headers: headers,
+                        body: Data(buffer.readableBytesView)), deadline: deadline))
+        } catch {
+            let status = error is MCPBodyError ? 504 : (error is NIOTooManyBytesError ? 413 : 503)
+            reply = mcpResponse(MCPWork.failure(status))
+        }
+        await admission.release()
+        return reply
+    }
+
     static func protectMCPBoundSocket(
         _ socketURL: URL,
         protector: @Sendable (URL) throws -> Void = MCPUnixSocket.protectBoundSocket
@@ -138,20 +178,9 @@ public enum HostHTTP {
             guard let headers = mcpHeaders(request.headers) else {
                 return mcpResponse(MCPWork.failure(400))
             }
-            guard await admission.acquire() else { return mcpResponse(MCPWork.failure(503)) }
-            let reply: Response
-            do {
-                let buffer = try await request.body.collect(upTo: 65_536)
-                reply = mcpResponse(
-                    await authority.handleMCP(
-                        MCPHTTPRequest(
-                            method: "POST", path: "/mcp", headers: headers,
-                            body: Data(buffer.readableBytesView)), deadline: deadline))
-            } catch {
-                reply = mcpResponse(MCPWork.failure(error is NIOTooManyBytesError ? 413 : 503))
-            }
-            await admission.release()
-            return reply
+            return await handleMCPBody(
+                request.body, headers: headers, authority: authority,
+                admission: admission, deadline: deadline)
         }
         let mcpApplication = Application(
             router: mcpRouter,

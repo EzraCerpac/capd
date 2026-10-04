@@ -1,4 +1,5 @@
 import CapdSync
+import CryptoKit
 import Foundation
 
 public typealias Object = [String: JSONValue]
@@ -314,9 +315,7 @@ public final class MCPToolbox: Sendable {
                     SyncOperation(
                         id: opID, deviceID: device, sequence: sequence, captureID: id,
                         baseRevision: base, mutation: mutation,
-                        requestIdentity: .object([
-                            "tool": .string(name), "arguments": .object(a),
-                        ])))
+                        requestIdentity: try Self.requestIdentity(name: name, arguments: a)))
                 var fields: Object = [
                     "operation_id": .string(receipt.operationID.uuidString),
                     "outcome": .string(receipt.outcome.rawValue),
@@ -354,6 +353,15 @@ public final class MCPToolbox: Sendable {
             }
             return (try? wrap(["error": .string(code)], error: true)) ?? .null
         }
+    }
+
+    static func requestIdentity(name: String, arguments: Object) throws -> JSONValue {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        let data = try encoder.encode(
+            JSONValue.object(["tool": .string(name), "arguments": .object(arguments)]))
+        let digest = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+        return .object(["sha256": .string(digest)])
     }
 
     private func project(_ c: SharedCapture, full: Bool) -> JSONValue {
