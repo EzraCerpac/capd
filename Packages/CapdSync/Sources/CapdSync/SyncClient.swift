@@ -1,0 +1,469 @@
+import Foundation
+import GRDB
+
+public struct RejectedWork: Codable, Equatable, Sendable {
+    public let operation: SyncOperation
+    public let receipt: SyncReceipt
+}
+
+public final class SyncClient: Sendable {
+    public typealias Projection = @Sendable (Database, SharedCapture) throws -> Void
+    public let binding: SyncLibraryBinding?
+    public let deviceID: UUID
+    public let blobs: BlobStore
+    private let writer: any DatabaseWriter
+    private let writerIdentity: ObjectIdentifier
+    private let projectionGate = ProjectionGate()
+    private let project: Projection
+
+    public convenience init(
+        databaseURL: URL, blobDirectory: URL, deviceID: UUID? = nil,
+        binding: SyncLibraryBinding? = nil
+    ) throws {
+        try self.init(
+            writer: SyncDatabase.open(at: databaseURL),
+            blobs: BlobStore(directory: blobDirectory), deviceID: deviceID, binding: binding)
+    }
+
+    /// The projection participates in each outbox/pull transaction; it must not enqueue writes.
+    public init(
+        writer: any DatabaseWriter, blobs: BlobStore, deviceID: UUID? = nil,
+        binding: SyncLibraryBinding? = nil,
+        prepareProjection: @escaping @Sendable (Database) throws -> Void = { _ in },
+        project: @escaping Projection = { _, _ in }
+    ) throws {
+        self.binding = binding
+        self.writer = writer
+        writerIdentity = writer.writeWithoutTransaction { ObjectIdentifier($0) }
+        self.blobs = blobs
+        self.project = project
+        self.deviceID = try SyncDatabase.prepare(
+            writer, role: "client", deviceID: deviceID, binding: binding,
+            hasUnboundBlobs: FileManager.default.contentsOfDirectory(atPath: blobs.directory.path)
+                .contains { $0 != "library-owner" }, prepareProjection: prepareProjection)!
+    }
+
+    private func read<T>(_ body: (Database) throws -> T) throws -> T {
+        try writer.read { db in
+            try SyncDatabase.checkBinding(db, binding)
+            return try body(db)
+        }
+    }
+
+    private func write<T>(_ body: (Database) throws -> T) throws -> T {
+        try writer.write { db in
+            try SyncDatabase.checkBinding(db, binding)
+            return try body(db)
+        }
+    }
+
+    @discardableResult
+    public func enqueue(captureID: UUID, mutation: CaptureMutation, baseRevision: Int64? = nil)
+        throws -> SyncOperation
+    {
+        try projectionGate.check()
+        return try write { db in
+            try enqueue(
+                in: db, captureID: captureID, mutation: mutation, baseRevision: baseRevision)
+        }
+    }
+
+    /// Enlists in this client's writer transaction. Propagate errors so the caller rolls back all work.
+    @discardableResult
+    public func enqueue(
+        in db: Database, captureID: UUID, mutation: CaptureMutation, baseRevision: Int64? = nil
+    ) throws -> SyncOperation {
+        guard ObjectIdentifier(db) == writerIdentity else { throw SyncTransactionError.wrongWriter }
+        guard db.isInsideTransaction else { throw SyncTransactionError.requiresTransaction }
+        try projectionGate.check()
+        try SyncDatabase.checkBinding(db, binding)
+        if case .create(let record) = mutation, let blob = record.source.blob {
+            _ = try blobs.read(blob)
+        }
+        let id = try SyncDatabase.canonical(db, captureID)
+        if case .create = mutation,
+            try SyncDatabase.record(db, id: id, table: "sync_visible") != nil
+        {
+            throw SyncError.invalidOperation
+        }
+        let acceptedRevision = try SyncDatabase.record(db, id: id)?.revision ?? 0
+        let base = baseRevision ?? acceptedRevision
+        guard base >= 0, base <= acceptedRevision else { throw SyncError.invalidOperation }
+        let pending = try operations(db)
+        let predecessor = try pending.last {
+            try SyncDatabase.canonical(db, $0.captureID) == id
+        }
+        let sequence = try Int64.fetchOne(db, sql: "SELECT sequence FROM sync_meta")! + 1
+        let operation = SyncOperation(
+            deviceID: deviceID, sequence: sequence,
+            captureID: captureID, baseRevision: base, predecessorID: predecessor?.id,
+            mutation: mutation)
+        try SyncDatabase.validate(operation)
+        try db.execute(
+            sql: "INSERT INTO sync_outbox (sequence, id, payload) VALUES (?, ?, ?)",
+            arguments: [sequence, operation.id.uuidString, try SyncDatabase.encode(operation)])
+        try db.execute(sql: "UPDATE sync_meta SET sequence = ?", arguments: [sequence])
+        try rebuild(db)
+        return operation
+    }
+
+    /// Export visible content without changing the original device history or pending BLOBs.
+    public func contentSnapshotImport(snapshotID: UUID, targetBinding: SyncLibraryBinding) throws
+        -> ContentSnapshotImport
+    {
+        try read { db in
+            ContentSnapshotImport(
+                snapshotID: snapshotID, targetBinding: targetBinding, sourceDeviceID: deviceID,
+                captures: try SyncDatabase.records(db, table: "sync_visible"))
+        }
+    }
+
+    public func pendingOperations() throws -> [SyncOperation] { try read(operations) }
+
+    private func operations(_ db: Database) throws -> [SyncOperation] {
+        try Data.fetchAll(db, sql: "SELECT payload FROM sync_outbox ORDER BY sequence")
+            .map { try SyncDatabase.decode(SyncOperation.self, $0) }
+    }
+
+    public func rejectedWork() throws -> [RejectedWork] {
+        try read { db in
+            try Data.fetchAll(db, sql: "SELECT payload FROM sync_rejections ORDER BY id")
+                .map { try SyncDatabase.decode(RejectedWork.self, $0) }
+        }
+    }
+
+    public func captures(includeDeleted: Bool = false) throws -> [SharedCapture] {
+        try read { db in
+            try SyncDatabase.records(db, table: "sync_visible").filter {
+                includeDeleted || !$0.deleted
+            }
+        }
+    }
+
+    public func cursor() throws -> Int64 {
+        try read { db in try Int64.fetchOne(db, sql: "SELECT cursor FROM sync_meta")! }
+    }
+
+    /// Uploads in device order; a lost acknowledgement leaves the exact operation ready to retry.
+    @discardableResult
+    public func push(to transport: any SyncTransport) throws -> [SyncReceipt] {
+        try checkBinding(transport)
+        try Task.checkCancellation()
+        var receipts: [SyncReceipt] = []
+        for operation in try pendingOperations() {
+            try Task.checkCancellation()
+            if case .create(let record) = operation.mutation, let blob = record.source.blob {
+                let data = try blobs.read(blob)
+                if data.isEmpty {
+                    try transport.upload(blob, offset: 0, chunk: Data(), final: true)
+                } else {
+                    for offset in stride(from: 0, to: data.count, by: 65_536) {
+                        try Task.checkCancellation()
+                        let end = min(offset + 65_536, data.count)
+                        try transport.upload(
+                            blob, offset: offset,
+                            chunk: data.subdata(in: offset..<end), final: end == data.count)
+                    }
+                }
+            }
+            let receipt = try transport.apply(operation)
+            try cacheBlob(receipt.capture, from: transport)
+            try acknowledge(operation, receipt: receipt)
+            receipts.append(receipt)
+        }
+        return receipts
+    }
+
+    private func acknowledge(_ operation: SyncOperation, receipt: SyncReceipt) throws {
+        guard receipt.operationID == operation.id else { throw SyncError.invalidOperation }
+        try write { db in
+            guard let pending = try operations(db).first, pending == operation else {
+                throw SyncError.invalidOperation
+            }
+            if let record = receipt.capture {
+                try SyncDatabase.alias(db, operation.captureID, to: record.id)
+                try accept(db, record)
+            }
+            if receipt.outcome != .accepted && receipt.outcome != .noteConflict {
+                try db.execute(
+                    sql: "INSERT INTO sync_rejections (id, payload) VALUES (?, ?)",
+                    arguments: [
+                        operation.id.uuidString,
+                        try SyncDatabase.encode(
+                            RejectedWork(operation: operation, receipt: receipt)),
+                    ])
+            }
+            try db.execute(
+                sql: "DELETE FROM sync_outbox WHERE id = ?", arguments: [operation.id.uuidString])
+            try rebuild(db)
+        }
+    }
+
+    public func pull(from transport: any SyncTransport, limit: Int = 100) throws {
+        try checkBinding(transport)
+        try Task.checkCancellation()
+        let oldCursor = try cursor()
+        do {
+            let page = try transport.changes(after: oldCursor, limit: limit)
+            try validate(page, after: oldCursor)
+            for change in page.changes { try cacheBlob(change.capture, from: transport) }
+            try Task.checkCancellation()
+            try commit(page, after: oldCursor)
+        } catch SyncError.cursorExpired {
+            let baseline = try transport.baseline()
+            for record in baseline.captures { try cacheBlob(record, from: transport) }
+            try Task.checkCancellation()
+            try commit(baseline, after: oldCursor)
+        }
+    }
+
+    /// Uses durable outbox retries. The wire executor never retries a POST on its own.
+    @discardableResult
+    public func syncOnce(
+        using transport: any AsyncSyncTransport,
+        credential: @escaping @Sendable () throws -> String
+    ) async throws -> [SyncReceipt] {
+        try await pull(from: transport, credential: credential)
+        let receipts = try await push(to: transport, credential: credential)
+        try await pull(from: transport, credential: credential)
+        return receipts
+    }
+
+    @discardableResult
+    public func push(
+        to transport: any AsyncSyncTransport,
+        credential: @escaping @Sendable () throws -> String
+    ) async throws -> [SyncReceipt] {
+        try checkBinding(transport)
+        try Task.checkCancellation()
+        let actions = AsyncHTTPActions(transport: transport, credential: credential)
+        var receipts: [SyncReceipt] = []
+        for operation in try pendingOperations() {
+            try Task.checkCancellation()
+            if case .create(let record) = operation.mutation, let blob = record.source.blob {
+                let data = try blobs.read(blob)
+                if data.isEmpty {
+                    try await actions.upload(blob, offset: 0, chunk: Data(), final: true)
+                } else {
+                    for offset in stride(from: 0, to: data.count, by: 65_536) {
+                        try Task.checkCancellation()
+                        let end = min(offset + 65_536, data.count)
+                        try await actions.upload(
+                            blob, offset: offset, chunk: data.subdata(in: offset..<end),
+                            final: end == data.count)
+                    }
+                }
+            }
+            let receipt = try await actions.apply(operation)
+            try await cacheBlob(receipt.capture, from: actions)
+            try Task.checkCancellation()
+            try acknowledge(operation, receipt: receipt)
+            receipts.append(receipt)
+        }
+        return receipts
+    }
+
+    public func pull(
+        from transport: any AsyncSyncTransport, limit: Int = 100,
+        credential: @escaping @Sendable () throws -> String
+    ) async throws {
+        try checkBinding(transport)
+        try Task.checkCancellation()
+        let actions = AsyncHTTPActions(transport: transport, credential: credential)
+        let oldCursor = try cursor()
+        do {
+            let page = try await actions.changes(after: oldCursor, limit: limit)
+            try validate(page, after: oldCursor)
+            for change in page.changes { try await cacheBlob(change.capture, from: actions) }
+            try Task.checkCancellation()
+            try commit(page, after: oldCursor)
+        } catch SyncError.cursorExpired {
+            let baseline = try await actions.baseline()
+            for record in baseline.captures { try await cacheBlob(record, from: actions) }
+            try Task.checkCancellation()
+            try commit(baseline, after: oldCursor)
+        }
+    }
+
+    private func checkBinding(_ transport: any AsyncSyncTransport) throws {
+        try read { _ in }
+        guard let binding else { throw SyncBindingError.bindingRequired }
+        guard binding == transport.binding else { throw SyncBindingError.mismatch }
+        guard deviceID == transport.deviceID else { throw SyncError.wrongDevice }
+    }
+
+    private func cacheBlob(_ record: SharedCapture?, from actions: AsyncHTTPActions) async throws {
+        guard let record, !record.deleted, let blob = record.source.blob else { return }
+        do { _ = try blobs.read(blob) } catch SyncError.blobMissing, SyncError.invalidBlob {
+            let data = try await actions.download(blob)
+            try Task.checkCancellation()
+            try blobs.receive(blob, offset: 0, chunk: data, final: true)
+        }
+    }
+
+    private func validate(_ page: FeedPage, after oldCursor: Int64) throws {
+        guard page.cursor >= oldCursor,
+            page.changes.allSatisfy({ $0.cursor > oldCursor && $0.cursor <= page.cursor }),
+            zip(page.changes, page.changes.dropFirst()).allSatisfy({ $0.cursor < $1.cursor })
+        else {
+            throw SyncError.invalidCursor
+        }
+    }
+
+    private func commit(_ page: FeedPage, after oldCursor: Int64) throws {
+        try write { db in
+            guard try Int64.fetchOne(db, sql: "SELECT cursor FROM sync_meta") == oldCursor
+            else {
+                throw SyncError.invalidCursor
+            }
+            for change in page.changes {
+                try accept(db, change.capture)
+                if change.deviceID == deviceID {
+                    try SyncDatabase.alias(db, change.requestedCaptureID, to: change.capture.id)
+                    try db.execute(
+                        sql: "INSERT OR IGNORE INTO sync_observed (id) VALUES (?)",
+                        arguments: [change.operationID.uuidString])
+                }
+            }
+            try rebuild(db)
+            try db.execute(sql: "UPDATE sync_meta SET cursor = ?", arguments: [page.cursor])
+        }
+    }
+
+    private func commit(_ baseline: Baseline, after oldCursor: Int64) throws {
+        try write { db in
+            guard try Int64.fetchOne(db, sql: "SELECT cursor FROM sync_meta") == oldCursor,
+                baseline.cursor >= oldCursor
+            else { throw SyncError.invalidCursor }
+            // A push acknowledgement can already be ahead of this baseline snapshot.
+            let ahead = try SyncDatabase.records(db).filter { $0.revision > baseline.cursor }
+            try db.execute(sql: "DELETE FROM sync_records")
+            for record in baseline.captures + ahead { try accept(db, record) }
+            try db.execute(
+                sql: "UPDATE sync_meta SET observed_sequence = MAX(observed_sequence, ?)",
+                arguments: [baseline.deviceSequences[deviceID] ?? 0])
+            try rebuild(db)
+            try db.execute(sql: "UPDATE sync_meta SET cursor = ?", arguments: [baseline.cursor])
+        }
+    }
+
+    private func checkBinding(_ transport: any SyncTransport) throws {
+        try read { _ in }
+        let bound = transport as? any BoundSyncTransport
+        guard binding == bound?.binding else { throw SyncBindingError.mismatch }
+        if binding != nil {
+            guard let bound else { throw SyncBindingError.bindingRequired }
+            guard bound.deviceID == deviceID else { throw SyncError.wrongDevice }
+        }
+    }
+
+    private func cacheBlob(_ record: SharedCapture?, from transport: any SyncTransport) throws {
+        guard let record, !record.deleted, let blob = record.source.blob else { return }
+        do { _ = try blobs.read(blob) } catch SyncError.blobMissing, SyncError.invalidBlob {
+            let data = try transport.download(blob)
+            try blobs.receive(blob, offset: 0, chunk: data, final: true)
+        }
+    }
+
+    private func accept(_ db: Database, _ record: SharedCapture) throws {
+        if let current = try SyncDatabase.record(db, id: record.id),
+            current.revision > record.revision
+        {
+            return
+        }
+        try SyncDatabase.save(db, record)
+    }
+
+    private func rebuild(_ db: Database) throws {
+        let before = try SyncDatabase.records(db, table: "sync_visible")
+        let observed = try String.fetchSet(db, sql: "SELECT id FROM sync_observed")
+        let observedSequence = try Int64.fetchOne(
+            db, sql: "SELECT observed_sequence FROM sync_meta")!
+        var records = Dictionary(
+            uniqueKeysWithValues: try SyncDatabase.records(db).map { ($0.id, $0) })
+        for operation in try operations(db) {
+            var id = try SyncDatabase.canonical(db, operation.captureID)
+            if case .create(let incoming) = operation.mutation {
+                if records[id] == nil, let hash = incoming.source.contentHash,
+                    let duplicate = records.values.first(where: { $0.source.contentHash == hash })
+                {
+                    id = duplicate.id
+                    try SyncDatabase.alias(db, incoming.id, to: id)
+                }
+                if observed.contains(operation.id.uuidString)
+                    || operation.sequence <= observedSequence
+                {
+                    continue
+                }
+                if var existing = records[id] {
+                    if !existing.deleted {
+                        existing.seenCount += 1
+                        if incoming.note != nil { existing.note = incoming.note }
+                        existing.manualTags = Array(
+                            Set(existing.manualTags).union(incoming.manualTags)
+                        ).sorted()
+                    }
+                    records[id] = existing
+                } else {
+                    records[id] = incoming
+                }
+                continue
+            }
+            if observed.contains(operation.id.uuidString) || operation.sequence <= observedSequence
+            {
+                continue
+            }
+            guard var record = records[id] else { continue }
+            switch operation.mutation {
+            case .edit(let edit):
+                if !record.deleted {
+                    _ = try SyncDatabase.edit(
+                        &record, edit, operation: operation,
+                        base: record.revision, server: false)
+                }
+            case .recapture: if !record.deleted { record.seenCount += 1 }
+            case .delete: record.deleted = true
+            case .restore:
+                // Restoration is optimistic only at the tombstone revision the user saw.
+                if record.deleted && record.revision == operation.baseRevision {
+                    record.deleted = false
+                }
+            case .create: break
+            }
+            records[id] = record
+        }
+        for old in before where records[old.id] == nil {
+            var removed = old
+            removed.deleted = true
+            try projectionGate.project { try project(db, removed) }
+            try db.execute(
+                sql: "DELETE FROM sync_visible WHERE id = ?", arguments: [old.id.uuidString])
+        }
+        for record in records.values.sorted(by: { $0.id.uuidString < $1.id.uuidString }) {
+            if !record.deleted, let blob = record.source.blob { _ = try blobs.read(blob) }
+            try SyncDatabase.save(db, record, table: "sync_visible")
+            try projectionGate.project { try project(db, record) }
+        }
+    }
+}
+
+public enum SyncTransactionError: Error, Equatable, Sendable {
+    case wrongWriter, requiresTransaction, projectionFeedback
+}
+
+private final class ProjectionGate: @unchecked Sendable {
+    private let lock = NSLock()
+    private var activeThread: ObjectIdentifier?
+
+    func check() throws {
+        if lock.withLock({ activeThread == ObjectIdentifier(Thread.current) }) {
+            throw SyncTransactionError.projectionFeedback
+        }
+    }
+
+    func project(_ body: () throws -> Void) throws {
+        lock.withLock { activeThread = ObjectIdentifier(Thread.current) }
+        defer { lock.withLock { activeThread = nil } }
+        try body()
+    }
+}

@@ -1,0 +1,611 @@
+import Foundation
+import Testing
+
+@testable import CapdSync
+
+@Suite("Prepared authenticated sync boundary")
+struct HTTPBoundaryTests {
+    @Test func processingRequiresVersionThreeBeforeStorageAndSynchronousProbeKeepsV2Compatible()
+        throws
+    {
+        let f = try HTTPFixture()
+        defer { f.clean() }
+        var capture = SharedCapture(
+            source: CaptureSource(kind: .text, selection: "Processing version contract"))
+        capture.generated = GeneratedContent(
+            taggingProcessed: true, taggingInputFingerprint: "exact-input")
+        let operation = SyncOperation(
+            deviceID: f.device, sequence: 1, captureID: capture.id, baseRevision: 0,
+            mutation: .create(capture))
+        for version in [1, 2] {
+            let refused = f.handler.handle(try f.request(.apply(operation), version: version))
+            #expect(try f.failure(refused) == .unsupportedVersion)
+            #expect(f.resolutions.value == 0)
+        }
+        let missingProcessing = f.transport(
+            "A",
+            executor: { request in
+                let actual = f.handler.handle(request)
+                let reply = try SyncDatabase.decode(SyncHTTPReply.self, actual.body)
+                return SyncHTTPResponse(
+                    status: actual.status, headers: actual.headers,
+                    body: try SyncDatabase.encode(
+                        SyncHTTPReply(
+                            version: reply.version, principal: reply.principal,
+                            result: reply.result,
+                            metadataContractVersion: reply.metadataContractVersion)))
+            })
+        #expect(throws: SyncHTTPError.unsupportedVersion) {
+            try missingProcessing.request(.apply(operation))
+        }
+        #expect(try f.a.baseline().captures.isEmpty)
+        let accepted = f.handler.handle(try f.request(.apply(operation), version: 3))
+        #expect(accepted.status == 200)
+        let reply = try SyncDatabase.decode(SyncHTTPReply.self, accepted.body)
+        #expect(reply.metadataContractVersion == 1)
+        #expect(reply.generatedProcessingContractVersion == 1)
+        let descriptor = SyncOperation(
+            deviceID: f.device, sequence: 2, captureID: capture.id, baseRevision: 1,
+            mutation: .edit(
+                CaptureEdit(generatedPatch: GeneratedContentPatch(taggingProcessing: .pending))))
+        let replacement = SyncOperation(
+            deviceID: f.device, sequence: 2, captureID: capture.id, baseRevision: 1,
+            mutation: .edit(CaptureEdit(generated: GeneratedContent(taggingProcessed: false))))
+        let before = f.resolutions.value
+        for newOperation in [descriptor, replacement] {
+            #expect(
+                try f.failure(f.handler.handle(f.request(.apply(newOperation), version: 2)))
+                    == .unsupportedVersion)
+            #expect(throws: SyncHTTPError.unsupportedVersion) {
+                try missingProcessing.apply(newOperation)
+            }
+        }
+        #expect(f.resolutions.value == before + 2)
+        #expect(try f.a.baseline().captures.first?.generated.taggingProcessed == true)
+        let v2Operation = SyncOperation(
+            deviceID: f.device, sequence: 2, captureID: capture.id, baseRevision: 1,
+            mutation: .edit(
+                CaptureEdit(generatedPatch: GeneratedContentPatch(body: .set("v2 body")))))
+        try missingProcessing.apply(v2Operation)
+        #expect(try f.a.baseline().captures.first?.generated.body == "v2 body")
+        #expect(
+            try f.a.baseline().captures.first?.generated.taggingInputFingerprint == "exact-input")
+    }
+
+    @Test func handlerRequiresVersionTwoForNewSemanticsBeforeResolvingStorage() throws {
+        let f = try HTTPFixture()
+        defer { f.clean() }
+        let capture = SharedCapture(
+            source: CaptureSource(kind: .text, selection: "Synthetic metadata"),
+            metadata: CaptureMetadata(sourceAppBundleID: "test.original"))
+        let operation = SyncOperation(
+            deviceID: f.device, sequence: 1, captureID: capture.id,
+            baseRevision: 0, mutation: .create(capture))
+        let rejected = f.handler.handle(try f.request(.apply(operation)))
+        #expect(try f.failure(rejected) == .unsupportedVersion)
+        #expect(f.resolutions.value == 0)
+        #expect(try f.a.baseline().captures.isEmpty)
+        let accepted = f.handler.handle(try f.request(.apply(operation), version: 2))
+        #expect(accepted.status == 200)
+        #expect(try f.a.baseline().captures.first?.metadata == capture.metadata)
+    }
+
+    @Test func synchronousMetadataGuardAlsoProtectsDirectRequestAndKeepsLegacyCompatible() throws {
+        let f = try HTTPFixture()
+        defer { f.clean() }
+        let calls = Counter()
+        let transport = f.transport(
+            "A",
+            executor: { request in
+                calls.increment()
+                let actual = f.handler.handle(request)
+                let reply = try SyncDatabase.decode(SyncHTTPReply.self, actual.body)
+                return SyncHTTPResponse(
+                    status: actual.status, headers: actual.headers,
+                    body: try SyncDatabase.encode(
+                        SyncHTTPReply(
+                            version: reply.version, principal: reply.principal,
+                            result: reply.result)))
+            })
+        let capture = SharedCapture(source: CaptureSource(kind: .text, selection: "Legacy"))
+        try transport.apply(
+            SyncOperation(
+                deviceID: f.device, sequence: 1, captureID: capture.id,
+                baseRevision: 0, mutation: .create(capture)))
+        #expect(calls.value == 1)
+        let edits = [
+            CaptureEdit(metadata: CaptureMetadataPatch(reminder: .clear)),
+            CaptureEdit(sourceContent: SourceContentPatch(title: "Original title")),
+            CaptureEdit(generatedPatch: GeneratedContentPatch(body: .clear)),
+        ]
+        for edit in edits {
+            let operation = SyncOperation(
+                deviceID: f.device, sequence: 2, captureID: capture.id,
+                baseRevision: 1, mutation: .edit(edit))
+            #expect(throws: SyncHTTPError.unsupportedVersion) {
+                try transport.request(.apply(operation))
+            }
+            #expect(try f.a.baseline().captures.first?.revision == 1)
+        }
+        #expect(calls.value == 4)
+    }
+
+    @Test("Authentication gates all operations before decoding or looking up library storage")
+    func authenticationGate() throws {
+        let f = try HTTPFixture()
+        defer { f.clean() }
+        let blob = BlobReference(data: Data("private".utf8))
+        let actions: [SyncHTTPAction] = [
+            .baseline, .changes(cursor: 0, limit: 1), .download(blob),
+            .upload(blob, offset: 0, chunk: Data(), final: true), .apply(f.operation("A")),
+        ]
+        for action in actions {
+            for headers in [
+                [:], ["Authorization": "Bearer revoked"], ["Authorization": "Bearer  A"],
+                ["Authorization": "Bearer A", "authorization": "Bearer B"],
+            ] {
+                let response = f.handler.handle(try f.request(action, headers: headers))
+                #expect(response.status == 401)
+                #expect(try f.failure(response) == .unauthorized)
+            }
+        }
+        f.auth.revoke("A")
+        #expect(f.handler.handle(try f.request(.baseline)).status == 401)
+        #expect(
+            f.handler.handle(
+                SyncHTTPRequest(
+                    method: "POST", path: "/v1/sync", headers: [:], body: Data("bad JSON".utf8))
+            ).status == 401)
+        #expect(f.resolutions.value == 0)
+        #expect(try f.a.baseline().captures.isEmpty)
+        #expect(try f.b.baseline().captures.isEmpty)
+    }
+
+    @Test("Authenticated library and device assertions reject spoofing before lookup or mutation")
+    func identityAssertions() throws {
+        let f = try HTTPFixture()
+        defer { f.clean() }
+        let op = f.operation("A")
+        let mismatched = try f.request(.apply(op), token: "B", library: f.libraryA)
+        #expect(f.handler.handle(mismatched).status == 403)
+        let deviceMismatch = try f.request(.baseline, device: UUID())
+        #expect(f.handler.handle(deviceMismatch).status == 403)
+        let forged = SyncOperation(
+            deviceID: UUID(), sequence: 1, captureID: op.captureID, baseRevision: 0,
+            mutation: op.mutation)
+        #expect(f.handler.handle(try f.request(.apply(forged))).status == 403)
+        let wrongService = SyncHTTPHandler(
+            serviceID: UUID(), authorizer: f.auth, server: { _ in f.a })
+        #expect(wrongService.handle(try f.request(.apply(op))).status == 403)
+        let wrongAssertion = SyncHTTPEnvelope(
+            expectedServiceID: UUID(), expectedLibraryID: f.libraryA, expectedDeviceID: f.device,
+            action: .apply(op))
+        #expect(
+            f.handler.handle(
+                SyncHTTPRequest(
+                    method: "POST", path: "/v1/sync",
+                    headers: ["Authorization": "Bearer A", "Content-Type": "application/json"],
+                    body: try SyncDatabase.encode(wrongAssertion))
+            ).status == 403)
+        #expect(f.resolutions.value == 0)
+        #expect(try f.a.baseline().captures.isEmpty)
+        #expect(try f.b.baseline().captures.isEmpty)
+        let wrongProvider = SyncHTTPHandler(
+            serviceID: f.service, authorizer: f.auth, server: { _ in f.a })
+        #expect(
+            wrongProvider.handle(try f.request(.baseline, token: "B", library: f.libraryB)).status
+                == 503)
+    }
+
+    @Test(
+        "Colliding capture, operation and device IDs stay isolated across receipts, feeds and blob bytes"
+    )
+    func librariesAreIsolated() throws {
+        let f = try HTTPFixture()
+        defer { f.clean() }
+        let a = f.transport("A")
+        let b = f.transport("B")
+        let captureID = UUID()
+        let operationID = UUID()
+        let bytesA = Data("library A bytes".utf8)
+        let bytesB = Data("library B bytes".utf8)
+        let blobA = BlobReference(data: bytesA)
+        let blobB = BlobReference(data: bytesB)
+        try a.upload(blobA, offset: 0, chunk: bytesA, final: true)
+        try b.upload(blobB, offset: 0, chunk: bytesB, final: true)
+        func operation(_ blob: BlobReference, _ note: String) -> SyncOperation {
+            SyncOperation(
+                id: operationID, deviceID: f.device, sequence: 1, captureID: captureID,
+                baseRevision: 0,
+                mutation: .create(
+                    SharedCapture(
+                        id: captureID, source: CaptureSource(kind: .image, blob: blob), note: note))
+            )
+        }
+        let opA = operation(blobA, "A")
+        let opB = operation(blobB, "B")
+        let receiptA = try a.apply(opA)
+        let receiptB = try b.apply(opB)
+        #expect(try a.apply(opA) == receiptA)
+        #expect(try b.apply(opB) == receiptB)
+        #expect(try a.baseline().captures.first?.note == "A")
+        #expect(try b.baseline().captures.first?.note == "B")
+        #expect(try a.changes(after: 0, limit: 100).changes.count == 1)
+        #expect(try b.changes(after: 0, limit: 100).changes.count == 1)
+        #expect(try a.download(blobA) == bytesA)
+        #expect(try b.download(blobB) == bytesB)
+        #expect(throws: SyncError.blobMissing) { try b.download(blobA) }
+        #expect(throws: SyncError.blobMissing) { try a.download(blobB) }
+        #expect(try a.baseline().deviceSequences[f.device] == 1)
+        #expect(try b.baseline().deviceSequences[f.device] == 1)
+    }
+
+    @Test(
+        "Client executor roundtrip preserves exact queued identity after a committed response is lost"
+    )
+    func durableRoundtrip() throws {
+        let f = try HTTPFixture()
+        defer { f.clean() }
+        let client = try f.client("client")
+        let bytes = Data("roundtrip image".utf8)
+        let blob = try client.blobs.put(bytes)
+        let capture = SharedCapture(source: CaptureSource(kind: .image, blob: blob), note: "local")
+        let operation = try client.enqueue(captureID: capture.id, mutation: .create(capture))
+        let lost = Counter()
+        let transport = f.transport(
+            "A",
+            executor: { request in
+                let response = f.handler.handle(request)
+                if let envelope = try? SyncDatabase.decode(SyncHTTPEnvelope.self, request.body),
+                    case .apply = envelope.action, lost.increment() == 1
+                {
+                    throw SyncError.acknowledgementLost
+                }
+                return response
+            })
+        #expect(throws: SyncError.acknowledgementLost) { try client.push(to: transport) }
+        #expect(try client.pendingOperations() == [operation])
+        let reopened = try f.client("client")
+        #expect(try reopened.pendingOperations() == [operation])
+        try reopened.pull(from: transport)
+        #expect(try reopened.captures().first?.seenCount == 1)
+        try reopened.push(to: transport)
+        #expect(try reopened.pendingOperations().isEmpty)
+        #expect(try f.a.changes(after: 0).changes.count == 1)
+        let peer = try f.client("peer")
+        try f.a.expireFeed(through: f.a.baseline().cursor)
+        try peer.pull(from: transport)
+        #expect(try peer.captures().first?.id == capture.id)
+        #expect(try peer.blobs.read(blob) == bytes)
+    }
+
+    @Test("Binding mismatch and omitted bindings preserve queued data, cursor and blobs")
+    func clientBinding() throws {
+        let f = try HTTPFixture()
+        defer { f.clean() }
+        let client = try f.client("bound")
+        let blob = try client.blobs.put(Data("retained".utf8))
+        let capture = SharedCapture(source: CaptureSource(kind: .image, blob: blob))
+        let op = try client.enqueue(captureID: capture.id, mutation: .create(capture))
+        let different = SyncLibraryBinding(libraryID: f.libraryB, serviceID: f.service)
+        #expect(throws: SyncBindingError.mismatch) { try f.client("bound", binding: different) }
+        #expect(throws: SyncBindingError.mismatch) { try f.client("bound", binding: nil) }
+        #expect(throws: SyncBindingError.mismatch) { try client.push(to: f.b) }
+        #expect(throws: SyncBindingError.mismatch) { try client.push(to: f.transport("B")) }
+        let wrongService = SyncLibraryBinding(libraryID: f.libraryA, serviceID: UUID())
+        #expect(throws: SyncBindingError.mismatch) { try f.client("bound", binding: wrongService) }
+        let reopened = try f.client("bound")
+        #expect(try reopened.pendingOperations() == [op])
+        #expect(try reopened.cursor() == 0)
+        #expect(try reopened.blobs.read(blob) == Data("retained".utf8))
+        #expect(throws: SyncHTTPError.forbidden) {
+            try reopened.push(to: f.transport("A", credential: "B"))
+        }
+        #expect(try reopened.pendingOperations() == [op])
+        #expect(try f.b.baseline().captures.isEmpty)
+    }
+
+    @Test(
+        "Production enrollment refuses previously used unbound clients even after acknowledged work drains"
+    )
+    func legacyEnrollment() throws {
+        let f = try HTTPFixture()
+        defer { f.clean() }
+        let legacy = try f.client("legacy", binding: nil)
+        let capture = SharedCapture(source: CaptureSource(kind: .text, selection: "legacy"))
+        try legacy.enqueue(captureID: capture.id, mutation: .create(capture))
+        #expect(throws: SyncBindingError.enrollmentRequiresEmptyLibrary) { try f.client("legacy") }
+        #expect(throws: SyncBindingError.mismatch) { try legacy.push(to: f.transport("A")) }
+        try legacy.push(to: f.a)
+        #expect(try legacy.pendingOperations().isEmpty)
+        #expect(throws: SyncBindingError.enrollmentRequiresEmptyLibrary) { try f.client("legacy") }
+        #expect(try f.client("legacy", binding: nil).captures().first?.id == capture.id)
+        let blobsOnly = try f.client("blobsOnly", binding: nil)
+        _ = try blobsOnly.blobs.put(Data("legacy asset".utf8))
+        #expect(throws: SyncBindingError.enrollmentRequiresEmptyLibrary) {
+            try f.client("blobsOnly")
+        }
+    }
+
+    @Test(
+        "Server DB and blob root cannot be accidentally reassigned or opened without their binding")
+    func serverStorageOwnership() throws {
+        let f = try HTTPFixture()
+        defer { f.clean() }
+        #expect(throws: SyncBindingError.mismatch) {
+            try SyncServer(
+                databaseURL: f.root.appendingPathComponent("a.sqlite"),
+                blobDirectory: f.root.appendingPathComponent("a-blobs"), libraryID: f.libraryB,
+                serviceID: f.service)
+        }
+        #expect(throws: SyncBindingError.mismatch) {
+            try SyncServer(
+                databaseURL: f.root.appendingPathComponent("a.sqlite"),
+                blobDirectory: f.root.appendingPathComponent("a-blobs"))
+        }
+        #expect(throws: SyncBindingError.mismatch) {
+            try SyncServer(
+                databaseURL: f.root.appendingPathComponent("aliased.sqlite"),
+                blobDirectory: f.root.appendingPathComponent("a-blobs"), libraryID: f.libraryB,
+                serviceID: f.service)
+        }
+        #expect(throws: SyncBindingError.mismatch) {
+            try BlobStore(directory: f.root.appendingPathComponent("a-blobs"))
+        }
+        #expect(throws: SyncBindingError.mismatch) {
+            try SyncServer(
+                databaseURL: f.root.appendingPathComponent("wrong-service.sqlite"),
+                blobDirectory: f.root.appendingPathComponent("a-blobs"), libraryID: f.libraryA,
+                serviceID: UUID())
+        }
+        let reopened = try SyncServer(
+            databaseURL: f.root.appendingPathComponent("a.sqlite"),
+            blobDirectory: f.root.appendingPathComponent("a-blobs"), libraryID: f.libraryA,
+            serviceID: f.service)
+        #expect(reopened.libraryID == f.libraryA)
+    }
+
+    @Test("Already-open unbound handles cannot access a database enrolled by another handle")
+    func staleHandles() throws {
+        let f = try HTTPFixture()
+        defer { f.clean() }
+        let stale = try f.client("stale", binding: nil)
+        let enrolled = try f.client("stale")
+        let capture = SharedCapture(source: CaptureSource(kind: .text, selection: "stale local"))
+        #expect(throws: SyncBindingError.mismatch) {
+            try stale.enqueue(captureID: capture.id, mutation: .create(capture))
+        }
+        #expect(throws: SyncBindingError.mismatch) { try stale.captures() }
+        #expect(throws: SyncBindingError.mismatch) { try stale.push(to: f.a) }
+        #expect(throws: SyncBindingError.mismatch) { try stale.pull(from: f.a) }
+        #expect(try enrolled.pendingOperations().isEmpty)
+        #expect(try enrolled.cursor() == 0)
+        let db = f.root.appendingPathComponent("stale-server.sqlite")
+        let dir = f.root.appendingPathComponent("stale-server-blobs")
+        let oldServer = try SyncServer(databaseURL: db, blobDirectory: dir)
+        let oldReader = oldServer.reader
+        let enrolledServer = try SyncServer(
+            databaseURL: db, blobDirectory: dir, libraryID: f.libraryA, serviceID: f.service)
+        #expect(throws: SyncBindingError.mismatch) {
+            try oldServer.apply(f.operation("stale server"))
+        }
+        #expect(throws: SyncBindingError.mismatch) { try oldServer.baseline() }
+        #expect(throws: SyncBindingError.mismatch) { try oldReader.acceptedCaptures() }
+        let bytes = Data("stale upload".utf8)
+        #expect(throws: SyncBindingError.mismatch) {
+            try oldServer.upload(BlobReference(data: bytes), offset: 0, chunk: bytes, final: true)
+        }
+        #expect(try enrolledServer.baseline().captures.isEmpty)
+        #expect(try FileManager.default.contentsOfDirectory(atPath: dir.path) == ["library-owner"])
+    }
+
+    @Test("Routing, decoding, version, page and upload bounds reject without storage access")
+    func requestBounds() throws {
+        let f = try HTTPFixture()
+        defer { f.clean() }
+        let valid = try f.request(.baseline)
+        let cases: [(SyncHTTPRequest, Int, SyncHTTPError)] = [
+            (
+                SyncHTTPRequest(
+                    method: "GET", path: valid.path, headers: valid.headers, body: valid.body), 405,
+                .methodNotAllowed
+            ),
+            (
+                SyncHTTPRequest(
+                    method: "POST", path: "/fixtureSync", headers: valid.headers, body: valid.body),
+                404, .notFound
+            ),
+            (
+                SyncHTTPRequest(
+                    method: "POST", path: valid.path, headers: valid.headers,
+                    body: Data(repeating: 0, count: SyncHTTPHandler.maximumBodyBytes + 1)), 413,
+                .requestTooLarge
+            ),
+            (
+                SyncHTTPRequest(
+                    method: "POST", path: valid.path,
+                    headers: ["Authorization": "Bearer A", "Content-Type": "text/plain"],
+                    body: valid.body), 415, .unsupportedMediaType
+            ),
+            (
+                SyncHTTPRequest(
+                    method: "POST", path: valid.path, headers: valid.headers,
+                    body: Data("bad A secret payload".utf8)), 400, .malformedRequest
+            ),
+            (try f.request(.baseline, version: 4), 400, .unsupportedVersion),
+            (
+                try f.request(
+                    .upload(
+                        BlobReference(data: Data()), offset: 0,
+                        chunk: Data(repeating: 0, count: 65_537), final: false)), 413,
+                .requestTooLarge
+            ),
+        ]
+        for (request, status, error) in cases {
+            let response = f.handler.handle(request)
+            #expect(response.status == status)
+            #expect(try f.failure(response) == error)
+            #expect(response.headers["Content-Type"] == "application/json")
+            #expect(!String(decoding: response.body, as: UTF8.self).contains("secret payload"))
+        }
+        let page = f.handler.handle(try f.request(.changes(cursor: 0, limit: 1001)))
+        #expect(page.status == 422)
+        #expect(f.resolutions.value == 0)
+        let gap = SyncOperation(
+            deviceID: f.device, sequence: 2, captureID: UUID(), baseRevision: 0, mutation: .delete)
+        #expect(throws: SyncError.outOfOrder(expected: 1)) { try f.transport("A").apply(gap) }
+    }
+
+    @Test("Oversized baseline and unexpected storage errors produce bounded generic JSON")
+    func responseLimitsAndHygiene() throws {
+        let f = try HTTPFixture()
+        defer { f.clean() }
+        let huge = SharedCapture(
+            source: CaptureSource(
+                kind: .text,
+                selection: String(repeating: "x", count: SyncHTTPHandler.maximumBodyBytes)))
+        try f.a.apply(
+            SyncOperation(
+                deviceID: f.device, sequence: 1, captureID: huge.id, baseRevision: 0,
+                mutation: .create(huge)))
+        let limited = f.handler.handle(try f.request(.baseline))
+        #expect(limited.status == 503)
+        #expect(try f.failure(limited) == .resourceLimit)
+        struct PrivateStorageError: Error {}
+        let failing = SyncHTTPHandler(
+            serviceID: f.service, authorizer: f.auth, server: { _ in throw PrivateStorageError() })
+        let generic = failing.handle(try f.request(.baseline))
+        #expect(try f.failure(generic) == .unavailable)
+        #expect(generic.body.count < 200)
+        #expect(!String(decoding: generic.body, as: UTF8.self).contains("PrivateStorageError"))
+    }
+
+    @Test("Client rejects mismatched successful response scope before acknowledging queued work")
+    func responseScope() throws {
+        let f = try HTTPFixture()
+        defer { f.clean() }
+        let client = try f.client("scope")
+        let op = f.operation("scope")
+        try client.enqueue(captureID: op.captureID, mutation: op.mutation)
+        let transport = f.transport(
+            "A",
+            executor: { request in
+                let actual = f.handler.handle(request)
+                let reply = try SyncDatabase.decode(SyncHTTPReply.self, actual.body)
+                return SyncHTTPResponse(
+                    status: 200, headers: actual.headers,
+                    body: try SyncDatabase.encode(
+                        SyncHTTPReply(
+                            version: 1,
+                            principal: SyncPrincipal(
+                                serviceID: f.service, libraryID: f.libraryB, deviceID: f.device),
+                            result: reply.result)))
+            })
+        #expect(throws: SyncHTTPError.invalidResponse) { try client.push(to: transport) }
+        #expect(try client.pendingOperations().count == 1)
+        try client.push(to: f.transport("A"))
+        #expect(try f.a.baseline().captures.first?.seenCount == 1)
+    }
+}
+
+private final class Counter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var count = 0
+    var value: Int { lock.withLock { count } }
+    @discardableResult func increment() -> Int {
+        lock.withLock {
+            count += 1
+            return count
+        }
+    }
+}
+
+private final class SyntheticAuthorizer: SyncAuthorizer, @unchecked Sendable {
+    private let lock = NSLock()
+    private var principals: [String: SyncPrincipal]
+    init(_ principals: [String: SyncPrincipal]) { self.principals = principals }
+    func authorize(bearerCredential: String) throws -> SyncPrincipal? {
+        lock.withLock { principals[bearerCredential] }
+    }
+    func revoke(_ token: String) { lock.withLock { principals[token] = nil } }
+}
+
+private final class HTTPFixture: Sendable {
+    let root: URL
+    let libraryA = UUID()
+    let libraryB = UUID()
+    let service = UUID()
+    let device = UUID()
+    let a: SyncServer
+    let b: SyncServer
+    let auth: SyntheticAuthorizer
+    let resolutions = Counter()
+    var binding: SyncLibraryBinding { SyncLibraryBinding(libraryID: libraryA, serviceID: service) }
+    var handler: SyncHTTPHandler {
+        SyncHTTPHandler(
+            serviceID: service, authorizer: auth,
+            server: { [self] id in
+                resolutions.increment()
+                return id == libraryA ? a : b
+            })
+    }
+    init() throws {
+        root = FileManager.default.temporaryDirectory.appendingPathComponent("capd-http-\(UUID())")
+        a = try SyncServer(
+            databaseURL: root.appendingPathComponent("a.sqlite"),
+            blobDirectory: root.appendingPathComponent("a-blobs"), libraryID: libraryA,
+            serviceID: service)
+        b = try SyncServer(
+            databaseURL: root.appendingPathComponent("b.sqlite"),
+            blobDirectory: root.appendingPathComponent("b-blobs"), libraryID: libraryB,
+            serviceID: service)
+        auth = SyntheticAuthorizer([
+            "A": SyncPrincipal(serviceID: service, libraryID: libraryA, deviceID: device),
+            "B": SyncPrincipal(serviceID: service, libraryID: libraryB, deviceID: device),
+        ])
+    }
+    func clean() { try? FileManager.default.removeItem(at: root) }
+    func operation(_ note: String) -> SyncOperation {
+        let capture = SharedCapture(source: CaptureSource(kind: .text, selection: note))
+        return SyncOperation(
+            deviceID: device, sequence: 1, captureID: capture.id, baseRevision: 0,
+            mutation: .create(capture))
+    }
+    func request(
+        _ action: SyncHTTPAction, token: String = "A", library: UUID? = nil, device: UUID? = nil,
+        version: Int = 1, headers: [String: String]? = nil
+    ) throws -> SyncHTTPRequest {
+        SyncHTTPRequest(
+            method: "POST", path: "/v1/sync",
+            headers: headers ?? [
+                "Content-Type": "application/json", "Authorization": "Bearer \(token)",
+            ],
+            body: try SyncDatabase.encode(
+                SyncHTTPEnvelope(
+                    version: version, expectedServiceID: service,
+                    expectedLibraryID: library ?? libraryA,
+                    expectedDeviceID: device ?? self.device, action: action)))
+    }
+    func failure(_ response: SyncHTTPResponse) throws -> SyncHTTPError? {
+        let reply = try SyncDatabase.decode(SyncHTTPReply.self, response.body)
+        guard case .failure(let error) = reply.result else { return nil }
+        return error
+    }
+    func transport(
+        _ token: String, credential: String? = nil,
+        executor: (@Sendable (SyncHTTPRequest) throws -> SyncHTTPResponse)? = nil
+    ) -> SyncHTTPTransport {
+        SyncHTTPTransport(
+            binding: SyncLibraryBinding(
+                libraryID: token == "A" ? libraryA : libraryB, serviceID: service),
+            deviceID: device, credential: { credential ?? token },
+            execute: executor ?? { [self] in handler.handle($0) })
+    }
+    func client(_ name: String) throws -> SyncClient { try client(name, binding: binding) }
+    func client(_ name: String, binding: SyncLibraryBinding?) throws -> SyncClient {
+        try SyncClient(
+            databaseURL: root.appendingPathComponent("\(name).sqlite"),
+            blobDirectory: root.appendingPathComponent("\(name)-blobs"), deviceID: device,
+            binding: binding)
+    }
+}
