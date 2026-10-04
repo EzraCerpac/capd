@@ -115,7 +115,7 @@ It neither deletes nor acknowledges old operations and makes no authority import
 The default remains `importReviewed`; the connection UI requires an explicit
 archive-only selection before omitting the import review and receipt.
 
-## Projection and revision foundation
+## Projection and search ownership
 
 `LibraryModel.librarySession` exposes the selected session. Session saves and reads
 return the canonical capture with its generation and binding. Managed store access
@@ -123,9 +123,11 @@ holds the same generation fence used for activation.
 
 The preserved store schema includes a transactional `mobile_system_search` UUID
 revision marker. Every local or remote projection updates it in the same database
-transaction. Snapshot and acknowledgement APIs, a repair journal, and a search
-lease remain portable foundation; the app and share extension do not index or
-donate captures to an operating-system service in this client.
+transaction. The app reads a complete snapshot and acknowledges only the revision it
+reconciled. Search leases hold the selected generation through scoped OS writes;
+a durable repair journal retains potentially indexed libraries until removal
+succeeds. Library transitions drain search work before activation. The share
+extension leaves OS indexing to the app.
 
 The connection screen can send a credential-free, bounded HTTPS request from the
 device. HTTP 401 establishes reachability to an authentication boundary, not the

@@ -41,6 +41,7 @@ struct AttentionHintView: View {
 struct SyncSettingsView: View {
     let state: AutomaticSyncState
     let retry: () -> Void
+    var systemSearch: PhoneSystemSearch? = nil
     var connection: PhoneLibraryConnection? = nil
     @Environment(\.dismiss) private var dismiss
     @State private var showingSetup = false
@@ -50,6 +51,32 @@ struct SyncSettingsView: View {
             Form {
                 Section("On this device") {
                     Text("Captures save here immediately and stay available offline.")
+                }
+                if let systemSearch {
+                    Section("System search") {
+                        Toggle(
+                            "Find captures in Spotlight and Shortcuts",
+                            isOn: Binding(
+                                get: { systemSearch.enabled }, set: { systemSearch.setEnabled($0) })
+                        )
+                        .accessibilityIdentifier("systemSearchEnabled")
+                        Text(
+                            "Share saved titles and your manual tags with this device’s system search. Source text and notes are excluded. Shared captures appear after capd next opens. Turning this off removes capd’s indexed entries."
+                        )
+                        .font(.footnote)
+                        if systemSearch.updating {
+                            ProgressView("Updating system search")
+                        } else if let error = systemSearch.error {
+                            Text(error).accessibilityIdentifier("systemSearchError")
+                            Button("Retry search update") { systemSearch.retry() }
+                        } else {
+                            Text(
+                                systemSearch.enabled
+                                    ? "System search is ready" : "System search is off"
+                            )
+                            .accessibilityIdentifier("systemSearchStatus")
+                        }
+                    }
                 }
                 Section("Device sync") {
                     HStack {

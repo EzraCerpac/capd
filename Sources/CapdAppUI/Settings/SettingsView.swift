@@ -50,6 +50,13 @@ package struct SettingsView: View {
                 .padding(.bottom, 8)
             }
             section("Intelligence") {
+                row("Find titles and manual tags in system search") {
+                    toggle($settings.systemSearchEnabled)
+                }
+                if let issue = settings.systemSearchIssue {
+                    Text(issue).font(.caption).foregroundStyle(Theme.textSecondary)
+                }
+                hairline
                 row("Auto-tag captures on device") {
                     toggle($settings.autoTagsCaptures)
                         .disabled(settings.autoTagsUnavailableReason != nil)

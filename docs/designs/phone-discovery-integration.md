@@ -1,0 +1,28 @@
+# Phone search integration
+
+`CapdSystemIntegration` supplies stable references, strict routes, foreground
+App Intents, and named Core Spotlight indexing. The phone project supports iPhone
+and iPad; its saved-source rows retain the shared adaptive styling.
+
+`PhoneSystemSearch` receives the complete selected-session projection from
+`LibraryModel`, independently of the visible search filter. Bound libraries use
+the persisted library UUID; unbound libraries use a stable local UUID. Saved
+titles and manual tags are the only indexed content. Source bodies and notes are
+excluded. The named index uses complete file protection.
+
+Consent starts off. Settings shows updating, ready, off, or an actionable failure.
+Opt-out invalidates routing immediately and serializes scoped index deletion.
+The repair journal retains library scopes before OS writes and retires them only
+after confirmed deletion. Session-generation changes rebuild the index. The share
+extension writes a transactional revision marker; the app reconciles after it
+next opens. Libraries over 1,000 captures fail closed.
+
+Strict `capd://find` and `capd://open` links and Spotlight activities resolve
+through the current host. Cold routes wait for the complete snapshot and obey
+consent. Find changes the filter; Open resolves the saved capture again; Capture
+Text stages an unsaved draft. No intent starts network work.
+
+Portable tests use synthetic stores and memory index backends. The OS smoke test
+and iPad UI tests are opt-in. An unsigned generic simulator build verifies
+compilation; it does not establish signed-app shortcut discovery or actual OS
+query results. Spotlight tag-only query behavior remains unresolved.

@@ -1,6 +1,8 @@
 import AppKit
 import CapdAppUI
 import CapdKit
+import CapdSystemIntegration
+import CoreSpotlight
 import SwiftUI
 
 extension NSImage {
@@ -18,6 +20,14 @@ extension NSImage {
 /// app has none to give it.
 final class AppDelegate: NSObject, NSApplicationDelegate {
     var openURLs: (([URL]) -> Void)?
+    var continueActivity: ((NSUserActivity) -> Bool)?
+
+    func application(
+        _ application: NSApplication, continue userActivity: NSUserActivity,
+        restorationHandler: @escaping ([any NSUserActivityRestoring]) -> Void
+    ) -> Bool {
+        continueActivity?(userActivity) ?? false
+    }
 
     func application(_ application: NSApplication, open urls: [URL]) {
         openURLs?(urls)
@@ -59,6 +69,11 @@ struct CapdApp: App {
         let state = AppState()
         self.state = state
         delegate.openURLs = { state.capture(handoffs: $0) }
+        delegate.continueActivity = { activity in
+            guard let route = CaptureRoute(spotlightActivity: activity) else { return false }
+            state.receiveSystemRoute(route)
+            return true
+        }
     }
 
     var body: some Scene {

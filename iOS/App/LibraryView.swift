@@ -1,8 +1,10 @@
 import CapdDesignSystem
 import CapdMobile
+import CapdSystemIntegration
 import SwiftUI
 
 struct LibraryView: View {
+    @Environment(CaptureSystemBridge.self) private var systemBridge
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.colorSchemeContrast) private var contrast
     private var palette: CapdPalette {
@@ -11,6 +13,8 @@ struct LibraryView: View {
     @State private var model = LibraryModel()
     @State private var capturing = false
     @State private var showingSyncSettings = false
+    @State private var openedCapture: UUID?
+    @State private var stagedText = ""
     @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
@@ -72,21 +76,35 @@ struct LibraryView: View {
             )
             .onChange(of: model.query) { _, _ in model.reload() }
             .onChange(of: scenePhase) { _, phase in model.sceneChanged(active: phase == .active) }
+            .task {
+                model.systemSearch.connect(systemBridge)
+                consumeSystemAction()
+            }
+            .onChange(of: systemBridge.pendingAction) { _, _ in consumeSystemAction() }
+            .onChange(of: systemBridge.routingError) { _, message in
+                if let message { model.error = message }
+            }
+            .navigationDestination(item: $openedCapture) { id in
+                CaptureDetailView(captureID: id, model: model)
+            }
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
                     Button("Device sync", systemImage: "gearshape") { showingSyncSettings = true }
                         .accessibilityIdentifier("deviceSyncSettings")
                 }
                 ToolbarItem(placement: .topBarTrailing) {
-                    Button("Capture", systemImage: "plus") { capturing = true }
-                        .accessibilityIdentifier("captureButton")
+                    Button("Capture", systemImage: "plus") {
+                        stagedText = ""
+                        capturing = true
+                    }
+                    .accessibilityIdentifier("captureButton")
                 }
             }
-            .sheet(isPresented: $capturing) { CaptureForm(model: model) }
+            .sheet(isPresented: $capturing) { CaptureForm(model: model, initialText: stagedText) }
             .sheet(isPresented: $showingSyncSettings) {
                 SyncSettingsView(
                     state: model.syncState, retry: { model.retrySync() },
-                    connection: model.connection)
+                    systemSearch: model.systemSearch, connection: model.connection)
             }
             .alert(
                 "Library message",
@@ -98,6 +116,23 @@ struct LibraryView: View {
                 Text(model.error ?? "")
             }
         }.capdCanvas()
+    }
+
+    private func consumeSystemAction() {
+        guard let action = systemBridge.consumeAction() else { return }
+        switch action {
+        case .find(let query):
+            openedCapture = nil
+            model.query = query
+            model.reload()
+        case .open(let reference):
+            model.reload()
+            guard model.capture(id: reference.captureID) != nil else { return }
+            openedCapture = reference.captureID
+        case .stageText(let text):
+            stagedText = text
+            capturing = true
+        }
     }
 }
 
@@ -114,6 +149,12 @@ struct CaptureForm: View {
     @State private var note = ""
     @State private var validationMessage: String?
     @Environment(\.dismiss) private var dismiss
+
+    init(model: LibraryModel, initialText: String = "") {
+        self.model = model
+        _text = State(initialValue: initialText)
+        _isLink = State(initialValue: initialText.isEmpty)
+    }
 
     var body: some View {
         NavigationStack {
@@ -183,7 +224,7 @@ struct CaptureDetailView: View {
                 Section {
                     Text(capture.title).font(CapdTypography.title).foregroundStyle(palette.text)
                         .textSelection(.enabled)
-                    Label("Available on this iPhone", systemImage: "iphone")
+                    Label("Available on this device", systemImage: "iphone")
                         .font(.subheadline).foregroundStyle(palette.textSecondary)
                     Text(capture.createdAt, style: .date).font(CapdTypography.metadata)
                         .foregroundStyle(palette.textSecondary)

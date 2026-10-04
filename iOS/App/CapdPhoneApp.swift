@@ -1,16 +1,39 @@
+import AppIntents
 import CapdMobile
+import CapdSystemIntegration
+import CoreSpotlight
 import SwiftUI
 
 @main
 struct CapdPhoneApp: App {
+    @State private var systemIntegration: CaptureSystemBridge
+
+    init() {
+        let bridge = CaptureSystemBridge()
+        bridge.install()
+        _systemIntegration = State(initialValue: bridge)
+    }
+
     var body: some Scene {
-        WindowGroup { LibraryView() }
+        WindowGroup {
+            LibraryView()
+                .environment(systemIntegration)
+                .onOpenURL { url in
+                    if let route = CaptureRoute(url: url) { systemIntegration.receive(route) }
+                }
+                .onContinueUserActivity(CSSearchableItemActionType) { activity in
+                    if let route = CaptureRoute(spotlightActivity: activity) {
+                        systemIntegration.receive(route)
+                    }
+                }
+        }
     }
 }
 
 @MainActor
 @Observable
 final class LibraryModel {
+    let systemSearch = PhoneSystemSearch()
     var captures: [MobileCapture] = []
     var query = ""
     var error: String?
@@ -89,6 +112,7 @@ final class LibraryModel {
         connectivity = nil
         await previousStateTask?.value
         await scheduler?.suspendAndDrain()
+        await systemSearch.suspendAndDrain()
     }
 
     private func finishTransition() async {
@@ -110,6 +134,7 @@ final class LibraryModel {
             capturesByID = Dictionary(uniqueKeysWithValues: library.map { ($0.id, $0) })
             captures = query.isEmpty ? library : try store?.search(query) ?? []
             loadedLibraryRevision = revision
+            if let librarySession { systemSearch.refresh(session: librarySession) }
         } catch {
             if error as? MobileActivationError == .sessionReplaced {
                 Task {

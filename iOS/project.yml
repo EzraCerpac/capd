@@ -10,10 +10,12 @@ packages:
     path: ../Packages/CapdSync
   CapdMobile:
     path: ../Packages/CapdMobile
+  CapdSystemIntegration:
+    path: ../Packages/CapdSystemIntegration
 settings:
   base:
     SWIFT_VERSION: "6.0"
-    TARGETED_DEVICE_FAMILY: "1"
+    TARGETED_DEVICE_FAMILY: "1,2"
     CODE_SIGN_STYLE: Manual
     CODE_SIGN_IDENTITY: "-"
     DEVELOPMENT_TEAM: ""
@@ -31,6 +33,7 @@ targets:
     dependencies:
       - package: CapdMobile
       - package: CapdDesignSystem
+      - package: CapdSystemIntegration
       - target: CapdPhoneShare
         embed: true
   CapdPhoneShare:
@@ -47,6 +50,7 @@ targets:
     dependencies:
       - package: CapdMobile
       - package: CapdDesignSystem
+      - package: CapdSystemIntegration
   CapdPhoneUITests:
     type: bundle.ui-testing
     platform: iOS

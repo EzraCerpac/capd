@@ -3,6 +3,7 @@ import ApplicationServices
 import CapdAppUI
 import CapdHandoff
 import CapdKit
+import CapdSystemIntegration
 import KeyboardShortcuts
 import Observation
 import SwiftUI
@@ -39,6 +40,8 @@ final class AppState {
     @ObservationIgnored private var permissionTask: Task<Void, Never>?
     @ObservationIgnored private var librarySession: MacLibrarySession?
     @ObservationIgnored private var syncTask: Task<Void, Never>?
+    @ObservationIgnored private var systemSearch: MacSystemSearch?
+    @ObservationIgnored private var systemSearchTask: Task<Void, Never>?
 
     enum MenuBarGlyph {
         case dropTarget
@@ -132,6 +135,10 @@ final class AppState {
     /// Captures pages handed over as `capd://capture` URLs, e.g. by the share extension.
     func capture(handoffs urls: [URL]) {
         for url in urls {
+            if let route = CaptureRoute(url: url) {
+                receiveSystemRoute(route)
+                continue
+            }
             guard let payload = ShareHandoff.payload(from: url) else {
                 Log.capture.error("dropped a malformed handoff URL")
                 continue
@@ -215,6 +222,13 @@ final class AppState {
         }
     }
 
+    func receiveSystemRoute(_ route: CaptureRoute) { systemSearch?.receive(route) }
+
+    isolated deinit {
+        syncTask?.cancel()
+        systemSearchTask?.cancel()
+    }
+
     private func start() throws {
         let session = try MacLibrarySession.open(paths: .live)
         librarySession = session
@@ -291,7 +305,8 @@ final class AppState {
             settings.autoTagsUnavailableReason = reason.explanation
         }
 
-        let searchService = SearchService(store: store)
+        let searchService = SearchService(
+            store: try MacLibrarySession.readOnlyStore(paths: store.paths))
         let insightEngine = ContextInsightEngine(providers: [
             PreviouslySavedInsightProvider(findCapture: { try searchService.capture(url: $0) })
         ])
@@ -335,6 +350,7 @@ final class AppState {
             environment: .live(
                 searchService: searchService,
                 store: store,
+                queryStore: { try MacLibrarySession.readOnlyStore(paths: store.paths) },
                 setReminder: { id, date in
                     _ = try store.scheduleReminder(id: id, at: date)
                     reminderScheduler.reload()
@@ -342,6 +358,44 @@ final class AppState {
                 openURL: openURL,
                 showHUD: { hud.show($0) }),
             favicons: favicons)
+        let discovery = MacSystemSearch(paths: store.paths, enabled: settings.systemSearchEnabled) {
+            [weak self] action, localID in
+            guard let self else { return }
+            switch action {
+            case .find(let query): self.search?.show(query: query)
+            case .open:
+                let reader = try MacLibrarySession.readOnlyStore(paths: store.paths)
+                guard let localID,
+                    let capture = try SearchService(store: reader).capture(id: localID)
+                else { throw SystemIntegrationError.missingCapture }
+                self.search?.show(capture: capture)
+            case .stageText(let text):
+                let alert = NSAlert()
+                alert.messageText = "Save text to capd"
+                let draft = NSTextField(wrappingLabelWithString: text)
+                draft.isEditable = true
+                draft.isSelectable = true
+                draft.frame = NSRect(x: 0, y: 0, width: 360, height: 140)
+                alert.accessoryView = draft
+                alert.addButton(withTitle: "Save")
+                alert.addButton(withTitle: "Cancel")
+                NSApp.activate()
+                if alert.runModal() == .alertFirstButtonReturn {
+                    self.coordinator?.capture(
+                        request: CaptureRequest(text: draft.stringValue, fetchBody: false))
+                }
+            }
+        }
+        discovery.reportIssue = { [weak settings] issue in settings?.systemSearchIssue = issue }
+        systemSearch = discovery
+        discovery.install()
+        settings.systemSearchChanged = { [weak discovery] in discovery?.setEnabled($0) }
+        systemSearchTask = Task { [weak discovery] in
+            while !Task.isCancelled {
+                discovery?.refresh()
+                do { try await Task.sleep(for: .seconds(5)) } catch { return }
+            }
+        }
         reminderScheduler.start()
         totalCaptures = { (try? searchService.totalCaptureCount()) ?? 0 }
 
@@ -499,17 +553,22 @@ extension SearchEnvironment {
     static func live(
         searchService: SearchService,
         store: Store,
+        queryStore: (@Sendable () throws -> Store)? = nil,
         setReminder: (@MainActor (Int64, Date) throws -> Void)? = nil,
         openURL: @escaping @MainActor (URL) -> Void = { NSWorkspace.shared.open($0) },
         showHUD: @escaping @MainActor (HUDContent) -> Void
     ) -> SearchEnvironment {
         let answers = LibraryAnswerService(search: searchService)
+        let querySearch: @Sendable () throws -> SearchService = {
+            if let queryStore { return SearchService(store: try queryStore()) }
+            return searchService
+        }
         return SearchEnvironment(
-            search: { try searchService.search($0) },
-            totalCount: { try searchService.totalCaptureCount() },
-            tags: { try store.tagUsage().map(\.tag) },
+            search: { try querySearch().search($0) },
+            totalCount: { try querySearch().totalCaptureCount() },
+            tags: { try (queryStore?() ?? store).tagUsage().map(\.tag) },
             answerAvailability: { answers.availability() },
-            answer: { try await answers.answer($0) },
+            answer: { try await LibraryAnswerService(search: querySearch()).answer($0) },
             setRating: { id, rating in
                 _ = try store.updateRating(id: id, rating: rating)
             },
@@ -518,7 +577,7 @@ extension SearchEnvironment {
                 _ = try store.scheduleReminder(id: id, at: date)
             },
             openCapture: { id in
-                guard let capture = try? searchService.capture(id: id) else { return }
+                guard let capture = try? querySearch().capture(id: id) else { return }
                 if let rawURL = capture.url, let url = URL(string: rawURL) {
                     openURL(url)
                 } else if let path = capture.assetPath {

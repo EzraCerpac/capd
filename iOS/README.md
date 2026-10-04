@@ -5,6 +5,12 @@ resolves note variants, and deletes captures. The share extension writes to the 
 App Group SQLite database while the main app is closed. The library refreshes when
 active. Web fetching, OCR and image capture are not implemented in the mobile UI.
 
+Device sync settings includes an opt-in for Spotlight and Shortcuts. It indexes
+saved titles and manual tags. The complete library is reconciled after local edits
+and sync projection, independently of the visible filter. Strict search links
+support cold launch; Capture Text stages a draft requiring Save. Libraries over
+1,000 captures fail closed. See [discovery integration](../docs/designs/phone-discovery-integration.md).
+
 `Packages/CapdMobile` uses the shared `CapdSync` outbox, device identity and sequence.
 There is no separate mobile pending queue or set-of-IDs acknowledgement path. Local
 source rows and their FTS index are a transactional projection of accepted shared
