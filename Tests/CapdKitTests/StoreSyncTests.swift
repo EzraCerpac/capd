@@ -7,6 +7,183 @@ import Testing
 
 @Suite("Opt-in Mac Store sync")
 struct StoreSyncTests {
+    @Test("Thin extraction remains retryable locally, on peers and through same-body corrections")
+    func thinExtractionQuality() throws {
+        try fixture { paths, binding, server in
+            let store = try Store(paths: paths, syncBinding: binding)
+            let client = try #require(store.syncClient)
+            let service = CaptureService(store: store)
+            let request = CaptureRequest(url: "https://example.invalid/login")
+            let capture = try service.ingest(request).capture
+            _ = try store.claimForEnrichment(id: capture.id!)
+            let body = "Sign in to continue reading"
+            _ = try store.completeEnrichment(
+                id: capture.id!,
+                result: StepResult(
+                    bodyExtraction: BodyExtractionResult(body: body, status: .thin, source: .fetch)),
+                state: .thin)
+            let local = try #require(try SearchService(store: store).capture(id: capture.id!))
+            #expect(local.body == body)
+            #expect(local.bodyStatus == .thin)
+            #expect(local.enrichmentState == .thin)
+            #expect(StoreSync.snapshot(local, id: UUID()).generated.bodyIsThin == true)
+            let transport = StoreTestTransport(
+                server: server, binding: binding, deviceID: client.deviceID)
+            try client.push(to: transport)
+            let peerPaths = StoragePaths(root: paths.root.appendingPathComponent("quality-peer"))
+            let peer = try Store(paths: peerPaths, syncBinding: binding)
+            let peerClient = try #require(peer.syncClient)
+            let peerTransport = StoreTestTransport(
+                server: server, binding: binding, deviceID: peerClient.deviceID)
+            try peerClient.pull(from: peerTransport)
+            let received = try #require(try peer.reader.read { try Capture.fetchOne($0) })
+            #expect(received.bodyStatus == .thin)
+            #expect(received.enrichmentState == .thin)
+            #expect(
+                try CaptureService(store: peer).ingest(request).capture.enrichmentState == .pending)
+            #expect(try service.ingest(request).capture.enrichmentState == .pending)
+            _ = try store.claimForEnrichment(id: capture.id!)
+            _ = try store.completeEnrichment(
+                id: capture.id!,
+                result: StepResult(
+                    bodyExtraction: BodyExtractionResult(body: body, status: .ok, source: .fetch)),
+                state: .ok)
+            #expect(
+                try client.pendingOperations().contains { operation in
+                    guard case .edit(let edit) = operation.mutation else { return false }
+                    return edit.generatedPatch?.body == nil
+                        && edit.generatedPatch?.bodyIsThin == false
+                })
+            try client.push(to: transport)
+            try peerClient.push(to: peerTransport)
+            try peerClient.pull(from: peerTransport)
+            let corrected = try #require(try SearchService(store: peer).capture(id: received.id!))
+            #expect(corrected.body == body)
+            #expect(corrected.bodyStatus == .ok)
+            #expect(corrected.enrichmentState == .ok)
+        }
+    }
+
+    @Test("Incoming thin or empty bodies retain their quality through stale enrichment completion")
+    func incomingThinBodyWinsOverStaleCompletion() throws {
+        for (body, isThin) in [("Remote login wall", true), ("", false)] {
+            try fixture { paths, binding, server in
+                let store = try Store(paths: paths, syncBinding: binding)
+                let client = try #require(store.syncClient)
+                let local = try CaptureService(store: store).ingest(
+                    CaptureRequest(url: "https://example.invalid/race")
+                ).capture
+                let transport = StoreTestTransport(
+                    server: server, binding: binding, deviceID: client.deviceID)
+                try client.push(to: transport)
+                let claim = try #require(try store.claimForEnrichment(id: local.id!))
+                let shared = try #require(try server.baseline().captures.first)
+                _ = try server.apply(
+                    SyncOperation(
+                        deviceID: UUID(), sequence: 1, captureID: shared.id,
+                        baseRevision: shared.revision,
+                        mutation: .edit(
+                            CaptureEdit(
+                                generatedPatch: GeneratedContentPatch(
+                                    body: .set(body), bodyIsThin: isThin)))))
+                try client.pull(from: transport)
+                let completed = try store.completeEnrichment(
+                    id: local.id!,
+                    result: StepResult(
+                        bodyExtraction: BodyExtractionResult(
+                            body: "Stale healthy body", status: .ok, source: .fetch)), state: .ok,
+                    expectedClaim: claim)
+                #expect(completed.body == body)
+                #expect(completed.bodyStatus == .thin)
+                #expect(completed.enrichmentState == .thin)
+                #expect(try client.pendingOperations().isEmpty)
+            }
+        }
+    }
+
+    @Test("Oversized synced images fail before writing assets or allocating outbox sequences")
+    func oversizedImageLeavesNoAsset() throws {
+        try fixture { paths, binding, _ in
+            let store = try Store(paths: paths, syncBinding: binding)
+            let bytes = Data(repeating: 0x5a, count: 8_388_609)
+            let filesBefore = try FileManager.default.subpathsOfDirectory(
+                atPath: paths.assetsDirectory.path
+            ).sorted()
+            #expect(throws: CaptureError.imageTooLarge) {
+                try CaptureService(store: store).ingest(CaptureRequest(imageData: bytes))
+            }
+            #expect(try SearchService(store: store).totalCaptureCount() == 0)
+            #expect(try store.syncClient?.pendingOperations().isEmpty == true)
+            #expect(
+                try FileManager.default.subpathsOfDirectory(atPath: paths.assetsDirectory.path)
+                    .sorted() == filesBefore)
+            let accepted = try CaptureService(store: store).ingest(
+                CaptureRequest(imageData: bytes.prefix(8_388_608))
+            ).capture
+            #expect(accepted.assetPath != nil)
+            #expect(try store.syncClient?.pendingOperations().map(\.sequence) == [1])
+            let local = try Store(
+                paths: StoragePaths(root: paths.root.appendingPathComponent("unbound")))
+            #expect(
+                try CaptureService(store: local).ingest(CaptureRequest(imageData: bytes)).capture
+                    .assetPath != nil)
+        }
+    }
+
+    @Test("Taxonomy revision rebuilds the library once per batch and keeps manual tags")
+    func taxonomyRevisionProjectsOncePerBatch() throws {
+        try fixture { paths, binding, server in
+            let store = try Store(paths: paths, syncBinding: binding)
+            let client = try #require(store.syncClient)
+            let remote = UUID()
+            for index in 1...30 {
+                var record = SharedCapture(
+                    source: CaptureSource(kind: .text, contentHash: "revision-\(index)"))
+                record.manualTags = ["manual"]
+                record.generated = GeneratedContent(
+                    tags: [index.isMultiple(of: 2) ? "keep" : "drop"], taggingProcessed: true,
+                    taggingInputFingerprint: "old")
+                _ = try server.apply(
+                    SyncOperation(
+                        deviceID: remote, sequence: Int64(index), captureID: record.id,
+                        baseRevision: 0, mutation: .create(record)))
+            }
+            let transport = StoreTestTransport(
+                server: server, binding: binding, deviceID: client.deviceID)
+            try client.pull(from: transport)
+            try store.dbPool.write { db in
+                try db.execute(sql: "CREATE TABLE revision_writes (id INTEGER)")
+                try db.execute(
+                    sql:
+                        "CREATE TRIGGER audit_revision AFTER UPDATE ON captures BEGIN INSERT INTO revision_writes VALUES (NEW.id); END"
+                )
+            }
+            try store.applyTaxonomyRevision(
+                mapping: ["keep": "renamed"],
+                taxonomy: Taxonomy(version: 2, tags: ["renamed"], updatedAt: Date()),
+                batchSize: 10)
+            #expect(try client.pendingOperations().count == 30)
+            #expect(
+                try store.reader.read {
+                    try Int.fetchOne($0, sql: "SELECT COUNT(*) FROM revision_writes")
+                } == 120)
+            let records = try client.captures()
+            #expect(records.allSatisfy { $0.manualTags == ["manual"] })
+            #expect(records.filter { $0.generated.tags == ["renamed"] }.count == 15)
+            #expect(
+                records.filter {
+                    $0.generated.tags.isEmpty && $0.generated.taggingProcessed == false
+                }.count == 15)
+            try client.push(to: transport)
+            let committed = try server.baseline().captures
+            #expect(committed.allSatisfy { $0.manualTags == ["manual"] })
+            #expect(committed.filter { $0.generated.tags == ["renamed"] }.count == 15)
+            #expect(
+                committed.filter {
+                    $0.generated.tags.isEmpty && $0.generated.taggingProcessed == false
+                }.count == 15)
+        }
+    }
     @Test("Ordinary capture, annotation, rating, reminder and recapture paths reach the authority")
     func userMutations() throws {
         try fixture { paths, binding, server in

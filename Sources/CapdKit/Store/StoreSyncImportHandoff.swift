@@ -22,7 +22,8 @@ public struct StoreSyncImportHandoff: Sendable {
         credential: @escaping @Sendable () throws -> String
     ) async throws {
         guard store.syncClient == nil else { throw SyncError.invalidOperation }
-        let baseline = try await transport.importBaseline(credential: credential)
+        let baseline = try await transport.importBaseline(
+            credential: credential, requiringExtractionQualityContract: true)
         try Task.checkCancellation()
         try self.init(
             store: store, binding: transport.binding, deviceID: transport.deviceID,

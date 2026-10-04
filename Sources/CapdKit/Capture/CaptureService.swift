@@ -5,6 +5,7 @@ public enum CaptureError: Error, Equatable, Sendable {
     case invalidURL(String)
     case secureInputActive
     case notFound(Int64)
+    case imageTooLarge
 }
 
 extension CaptureError: LocalizedError {
@@ -14,6 +15,7 @@ extension CaptureError: LocalizedError {
         case .invalidURL(let candidate): "Not a capturable link: \(candidate)"
         case .secureInputActive: "Capture blocked — secure input active."
         case .notFound(let id): "No capture with id \(id)."
+        case .imageTooLarge: "Images in a synced library must be 8 MiB or smaller."
         }
     }
 }
@@ -119,6 +121,9 @@ public struct CaptureService: Sendable {
             )
 
         case .image(let imageData):
+            guard store.syncClient == nil || imageData.count <= 8_388_608 else {
+                throw CaptureError.imageTooLarge
+            }
             let digest = CaptureIdentity.contentHash(for: imageData)
             return Capture(
                 kind: .image,

@@ -7,6 +7,38 @@ import Testing
 
 @Suite("CLI bound Mac runtime", .timeLimit(.minutes(1)))
 struct CLISyncRuntimeTests {
+    @Test func partialWriteErrorsFlushBeforeReturningTheirExitCode() throws {
+        try withScratchRoot { root in
+            let paths = StoragePaths(root: root)
+            let binding = SyncLibraryBinding(libraryID: UUID(), serviceID: UUID())
+            let device = UUID()
+            let store = try Store(paths: paths, syncBinding: binding, deviceID: device)
+            let enrollment = try SyncEnrollment(
+                endpoint: URL(string: "https://sync.example.invalid/v1/sync")!, binding: binding,
+                deviceID: device)
+            try MacSyncConfiguration(enrollment: enrollment).install(paths: paths)
+            let bulk = try capd(
+                ["add", "-", "--no-fetch"],
+                stdin: "https://example.invalid/valid\nhttps:///missing-host\n", root: root)
+            #expect(bulk.status == 2)
+            #expect(bulk.stderr.contains("credential"))
+            #expect(try store.syncClient?.pendingOperations().count == 1)
+            let imported = try capd(
+                ["import", "pinboard", "-"],
+                stdin: #"[{"href":"https://example.invalid/imported"},{"href":"not a link"}]"#,
+                root: root)
+            #expect(imported.status == 2)
+            #expect(imported.stderr.contains("credential"))
+            #expect(try store.syncClient?.pendingOperations().count == 2)
+            let captures = try store.reader.read { try Capture.fetchAll($0) }
+            let id = try #require(captures.first?.id)
+            let removed = try capd(["rm", String(id), "999999"], root: root)
+            #expect(removed.status == 1)
+            #expect(removed.stderr.contains("credential"))
+            #expect(try SearchService(store: store).capture(id: id) == nil)
+            #expect(try store.syncClient?.pendingOperations().count == 3)
+        }
+    }
     @Test func pausedCLIProcessesShareAppAndAgentOutbox() async throws {
         let root = URL(fileURLWithPath: "/private/tmp/capd-cli-bound-\(UUID())")
         defer { try? FileManager.default.removeItem(at: root) }

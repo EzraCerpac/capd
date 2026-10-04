@@ -39,7 +39,8 @@ degraded indicator and CLI stderr. They are never discarded or resequenced.
 The app polls from a background sync actor every five seconds (30 seconds after
 an issue). The agent syncs before processing incoming pending captures and after
 writing generated results. Ordinary CLI commands try a five-second flush after
-successful local work; a network problem does not undo the saved capture.
+local work, including committed partial writes when the command returns an error;
+a network problem does not undo the saved capture.
 `capd sync run` waits up to 35 seconds and returns exit code 3 for offline,
 attention or timeout. Cancellation joins the in-flight attempt before returning,
 so its lease cannot leak. SQLite busy waits can add up to five seconds.
@@ -49,7 +50,10 @@ so its lease cannot leak. SQLite busy waits can add up to five seconds.
 
 A new incoming text capture is enrichment-ready. A link with no generated body or
 an image with no OCR stays pending; generated body/OCR makes an otherwise pending
-row ready. Existing fetching claims are retained, and the bound agent startup
+row ready. Shared extraction quality keeps nonempty login/paywall bodies thin;
+empty bodies remain thin and recapturing a thin body preserves its local retry queue.
+Synced image captures reject data above 8 MiB before writing an asset.
+Existing fetching claims are retained, and the bound agent startup
 reclaims only claims older than the normal stale age. Claim writes select one
 winner across processes. A completion from an obsolete claim does not overwrite
 a newer claim; body/OCR received while its worker was running take precedence over
@@ -93,8 +97,9 @@ Nothing here authorizes changing an existing live Mac library or phone.
    attaches only to its exact initial imported baseline (cursor 1, no device
    sequence history); ordinary enrollment continues to require an empty library.
    An empty fresh Store refuses a device whose authority sequence is advanced.
-3. Confirm authority support for metadata contract 1 and generated-processing
-   contract 1/envelope 3, HTTPS connectivity and the exact service/library/device
+3. Confirm authority support for metadata contract 1, generated-processing
+   contract 1/envelope 3 and extraction-quality contract 1/envelope 4,
+   HTTPS connectivity and the exact service/library/device
    principal. Provision the device's matching credential in the shared Keychain
    service in a separately authorized step. Runtime activation does not create,
    save, delete or grant credentials.

@@ -90,10 +90,13 @@ extension Store {
             }
             updated.enrichmentState = state
             if preserveBody && updated.kind == .link {
+                let id = try StoreSync.identity(db, capture: current)
+                let shared = try StoreSync.visible(db, id: id)
+                let isThin = updated.body?.isEmpty == true || shared?.generated.bodyIsThin == true
                 updated.enrichmentState =
-                    updated.body == nil ? .pending : updated.body!.isEmpty ? .thin : .ok
+                    updated.body == nil ? .pending : isThin ? .thin : .ok
                 updated.bodyStatus =
-                    updated.body == nil ? .none : updated.body!.isEmpty ? .thin : .ok
+                    updated.body == nil ? .none : isThin ? .thin : .ok
             } else if preserveOCR && updated.kind == .image {
                 updated.enrichmentState = updated.ocrText == nil ? .pending : .ok
             }
@@ -101,6 +104,7 @@ extension Store {
             try updated.updateChanges(db, from: current)
             if current.title != updated.title || current.body != updated.body
                 || current.ocrText != updated.ocrText
+                || (!preserveBody && current.bodyStatus != updated.bodyStatus)
             {
                 try enqueueChanges(from: current, to: updated, in: db)
             }

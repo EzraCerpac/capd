@@ -12,6 +12,21 @@ import synthetic_library_migration as migration
 
 
 class MigrationTests(unittest.TestCase):
+    def test_imported_capture_preserves_extraction_quality_without_inferring_from_body(self):
+        identity = str(uuid.uuid4())
+        payload = {"blob": None, "generatedTags": [], "manualTags": [], "legacyRow": {
+            "kind": "link", "seen_count": 1, "created_at": "2026-03-01T00:00:00Z"}}
+        row = payload["legacyRow"]
+        for body, status, state, expected in (("Login wall", "thin", "thin", True),
+                                              ("Healthy body", "ok", "ok", False),
+                                              ("", "thin", "pending", True),
+                                              (None, "failed", "failed", None)):
+            row.update(body=body, body_status=status, enrichment_state=state)
+            generated = migration.imported_capture(identity, payload, uuid.uuid4())["generated"]
+            self.assertEqual(expected, generated.get("bodyIsThin"))
+            if body is None:
+                self.assertNotIn("bodyIsThin", generated)
+
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory(prefix="capd-synthetic-migration-")
         self.root = Path(self.temporary.name).resolve()

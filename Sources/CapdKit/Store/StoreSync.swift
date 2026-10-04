@@ -130,8 +130,13 @@ enum StoreSync {
             case .text:
                 capture.enrichmentState = .ok
             case .link where record.generated.body != nil:
-                capture.enrichmentState = record.generated.body!.isEmpty ? .thin : .ok
-                capture.bodyStatus = record.generated.body!.isEmpty ? .thin : .ok
+                let isThin = record.generated.body!.isEmpty || record.generated.bodyIsThin == true
+                let status: BodyStatus = isThin ? .thin : .ok
+                let keepPending =
+                    capture.enrichmentState == .pending
+                    && original?.body == record.generated.body && capture.bodyStatus == status
+                capture.enrichmentState = keepPending ? .pending : isThin ? .thin : .ok
+                capture.bodyStatus = isThin ? .thin : .ok
             case .image where record.generated.ocrText != nil:
                 capture.enrichmentState = .ok
             case .link where original?.body != nil:
@@ -240,6 +245,12 @@ extension Store {
         var changedGenerated = false
         if before.body != after.body {
             generated.body = after.body.map(TextUpdate.set) ?? .clear
+            changedGenerated = true
+        }
+        if after.body != nil,
+            before.body != after.body || before.bodyStatus != after.bodyStatus
+        {
+            generated.bodyIsThin = after.bodyStatus == .thin || after.enrichmentState == .thin
             changedGenerated = true
         }
         if before.ocrText != after.ocrText {

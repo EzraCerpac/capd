@@ -51,6 +51,10 @@ enum SyncPrototype {
             record.generated.tags = capture.tagList
         }
         record.generated.body = capture.body
+        if capture.body != nil {
+            record.generated.bodyIsThin =
+                capture.bodyStatus == .thin || capture.enrichmentState == .thin
+        }
         record.generated.ocrText = capture.ocrText
         return record
     }

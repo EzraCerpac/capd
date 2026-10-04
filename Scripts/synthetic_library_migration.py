@@ -355,6 +355,8 @@ def imported_capture(identity, payload, import_id):
     for shared, legacy in (("body", "body"), ("ocrText", "ocr_text")):
         if row.get(legacy) is not None:
             generated[shared] = row[legacy]
+    if row.get("body") is not None:
+        generated["bodyIsThin"] = row.get("body_status") == "thin" or row.get("enrichment_state") == "thin"
     record = {"id": str(uuid.UUID(identity)).upper(), "source": source,
               "createdAt": shared_date(row["created_at"]), "revision": 1, "deleted": False,
               "seenCount": seen_count, "noteRevision": 1,

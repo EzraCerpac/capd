@@ -324,6 +324,7 @@ extension Store {
             guard !rows.isEmpty else { break }
 
             try write { db in
+                var edits: [(captureID: UUID, edit: CaptureEdit)] = []
                 for row in rows {
                     let id: Int64 = row["id"]
                     guard let before = try Capture.fetchOne(db, key: id) else { continue }
@@ -357,13 +358,25 @@ extension Store {
                         ])
                     if var updated = try Capture.fetchOne(db, key: id) {
                         updated.updatedAt = now
-                        try enqueueChanges(
-                            from: before, to: updated, in: db, generatedTags: mapped,
-                            taggingProcessing: mapped.isEmpty || before.tagsVersion == 0
-                                ? .pending
-                                : .processed(inputFingerprint: TaggingFingerprint.of(updated)))
+                        if syncClient != nil {
+                            edits.append(
+                                (
+                                    try StoreSync.identity(db, capture: before),
+                                    CaptureEdit(
+                                        metadata: CaptureMetadataPatch(updatedAt: now),
+                                        generatedPatch: GeneratedContentPatch(
+                                            tags: mapped,
+                                            taggingProcessing: mapped.isEmpty
+                                                || before.tagsVersion == 0
+                                                ? .pending
+                                                : .processed(
+                                                    inputFingerprint: TaggingFingerprint.of(updated)
+                                                )))
+                                ))
+                        }
                     }
                 }
+                try syncClient?.enqueue(in: db, edits: edits)
             }
             lastID = rows.last!["id"]
         }

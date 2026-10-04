@@ -31,8 +31,10 @@ enum CapdMain {
             try command.run()
             if !(command is Mcp) { CLISyncSessions.flush() }
         } catch let error as CLIError {
+            CLISyncSessions.flush()
             error.terminate()
         } catch {
+            CLISyncSessions.flush()
             guard Capd.exitCode(for: error) != .success else {
                 Capd.exit(withError: error)
             }
