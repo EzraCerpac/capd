@@ -34,12 +34,15 @@ public struct BlobReference: Codable, Equatable, Sendable {
 }
 
 /// Bounded synthetic blobs; callers retain published files for the lifetime of this store.
+/// A bound directory remains reserved after client preparation fails; retry with the same binding.
 public final class BlobStore: Sendable {
     public let directory: URL
+    public let binding: SyncLibraryBinding?
     private let lock = NSLock()
 
     public init(directory: URL, binding: SyncLibraryBinding? = nil) throws {
         self.directory = directory
+        self.binding = binding
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         try Self.checkOwnership(directory, binding: binding)
     }

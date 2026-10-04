@@ -20,9 +20,17 @@ public final class SyncClient: Sendable {
         databaseURL: URL, blobDirectory: URL, deviceID: UUID? = nil,
         binding: SyncLibraryBinding? = nil
     ) throws {
+        let writer = try SyncDatabase.open(at: databaseURL)
+        let files = (try? FileManager.default.contentsOfDirectory(atPath: blobDirectory.path)) ?? []
+        try writer.read {
+            _ = try SyncDatabase.checkEnrollment(
+                $0, role: "client", deviceID: deviceID, binding: binding,
+                hasUnboundBlobs: files.contains { $0 != "library-owner" })
+        }
         try self.init(
-            writer: SyncDatabase.open(at: databaseURL),
-            blobs: BlobStore(directory: blobDirectory), deviceID: deviceID, binding: binding)
+            writer: writer,
+            blobs: BlobStore(directory: blobDirectory, binding: binding),
+            deviceID: deviceID, binding: binding)
     }
 
     /// The projection participates in each outbox/pull transaction; it must not enqueue writes.
@@ -32,6 +40,16 @@ public final class SyncClient: Sendable {
         prepareProjection: @escaping @Sendable (Database) throws -> Void = { _ in },
         project: @escaping Projection = { _, _ in }
     ) throws {
+        let hasUnboundBlobs = try FileManager.default.contentsOfDirectory(
+            atPath: blobs.directory.path
+        )
+        .contains { $0 != "library-owner" }
+        try writer.read {
+            _ = try SyncDatabase.checkEnrollment(
+                $0, role: "client", deviceID: deviceID, binding: binding,
+                hasUnboundBlobs: hasUnboundBlobs)
+        }
+        guard blobs.binding == binding else { throw SyncBindingError.mismatch }
         self.binding = binding
         self.writer = writer
         writerIdentity = writer.writeWithoutTransaction { ObjectIdentifier($0) }
@@ -39,8 +57,7 @@ public final class SyncClient: Sendable {
         self.project = project
         self.deviceID = try SyncDatabase.prepare(
             writer, role: "client", deviceID: deviceID, binding: binding,
-            hasUnboundBlobs: FileManager.default.contentsOfDirectory(atPath: blobs.directory.path)
-                .contains { $0 != "library-owner" }, prepareProjection: prepareProjection)!
+            hasUnboundBlobs: hasUnboundBlobs, prepareProjection: prepareProjection)!
     }
 
     private func read<T>(_ body: (Database) throws -> T) throws -> T {
@@ -384,8 +401,10 @@ public final class SyncClient: Sendable {
         for operation in try operations(db) {
             var id = try SyncDatabase.canonical(db, operation.captureID)
             if case .create(let incoming) = operation.mutation {
-                if records[id] == nil, let hash = incoming.source.contentHash,
-                    let duplicate = records.values.first(where: { $0.source.contentHash == hash })
+                if records[id] == nil,
+                    let duplicate = records.values.first(where: {
+                        CaptureFingerprint.matches($0.source, incoming.source)
+                    })
                 {
                     id = duplicate.id
                     try SyncDatabase.alias(db, incoming.id, to: id)
@@ -397,7 +416,7 @@ public final class SyncClient: Sendable {
                 }
                 if var existing = records[id] {
                     if !existing.deleted {
-                        existing.seenCount += 1
+                        if existing.seenCount < Int.max { existing.seenCount += 1 }
                         if incoming.note != nil { existing.note = incoming.note }
                         existing.manualTags = Array(
                             Set(existing.manualTags).union(incoming.manualTags)
@@ -421,7 +440,8 @@ public final class SyncClient: Sendable {
                         &record, edit, operation: operation,
                         base: record.revision, server: false)
                 }
-            case .recapture: if !record.deleted { record.seenCount += 1 }
+            case .recapture:
+                if !record.deleted, record.seenCount < Int.max { record.seenCount += 1 }
             case .delete: record.deleted = true
             case .restore:
                 // Restoration is optimistic only at the tombstone revision the user saw.

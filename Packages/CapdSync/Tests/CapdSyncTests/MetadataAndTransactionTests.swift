@@ -269,7 +269,8 @@ struct MetadataAndTransactionTests {
         #expect(throws: InjectedFailure.projection) {
             try SyncClient(
                 writer: f.writer,
-                blobs: BlobStore(directory: f.root.appendingPathComponent("blobs")),
+                blobs: BlobStore(
+                    directory: f.root.appendingPathComponent("blobs"), binding: binding),
                 deviceID: device, binding: binding,
                 prepareProjection: { db in
                     #expect(ObjectIdentifier(db) == writerIdentity)
@@ -284,7 +285,8 @@ struct MetadataAndTransactionTests {
         #expect(try f.writer.read { try !$0.tableExists("sync_records") })
         #expect(try f.writer.read { try !$0.tableExists("import_marker") })
         let client = try SyncClient(
-            writer: f.writer, blobs: BlobStore(directory: f.root.appendingPathComponent("blobs")),
+            writer: f.writer,
+            blobs: BlobStore(directory: f.root.appendingPathComponent("blobs"), binding: binding),
             deviceID: device, binding: binding,
             prepareProjection: { db in
                 try SyncDatabase.save(db, capture)
@@ -314,7 +316,8 @@ struct MetadataAndTransactionTests {
         #expect(throws: SyncBindingError.mismatch) {
             try SyncClient(
                 writer: fresh.writer,
-                blobs: BlobStore(directory: fresh.root.appendingPathComponent("blobs")),
+                blobs: BlobStore(
+                    directory: fresh.root.appendingPathComponent("blobs"), binding: binding),
                 binding: binding,
                 prepareProjection: { db in try db.execute(sql: "DELETE FROM sync_binding") })
         }

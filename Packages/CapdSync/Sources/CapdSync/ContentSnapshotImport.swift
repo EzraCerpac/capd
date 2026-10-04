@@ -124,12 +124,9 @@ enum SnapshotImport {
                     throw ContentSnapshotImportError.identityCollision
                 }
                 existing = match
-            } else if let hash = incoming.source.contentHash,
-                let match = records.values.first(where: { $0.source.contentHash == hash })
-            {
-                guard sameIdentity(match.source, incoming.source) else {
-                    throw ContentSnapshotImportError.identityCollision
-                }
+            } else if let match = records.values.first(where: {
+                CaptureFingerprint.matches($0.source, incoming.source)
+            }) {
                 existing = match
             } else {
                 existing = nil

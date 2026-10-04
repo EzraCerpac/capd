@@ -40,28 +40,10 @@ enum SyncDatabase {
                     CREATE TABLE IF NOT EXISTS sync_observed (id TEXT PRIMARY KEY);
                     CREATE TABLE IF NOT EXISTS sync_binding (id INTEGER PRIMARY KEY CHECK (id = 1), payload BLOB NOT NULL);
                     """)
-            let storedBinding = try Data.fetchOne(db, sql: "SELECT payload FROM sync_binding")
-                .map { try decode(SyncLibraryBinding.self, $0) }
-            guard storedBinding == nil || storedBinding == binding else {
-                throw SyncBindingError.mismatch
-            }
+            let storedBinding = try checkEnrollment(
+                db, role: role, deviceID: deviceID, binding: binding,
+                hasUnboundBlobs: hasUnboundBlobs)
             if binding != nil && storedBinding == nil {
-                let usedMeta =
-                    try Int.fetchOne(
-                        db,
-                        sql:
-                            "SELECT COUNT(*) FROM sync_meta WHERE sequence != 0 OR cursor != 0 OR floor != 0 OR observed_sequence != 0"
-                    )! > 0
-                let tables = [
-                    "sync_records", "sync_aliases", "sync_receipts", "sync_devices", "sync_feed",
-                    "sync_outbox", "sync_visible", "sync_rejections", "sync_observed",
-                ]
-                let usedRows = try tables.contains {
-                    try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM \($0)")! > 0
-                }
-                guard !usedMeta, !usedRows, !hasUnboundBlobs else {
-                    throw SyncBindingError.enrollmentRequiresEmptyLibrary
-                }
                 if let binding {
                     try db.execute(
                         sql: "INSERT INTO sync_binding (id, payload) VALUES (1, ?)",
@@ -70,16 +52,8 @@ enum SyncDatabase {
 
             }
             if let row = try Row.fetchOne(db, sql: "SELECT role, device FROM sync_meta") {
-                let storedRole: String = row["role"]
                 let storedDevice: String? = row["device"]
-                guard storedRole == role else { throw SyncError.invalidOperation }
-                if let deviceID {
-                    guard storedDevice == deviceID.uuidString else { throw SyncError.wrongDevice }
-                } else if role == "server" {
-                    guard storedDevice == nil else { throw SyncError.wrongDevice }
-                }
                 let storedID = storedDevice.flatMap(UUID.init(uuidString:))
-                guard role != "client" || storedID != nil else { throw SyncError.wrongDevice }
                 try prepareProjection(db)
                 try checkPreparedIdentity(db, role: role, device: storedID, binding: binding)
                 return storedID
@@ -93,6 +67,57 @@ enum SyncDatabase {
                 return allocatedID
             }
         }
+    }
+
+    static func checkEnrollment(
+        _ db: Database, role: String, deviceID: UUID?, binding: SyncLibraryBinding?,
+        hasUnboundBlobs: Bool
+    ) throws -> SyncLibraryBinding? {
+        let existingTables = try String.fetchSet(
+            db, sql: "SELECT name FROM sqlite_master WHERE type='table'")
+        let storedBinding =
+            try existingTables.contains("sync_binding")
+            ? Data.fetchOne(db, sql: "SELECT payload FROM sync_binding")
+                .map { try decode(SyncLibraryBinding.self, $0) } : nil
+        guard storedBinding == nil || storedBinding == binding else {
+            throw SyncBindingError.mismatch
+        }
+        if binding != nil && storedBinding == nil {
+            let usedMeta =
+                try existingTables.contains("sync_meta")
+                && Int.fetchOne(
+                    db,
+                    sql:
+                        "SELECT COUNT(*) FROM sync_meta WHERE sequence != 0 OR cursor != 0 OR floor != 0 OR observed_sequence != 0"
+                )! > 0
+            let tables = [
+                "sync_records", "sync_aliases", "sync_receipts", "sync_devices", "sync_feed",
+                "sync_outbox", "sync_visible", "sync_rejections", "sync_observed",
+            ]
+            let usedRows = try tables.contains {
+                try existingTables.contains($0)
+                    && Int.fetchOne(db, sql: "SELECT COUNT(*) FROM \($0)")! > 0
+            }
+            guard !usedMeta, !usedRows, !hasUnboundBlobs else {
+                throw SyncBindingError.enrollmentRequiresEmptyLibrary
+            }
+        }
+        if existingTables.contains("sync_meta"),
+            let row = try Row.fetchOne(db, sql: "SELECT role, device FROM sync_meta")
+        {
+            let storedRole: String = row["role"]
+            let storedDevice: String? = row["device"]
+            guard storedRole == role else { throw SyncError.invalidOperation }
+            if let deviceID {
+                guard storedDevice == deviceID.uuidString else { throw SyncError.wrongDevice }
+            } else if role == "server" {
+                guard storedDevice == nil else { throw SyncError.wrongDevice }
+            }
+            guard role != "client" || storedDevice.flatMap(UUID.init(uuidString:)) != nil else {
+                throw SyncError.wrongDevice
+            }
+        }
+        return storedBinding
     }
 
     private static func checkPreparedIdentity(

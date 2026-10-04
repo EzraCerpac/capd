@@ -101,17 +101,15 @@ public final class SyncServer: SyncTransport, Sendable {
             case .create(var incoming):
                 if record != nil {
                     outcome = record!.deleted ? .deleted : .alreadyExists
-                } else if let hash = incoming.source.contentHash,
-                    var existing = try SyncDatabase.records(db).first(where: {
-                        $0.source.contentHash == hash
-                    })
-                {
+                } else if var existing = try SyncDatabase.records(db).first(where: {
+                    CaptureFingerprint.matches($0.source, incoming.source)
+                }) {
                     try SyncDatabase.alias(db, incoming.id, to: existing.id)
                     if existing.deleted {
                         outcome = .deleted
                     } else {
                         existing.revision = cursor
-                        existing.seenCount += 1
+                        if existing.seenCount < Int.max { existing.seenCount += 1 }
                         existing.manualTags = Array(
                             Set(existing.manualTags).union(incoming.manualTags)
                         ).sorted()
@@ -157,7 +155,8 @@ public final class SyncServer: SyncTransport, Sendable {
                             {
                                 outcome = .noteConflict
                             }
-                        case .recapture: current.seenCount += 1
+                        case .recapture:
+                            if current.seenCount < Int.max { current.seenCount += 1 }
                         case .delete: current.deleted = true
                         default: throw SyncError.invalidOperation
                         }
