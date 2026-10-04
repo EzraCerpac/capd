@@ -98,22 +98,24 @@ private enum FoundationAnswerGeneration {
     }
 
     private static func mapped(_ error: any Error) -> AnswerError {
-        if #available(iOS 27, macOS 27, *) {
-            if let error = error as? LanguageModelError {
-                switch error {
-                case .contextSizeExceeded: return .contextTooLarge
-                case .guardrailViolation, .refusal: return .contentRejected
-                case .unsupportedLanguageOrLocale: return .unavailable(.unsupportedLanguage)
-                default: return .generationFailed
+        #if compiler(>=6.4)
+            if #available(iOS 27, macOS 27, *) {
+                if let error = error as? LanguageModelError {
+                    switch error {
+                    case .contextSizeExceeded: return .contextTooLarge
+                    case .guardrailViolation, .refusal: return .contentRejected
+                    case .unsupportedLanguageOrLocale: return .unavailable(.unsupportedLanguage)
+                    default: return .generationFailed
+                    }
+                }
+                if let error = error as? SystemLanguageModel.Error {
+                    switch error {
+                    case .assetsUnavailable: return .unavailable(.modelNotReady)
+                    default: return .generationFailed
+                    }
                 }
             }
-            if let error = error as? SystemLanguageModel.Error {
-                switch error {
-                case .assetsUnavailable: return .unavailable(.modelNotReady)
-                default: return .generationFailed
-                }
-            }
-        }
+        #endif
         if let error = error as? LanguageModelSession.GenerationError {
             switch error {
             case .exceededContextWindowSize: return .contextTooLarge
