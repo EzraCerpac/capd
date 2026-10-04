@@ -40,7 +40,7 @@ public struct EnrolledSyncAdapter: MobileSyncAdapter {
     }
 
     /// Only a factory-selected, already bound store may enable enrolled sync.
-    public init(
+    init(
         enrollment: SyncEnrollment, store: MobileStore,
         credentials: any SyncCredentialStore
     ) throws {
