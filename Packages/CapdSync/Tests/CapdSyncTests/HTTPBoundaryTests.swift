@@ -5,6 +5,57 @@ import Testing
 
 @Suite("Prepared authenticated sync boundary")
 struct HTTPBoundaryTests {
+    @Test(arguments: [false, true], [0, 1, 2, 3])
+    func skippedFeedCursorsLeaveDurableStateUnchanged(asynchronous: Bool, gap: Int) async throws {
+        let f = try HTTPFixture()
+        defer { f.clean() }
+        let client = try f.client("skipped-cursors")
+        let capture = SharedCapture(source: CaptureSource(kind: .text, selection: "accepted"))
+        try client.enqueue(captureID: capture.id, mutation: .create(capture))
+        try client.push(to: f.transport("A"))
+        try client.pull(from: f.transport("A"))
+        let pending = try client.enqueue(
+            captureID: capture.id, mutation: .edit(CaptureEdit(rating: 3)))
+        let before = try client.captures()
+        let cursors: [Int64] = gap == 0 ? [3] : gap == 1 ? [2, 4] : gap == 2 ? [2, 3] : []
+        let changes = cursors.map { cursor in
+            var record = capture
+            record.revision = cursor
+            record.rating = 5
+            return FeedChange(
+                cursor: cursor, operationID: UUID(), deviceID: UUID(), sequence: cursor,
+                requestedCaptureID: capture.id, capture: record)
+        }
+        let page = FeedPage(cursor: gap == 0 ? 3 : 4, changes: changes)
+        let execute: @Sendable (SyncHTTPRequest) throws -> SyncHTTPResponse = { _ in
+            SyncHTTPResponse(
+                status: 200, headers: ["Content-Type": "application/json"],
+                body: try SyncDatabase.encode(
+                    SyncHTTPReply(
+                        version: 1,
+                        principal: SyncPrincipal(
+                            serviceID: f.service, libraryID: f.libraryA, deviceID: f.device),
+                        result: .page(page))))
+        }
+        if asynchronous {
+            let transport = QualityWire(execute: execute, binding: f.binding, deviceID: f.device)
+            await #expect(throws: SyncError.invalidCursor) {
+                try await client.pull(from: transport, credential: { "A" })
+            }
+        } else {
+            let transport = SyncHTTPTransport(
+                binding: f.binding, deviceID: f.device, credential: { "A" }, execute: execute)
+            #expect(throws: SyncError.invalidCursor) { try client.pull(from: transport) }
+        }
+        #expect(try client.cursor() == 1)
+        #expect(try client.captures() == before)
+        #expect(try client.pendingOperations() == [pending])
+        let reopened = try f.client("skipped-cursors")
+        #expect(try reopened.cursor() == 1)
+        #expect(try reopened.captures() == before)
+        #expect(try reopened.pendingOperations() == [pending])
+    }
+
     @Test(arguments: [false, true])
     func syncOnceRetriesExpiredAcknowledgementsButPreservesAmbiguousOutbox(
         ambiguousHistory: Bool

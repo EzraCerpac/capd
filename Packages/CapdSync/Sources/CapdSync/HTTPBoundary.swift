@@ -390,10 +390,41 @@ public struct SyncHTTPTransport: BoundSyncTransport {
         return page
     }
     public func baseline() throws -> Baseline {
-        guard case .baseline(let baseline) = try request(.baseline) else {
-            throw SyncHTTPError.invalidResponse
+        var limit = 100
+        var after: UUID?
+        var first: Baseline?
+        var captures: [SharedCapture] = []
+        while true {
+            try Task.checkCancellation()
+            let result: SyncHTTPResult
+            do {
+                result = try request(
+                    .baselinePage(after: after, limit: limit, expectedCursor: first?.cursor))
+            } catch SyncHTTPError.resourceLimit where limit > 1 {
+                limit = max(1, limit / 2)
+                continue
+            } catch SyncConnectionError.responseTooLarge where limit > 1 {
+                limit = max(1, limit / 2)
+                continue
+            }
+            guard case .baseline(let page) = result,
+                page.captures.count <= limit,
+                first == nil
+                    || (page.cursor == first!.cursor
+                        && page.deviceSequences == first!.deviceSequences),
+                page.captures.allSatisfy({ after == nil || $0.id.uuidString > after!.uuidString }),
+                zip(page.captures, page.captures.dropFirst()).allSatisfy({
+                    $0.id.uuidString < $1.id.uuidString
+                })
+            else { throw SyncHTTPError.invalidResponse }
+            if first == nil { first = page }
+            captures.append(contentsOf: page.captures)
+            if page.captures.count < limit {
+                return Baseline(
+                    cursor: page.cursor, captures: captures, deviceSequences: page.deviceSequences)
+            }
+            after = page.captures.last!.id
         }
-        return baseline
     }
     public func upload(_ blob: BlobReference, offset: Int, chunk: Data, final: Bool) throws {
         guard chunk.count <= SyncHTTPHandler.maximumChunkBytes else {

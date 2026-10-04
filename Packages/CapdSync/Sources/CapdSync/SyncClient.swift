@@ -364,12 +364,14 @@ public final class SyncClient: Sendable {
     }
 
     private func validate(_ page: FeedPage, after oldCursor: Int64) throws {
-        guard page.cursor >= oldCursor,
-            page.changes.allSatisfy({ $0.cursor > oldCursor && $0.cursor <= page.cursor }),
-            zip(page.changes, page.changes.dropFirst()).allSatisfy({ $0.cursor < $1.cursor })
-        else {
-            throw SyncError.invalidCursor
+        var cursor = oldCursor
+        for change in page.changes {
+            guard cursor < Int64.max, change.cursor == cursor + 1 else {
+                throw SyncError.invalidCursor
+            }
+            cursor = change.cursor
         }
+        guard page.cursor == cursor else { throw SyncError.invalidCursor }
     }
 
     private func commit(_ page: FeedPage, after oldCursor: Int64) throws {
@@ -457,9 +459,9 @@ public final class SyncClient: Sendable {
             var id = try SyncDatabase.canonical(db, operation.captureID)
             if case .create(let incoming) = operation.mutation {
                 if records[id] == nil,
-                    let duplicate = records.values.first(where: {
+                    let duplicate = records.values.lazy.filter({
                         CaptureFingerprint.matches($0.source, incoming.source)
-                    })
+                    }).min(by: { $0.id.uuidString < $1.id.uuidString })
                 {
                     id = duplicate.id
                     try SyncDatabase.alias(db, incoming.id, to: id)

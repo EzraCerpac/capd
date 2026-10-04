@@ -6,6 +6,39 @@ import Testing
 
 @Suite("Capture identity deduplication")
 struct SyncDeduplicationTests {
+    @Test func legacyDuplicatesUseAuthorityOrderingForOfflineEdits() throws {
+        let fixture = try DeduplicationFixture()
+        defer { fixture.clean() }
+        let writer = try SyncDatabase.open(at: fixture.root.appendingPathComponent("server.sqlite"))
+        let source = CaptureSource(kind: .text, contentHash: "legacy duplicate")
+        var tombstone = SharedCapture(
+            id: UUID(uuidString: "00000000-0000-0000-0000-000000000001")!, source: source)
+        tombstone.revision = 1
+        tombstone.deleted = true
+        try writer.write { db in
+            try SyncDatabase.save(db, tombstone)
+            for index in 2...16 {
+                var live = SharedCapture(
+                    id: UUID(uuidString: String(format: "00000000-0000-0000-0000-%012d", index))!,
+                    source: source)
+                live.revision = 2
+                try SyncDatabase.save(db, live)
+            }
+            try db.execute(sql: "UPDATE sync_meta SET cursor = 2, floor = 2")
+        }
+        let client = try fixture.client()
+        try client.pull(from: fixture.server)
+        let duplicate = SharedCapture(source: source)
+        try client.enqueue(captureID: duplicate.id, mutation: .create(duplicate))
+        let edit = try client.enqueue(
+            captureID: duplicate.id, mutation: .edit(CaptureEdit(rating: 4)))
+        #expect(edit.baseRevision == tombstone.revision)
+        let receipts = try client.push(to: fixture.server)
+        #expect(receipts.map(\.outcome) == [.deleted, .deleted])
+        #expect(receipts.allSatisfy { $0.capture?.id == tombstone.id })
+        #expect(try client.pendingOperations().isEmpty)
+    }
+
     @Test(arguments: [CaptureSource.Kind.text, .image])
     func normalizedURLBytesDoNotAliasOtherKinds(_ kind: CaptureSource.Kind) throws {
         let fixture = try DeduplicationFixture()

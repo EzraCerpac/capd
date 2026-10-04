@@ -41,6 +41,17 @@ struct BulkAndBaselineTests {
         }
         #expect(try client.captures().count == 24)
         #expect(try client.cursor() == baseline.cursor)
+        try f.server.expireFeed(through: baseline.cursor)
+        let synchronous = SyncHTTPTransport(
+            binding: f.wire.binding, deviceID: f.wire.deviceID,
+            credential: { f.token }, execute: { f.handler.handle($0) })
+        let recovering = try SyncClient(
+            databaseURL: f.root.appendingPathComponent("recovering.sqlite"),
+            blobDirectory: f.root.appendingPathComponent("recovering-blobs"),
+            deviceID: f.wire.deviceID, binding: f.wire.binding)
+        try recovering.pull(from: synchronous)
+        #expect(try recovering.captures() == baseline.captures)
+        #expect(try recovering.cursor() == baseline.cursor)
     }
 
     @Test func baselinePagesRejectAChangedAuthorityCursor() async throws {
@@ -59,6 +70,23 @@ struct BulkAndBaselineTests {
         await #expect(throws: SyncError.invalidCursor) {
             try await f.wire.importBaseline(credential: { f.token })
         }
+        let synchronous = SyncHTTPTransport(
+            binding: f.wire.binding, deviceID: f.wire.deviceID,
+            credential: { f.token },
+            execute: { request in
+                let envelope = try SyncDatabase.decode(SyncHTTPEnvelope.self, request.body)
+                let response = f.handler.handle(request)
+                if case .baselinePage(nil, _, _) = envelope.action {
+                    let record = SharedCapture(
+                        source: CaptureSource(kind: .text, contentHash: "Synchronous new cursor"))
+                    _ = try f.server.apply(
+                        SyncOperation(
+                            deviceID: UUID(), sequence: 1, captureID: record.id, baseRevision: 0,
+                            mutation: .create(record)))
+                }
+                return response
+            })
+        #expect(throws: SyncError.invalidCursor) { try synchronous.baseline() }
     }
 
     @Test func batchedEditsProjectOnceAndKeepPredecessorsAndRollback() throws {
@@ -118,6 +146,7 @@ private struct BoundedFixture: Sendable {
     let root: URL
     let server: SyncServer
     let wire: BoundedWire
+    let handler: SyncHTTPHandler
     let token = "synthetic-bounded-baseline"
     init() throws {
         root = FileManager.default.temporaryDirectory.appendingPathComponent(
@@ -128,16 +157,15 @@ private struct BoundedFixture: Sendable {
             databaseURL: root.appendingPathComponent("authority.sqlite"),
             blobDirectory: root.appendingPathComponent("blobs"), libraryID: binding.libraryID,
             serviceID: binding.serviceID)
-        wire = BoundedWire(
-            binding: binding, deviceID: deviceID,
-            handler: SyncHTTPHandler(
-                serviceID: binding.serviceID,
-                authorizer: BoundedAuthorizer(
-                    token: token,
-                    principal: SyncPrincipal(
-                        serviceID: binding.serviceID, libraryID: binding.libraryID,
-                        deviceID: deviceID)),
-                server: { [server] _ in server }))
+        handler = SyncHTTPHandler(
+            serviceID: binding.serviceID,
+            authorizer: BoundedAuthorizer(
+                token: token,
+                principal: SyncPrincipal(
+                    serviceID: binding.serviceID, libraryID: binding.libraryID,
+                    deviceID: deviceID)),
+            server: { [server] _ in server })
+        wire = BoundedWire(binding: binding, deviceID: deviceID, handler: handler)
     }
     func clean() { try? FileManager.default.removeItem(at: root) }
 }
