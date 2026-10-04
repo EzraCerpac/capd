@@ -667,6 +667,106 @@ struct HTTPBoundaryTests {
         #expect(throws: SyncError.outOfOrder(expected: 1)) { try f.transport("A").apply(gap) }
     }
 
+    @Test func feedStopsBeforeMaterializingAnOversizedTailAndDoesNotSkipIt() throws {
+        let f = try HTTPFixture()
+        defer { f.clean() }
+        let operation = f.operation("small first change")
+        _ = try f.a.apply(operation)
+        let writer = try SyncDatabase.open(at: f.root.appendingPathComponent("a.sqlite"))
+        try writer.write { db in
+            try db.execute(
+                sql: "INSERT INTO sync_feed (cursor, payload) VALUES (2, zeroblob(?))",
+                arguments: [SyncHTTPHandler.maximumBodyBytes + 1])
+            try db.execute(sql: "UPDATE sync_meta SET cursor=2")
+        }
+        let response = f.handler.handle(try f.request(.changes(cursor: 0, limit: 1000)))
+        #expect(response.status == 200)
+        let reply = try SyncDatabase.decode(SyncHTTPReply.self, response.body)
+        guard case .page(let page) = reply.result else {
+            Issue.record("Expected a bounded feed page")
+            return
+        }
+        #expect(page.cursor == 1)
+        #expect(page.changes.map(\.operationID) == [operation.id])
+        for _ in 0..<2 {
+            let refused = f.handler.handle(try f.request(.changes(cursor: page.cursor, limit: 1)))
+            #expect(refused.status == 503)
+            #expect(try f.failure(refused) == .resourceLimit)
+        }
+        #expect(try f.a.baseline().cursor == 2)
+    }
+
+    @Test func feedBudgetUsesTheExactHTTPEnvelopeAndIncludesAnExactFit() throws {
+        let f = try HTTPFixture()
+        defer { f.clean() }
+        let device = UUID()
+        var capture = SharedCapture(source: CaptureSource(kind: .text, selection: ""))
+        capture.revision = 1
+        let operationID = UUID()
+        func change() -> FeedChange {
+            FeedChange(
+                cursor: 1, operationID: operationID, deviceID: device, sequence: 1,
+                requestedCaptureID: capture.id, capture: capture)
+        }
+        let principal = SyncPrincipal(
+            serviceID: f.service, libraryID: f.libraryA, deviceID: f.device)
+        let overhead = try SyncDatabase.encode(
+            SyncHTTPReply(
+                version: 1, principal: principal,
+                result: .page(FeedPage(cursor: 1, changes: [change()])),
+                metadataContractVersion: 1, generatedProcessingContractVersion: 1,
+                extractionQualityContractVersion: 1)
+        ).count
+        capture.source.selection = String(
+            repeating: "x", count: SyncHTTPHandler.maximumBodyBytes - overhead)
+        let writer = try SyncDatabase.open(at: f.root.appendingPathComponent("a.sqlite"))
+        try writer.write { db in
+            try db.execute(
+                sql: "INSERT INTO sync_feed (cursor, payload) VALUES (1, ?)",
+                arguments: [try SyncDatabase.encode(change())])
+            try db.execute(sql: "UPDATE sync_meta SET cursor=1")
+        }
+        let response = f.handler.handle(try f.request(.changes(cursor: 0, limit: 1000)))
+        #expect(response.status == 200)
+        #expect(response.body.count == SyncHTTPHandler.maximumBodyBytes)
+        capture.source.selection?.append("x")
+        try writer.write { db in
+            try db.execute(
+                sql: "UPDATE sync_feed SET payload=? WHERE cursor=1",
+                arguments: [try SyncDatabase.encode(change())])
+        }
+        let refused = f.handler.handle(try f.request(.changes(cursor: 0, limit: 1)))
+        #expect(try f.failure(refused) == .resourceLimit)
+    }
+
+    @Test func feedBudgetCountsSeparatorsAndContinuesAtTheLastIncludedChange() throws {
+        let f = try HTTPFixture()
+        defer { f.clean() }
+        var changes: [FeedChange] = []
+        for sequence in 1...3 {
+            let capture = SharedCapture(source: CaptureSource(kind: .text, selection: "same size"))
+            _ = try f.a.apply(
+                SyncOperation(
+                    deviceID: f.device, sequence: Int64(sequence), captureID: capture.id,
+                    baseRevision: 0, mutation: .create(capture)))
+            changes.append(
+                contentsOf: try f.a.changes(after: Int64(sequence - 1), limit: 1).changes)
+        }
+        let payloadBytes = try changes.prefix(2).reduce(0) {
+            $0 + (try SyncDatabase.encode($1).count)
+        }
+        let overhead = SyncHTTPHandler.maximumBodyBytes - payloadBytes - 1
+        let page = try f.a.changes(after: 0, limit: 1000) { _ in overhead }
+        #expect(page.cursor == 2)
+        #expect(page.changes == Array(changes.prefix(2)))
+        let next = try f.a.changes(after: page.cursor, limit: 1000) { _ in overhead }
+        #expect(next.changes == [changes[2]])
+        #expect(next.cursor == 3)
+        let empty = try f.a.changes(after: next.cursor, limit: 1000) { _ in overhead }
+        #expect(empty.cursor == 3)
+        #expect(empty.changes.isEmpty)
+    }
+
     @Test("Oversized baseline and unexpected storage errors produce bounded generic JSON")
     func responseLimitsAndHygiene() throws {
         let f = try HTTPFixture()

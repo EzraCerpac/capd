@@ -211,6 +211,14 @@ public final class SyncServer: SyncTransport, Sendable {
     }
 
     public func changes(after cursor: Int64, limit: Int = 100) throws -> FeedPage {
+        try changes(after: cursor, limit: limit) {
+            try SyncDatabase.encode(FeedPage(cursor: $0, changes: [])).count
+        }
+    }
+
+    func changes(
+        after cursor: Int64, limit: Int, pageOverhead: (Int64) throws -> Int
+    ) throws -> FeedPage {
         try read { db in
             let floor = try Int64.fetchOne(db, sql: "SELECT floor FROM sync_meta")!
             let head = try Int64.fetchOne(db, sql: "SELECT cursor FROM sync_meta")!
@@ -218,12 +226,36 @@ public final class SyncServer: SyncTransport, Sendable {
                 throw SyncError.invalidCursor
             }
             guard cursor >= floor else { throw SyncError.cursorExpired }
-            let rows = try Row.fetchAll(
+            let rows = try Row.fetchCursor(
                 db,
-                sql:
-                    "SELECT cursor, payload FROM sync_feed WHERE cursor > ? ORDER BY cursor LIMIT ?",
-                arguments: [cursor, limit])
-            let changes = try rows.map { try SyncDatabase.decode(FeedChange.self, $0["payload"]) }
+                sql: """
+                    SELECT cursor, length(payload) AS bytes FROM sync_feed
+                    WHERE cursor > ? ORDER BY cursor LIMIT ?
+                    """, arguments: [cursor, limit])
+            var changes: [FeedChange] = []
+            var payloadBytes = 0
+            while let row = try rows.next() {
+                let nextCursor: Int64 = row["cursor"]
+                let overhead = try pageOverhead(nextCursor)
+                let remaining =
+                    SyncHTTPHandler.maximumBodyBytes - overhead - payloadBytes
+                    - (changes.isEmpty ? 0 : 1)
+                guard (row["bytes"] as Int) <= remaining else {
+                    if changes.isEmpty { throw SyncHTTPError.resourceLimit }
+                    break
+                }
+                let data = try Data.fetchOne(
+                    db, sql: "SELECT payload FROM sync_feed WHERE cursor=?", arguments: [nextCursor]
+                )!
+                let change = try SyncDatabase.decode(FeedChange.self, data)
+                let encodedBytes = try SyncDatabase.encode(change).count
+                guard encodedBytes <= remaining else {
+                    if changes.isEmpty { throw SyncHTTPError.resourceLimit }
+                    break
+                }
+                payloadBytes += encodedBytes + (changes.isEmpty ? 0 : 1)
+                changes.append(change)
+            }
             return FeedPage(cursor: changes.last?.cursor ?? head, changes: changes)
         }
     }

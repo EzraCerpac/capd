@@ -81,6 +81,12 @@ blob identity, including tombstones and choosing the first matching UUID. Every
 record save updates these fields. Shared database preparation backfills older
 payload-only databases one record at a time inside the migration transaction.
 
+Feed pages respect both the requested record count and a 16 MiB serialized-byte
+budget. The HTTP budget includes the principal and capability envelope. Paging
+checks stored payload lengths before reading each change and stops at the last
+included cursor. A single oversized change returns a resource-limit error without
+advancing past it; clients retain their existing adaptive page retry behavior.
+
 A stale note edit creates explicit variants, including a cleared note. Resolving
 variants requires their IDs and the revision the resolver observed. A resolution
 that has become stale preserves its candidate as another conflict rather than
