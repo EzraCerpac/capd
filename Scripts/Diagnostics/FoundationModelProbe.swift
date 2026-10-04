@@ -88,10 +88,12 @@ struct ModelProbe {
 
 #if FULL_CAPD_PROBE
 private struct SyntheticReader: AnswerRetrieving {
-    func search(_ query: String, limit: Int) async throws -> [AnswerEvidence] {
-        guard limit > 0 else { return [] }
-        return [.init(id: "synthetic-only", title: "Synthetic orchid",
-            excerpt: "An orchid needs indirect light. This is synthetic gardening evidence.")]
+    func search(_ queries: [String], limit: Int) async throws -> [[AnswerEvidence]] {
+        return queries.map { _ in
+            guard limit > 0 else { return [] }
+            return [.init(id: "synthetic-only", title: "Synthetic orchid",
+                excerpt: "An orchid needs indirect light. This is synthetic gardening evidence.")]
+        }
     }
 }
 #endif

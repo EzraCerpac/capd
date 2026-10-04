@@ -5,6 +5,60 @@ import Testing
 
 @Suite("Synthetic segmented questions and merged source passages")
 struct RetrievalLanguageAndMergeTests {
+    @Test(arguments: ["What is C?", "Tell me about R", "what is c?", "What is S?"])
+    func singleCharacterTopicsReachRetrieval(question: String) async throws {
+        let identifier = question.last { $0.isLetter }
+        let term = String(try #require(identifier)).lowercased()
+        let quote = "\(term.uppercased()) is a programming language."
+        #expect(GroundedAnswerService.searchTerms(question) == [term])
+        let reader = QueryPassageRetriever(passages: [term: quote])
+        let answer = try await GroundedAnswerService(
+            retriever: reader, model: PassageQuoteModel(quote: quote)
+        ).answer(question)
+        #expect(await reader.queries.contains(term))
+        #expect(answer.statements.first?.citations.first?.quote == quote)
+    }
+
+    @Test(arguments: ["猫は哺乳類", "猫", "C"])
+    func completeShortFragmentsCanBeQuoted(quote: String) async throws {
+        let reader = QueryPassageRetriever(passages: ["topic": quote])
+        let answer = try await GroundedAnswerService(
+            retriever: reader, model: PassageQuoteModel(quote: quote)
+        ).answer("topic")
+        #expect(answer.statements.first?.citations.first?.quote == quote)
+    }
+
+    @Test(arguments: ["猫", "", "猫は"])
+    func shortPartialOrEmptyQuotesRemainInvalid(quote: String) async throws {
+        let reader = QueryPassageRetriever(passages: ["topic": "猫は哺乳類"])
+        await #expect(throws: AnswerError.insufficientEvidence) {
+            try await GroundedAnswerService(
+                retriever: reader, model: PassageQuoteModel(quote: quote)
+            ).answer("topic")
+        }
+    }
+
+    @Test func mergedBudgetKeepsCompleteMatchingPassages() async throws {
+        let terms = ["alpha", "beta", "gamma", "delta", "epsilon", "zeta", "eta", "theta"]
+        let fragments = terms.map { term in
+            String(repeating: "x", count: 150) + " \(term) fact. "
+                + String(repeating: "y", count: 150)
+        }
+        let reader = QueryPassageRetriever(
+            passages: Dictionary(uniqueKeysWithValues: zip(terms, fragments)))
+        let quote = "eta fact."
+        let model = PassageQuoteModel(quote: quote)
+        let answer = try await GroundedAnswerService(retriever: reader, model: model).answer(
+            terms.joined(separator: " "))
+        let excerpt = try #require(answer.sources.first?.source.excerpt)
+        let retained = excerpt.components(separatedBy: "\n\n")
+        #expect(retained.count > 1)
+        #expect(retained.count < fragments.count)
+        #expect(retained.allSatisfy { fragments.contains($0) })
+        #expect(excerpt.contains(quote))
+        #expect(excerpt.count <= GroundedAnswerService.excerptLimit)
+    }
+
     @Test(arguments: ["蘭に必要な光は何ですか", "兰花需要什么光照"])
     func nonSpaceQuestionsAreSegmented(question: String) {
         let terms = GroundedAnswerService.searchTerms(question)
@@ -92,12 +146,15 @@ private actor QueryPassageRetriever: AnswerRetrieving {
     let passages: [String: String]
     var queries: [String] = []
     init(passages: [String: String]) { self.passages = passages }
-    func search(_ query: String, limit: Int) -> [AnswerEvidence] {
-        queries.append(query)
-        guard let excerpt = passages[query] else { return [] }
-        return [
-            AnswerEvidence(id: "same-synthetic-source", title: "Synthetic source", excerpt: excerpt)
-        ]
+    func search(_ queries: [String], limit: Int) -> [[AnswerEvidence]] {
+        self.queries.append(contentsOf: queries)
+        return queries.map { query in
+            guard let excerpt = passages[query] else { return [] }
+            return [
+                AnswerEvidence(
+                    id: "same-synthetic-source", title: "Synthetic source", excerpt: excerpt)
+            ]
+        }
     }
 }
 

@@ -3,8 +3,60 @@ import CapdSync
 import Foundation
 import GRDB
 import Testing
+import os
 
 @testable import CapdMobile
+
+@Test func localAnswerFanoutKeepsOneSnapshotDuringConcurrentEdits() async throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(
+        "capd-answer-snapshot-\(UUID())")
+    defer { try? FileManager.default.removeItem(at: root) }
+    let url = root.appendingPathComponent("mobile.sqlite")
+    let mobile = try MobileStore(url: url)
+    let saved = MobileCapture(
+        kind: .text, title: "Plant notes", selection: "Orchid water requirements before revision.")
+    try mobile.save(saved)
+    let writer = try DatabaseQueue(path: url.path)
+    let queryCount = OSAllocatedUnfairLock(initialState: 0)
+    var configuration = Configuration()
+    configuration.readonly = true
+    configuration.prepareDatabase { db in
+        db.trace { event in
+            guard case .statement(let statement) = event,
+                statement.sql.hasPrefix("SELECT mobile_captures.id, mobile_captures.title")
+            else { return }
+            let shouldEdit = queryCount.withLock { count in
+                count += 1
+                return count == 2
+            }
+            guard shouldEdit else { return }
+            do {
+                try writer.write { db in
+                    try db.execute(
+                        sql: "UPDATE mobile_captures SET selection = ? WHERE id = ?",
+                        arguments: [
+                            "Orchid water requirements after revision.", saved.id.uuidString,
+                        ])
+                }
+            } catch {
+                Issue.record(error)
+            }
+        }
+    }
+    let pool = try DatabasePool(path: url.path, configuration: configuration)
+    let reader = MobileAnswerRetrieval(database: pool)
+    let queries = ["orchid water", "orchid", "water"]
+    let results = try await reader.search(queries, limit: 12)
+    #expect(queryCount.withLock { $0 } == queries.count)
+    #expect(results.count == queries.count)
+    #expect(results.allSatisfy { $0.first?.id == saved.id.uuidString })
+    #expect(results.allSatisfy { $0.first?.excerpt == saved.selection })
+    #expect(
+        try mobile.capture(id: saved.id)?.selection == "Orchid water requirements after revision.")
+    #expect(
+        try await reader.search("water", limit: 12).first?.excerpt.contains("after revision")
+            == true)
+}
 
 @Test func localAnswerRetrievalFindsSavedBodyAndPreservesOutbox() async throws {
     let root = FileManager.default.temporaryDirectory.appendingPathComponent(
