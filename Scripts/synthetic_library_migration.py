@@ -12,6 +12,7 @@ from pathlib import Path
 import shutil
 import sqlite3
 import tempfile
+import unicodedata
 import uuid
 
 MARKER = ".capd-synthetic-fixture"
@@ -462,7 +463,16 @@ def _import_initial_mac(archive, manifest, authority, binding, import_id, author
                     if digest(published) != blob["digest"] or published.stat().st_size != blob["byteCount"]:
                         raise PreparationError("copied authority image failed verification")
                     inject(failure, "import-asset")
-                db.execute("INSERT INTO sync_records VALUES (?,?)", (record["id"], encode(record)))
+                source_identity = record["source"]
+                content_hash = source_identity.get("contentHash")
+                identity_blob = source_identity.get("blob") if source_identity["kind"] == "image" else None
+                db.execute("""INSERT INTO sync_records
+                    (id,payload,source_kind,content_hash,blob_digest,blob_byte_count)
+                    VALUES (?,?,?,?,?,?)""",
+                    (record["id"], encode(record), source_identity["kind"],
+                     unicodedata.normalize("NFC", content_hash) if content_hash is not None else None,
+                     identity_blob["digest"] if identity_blob else None,
+                     identity_blob["byteCount"] if identity_blob else None))
                 db.execute("INSERT INTO sync_imported_legacy VALUES (?,?,?)", (local_id, identity, payload))
                 inject(failure, "import-row")
             # An expired cursor selects the existing full-baseline recovery path; no device history is invented.

@@ -250,7 +250,10 @@ class MigrationTests(unittest.TestCase):
                 CREATE TABLE sync_meta (id INTEGER PRIMARY KEY,role TEXT,device TEXT,sequence INTEGER,cursor INTEGER,floor INTEGER,observed_sequence INTEGER);
                 INSERT INTO sync_meta VALUES (1,'server',NULL,0,0,0,0);
                 CREATE TABLE sync_binding (id INTEGER PRIMARY KEY,payload BLOB);
-                CREATE TABLE sync_records (id TEXT PRIMARY KEY,payload BLOB);
+                CREATE TABLE sync_records (id TEXT PRIMARY KEY,payload BLOB,
+                    source_kind TEXT,content_hash TEXT,blob_digest TEXT,blob_byte_count INTEGER);
+                CREATE INDEX sync_records_identity
+                    ON sync_records (source_kind,content_hash,blob_digest,blob_byte_count,id);
                 CREATE TABLE sync_aliases (id TEXT PRIMARY KEY,canonical TEXT);
                 CREATE TABLE sync_receipts (id TEXT PRIMARY KEY,operation BLOB,receipt BLOB);
                 CREATE TABLE sync_devices (id TEXT PRIMARY KEY,sequence INTEGER);
@@ -296,6 +299,39 @@ class MigrationTests(unittest.TestCase):
             self.assertEqual(baseline, migration.sql_signature(db))
         with self.assertRaises(migration.PreparationError):
             migration.import_initial_mac(self.archive, authority, binding, str(uuid.uuid4()))
+
+    def test_imported_records_match_indexed_source_identity(self):
+        self.db.execute("ALTER TABLE captures ADD COLUMN content_hash TEXT")
+        self.db.execute("UPDATE captures SET content_hash=? WHERE id=42", ("image-cafe\u0301",))
+        self.db.execute("UPDATE captures SET content_hash=?,asset_path=? WHERE id=81",
+                        ("text-cafe\u0301", "nested/image.png"))
+        self.db.commit()
+        identities = migration.backfill_legacy(self.source, "captures.sqlite")
+        migration.backup(self.source, self.archive)
+        authority, binding = self.authority()
+        migration.import_initial_mac(self.archive, authority, binding, str(uuid.uuid4()))
+        lookup = """SELECT payload FROM sync_records
+            WHERE source_kind=? AND content_hash=? AND blob_digest IS ? AND blob_byte_count IS ?
+            ORDER BY id LIMIT 1"""
+        with contextlib.closing(sqlite3.connect(authority / "server.sqlite")) as db:
+            records = {row[0]: json.loads(row[1]) for row in db.execute("SELECT id,payload FROM sync_records")}
+            self.assertEqual("image-cafe\u0301", records[identities[42]]["source"]["contentHash"])
+            self.assertEqual("text-cafe\u0301", records[identities[81]]["source"]["contentHash"])
+            image_blob = records[identities[42]]["source"]["blob"]
+            image_identity = ("image", "image-caf\u00e9", image_blob["digest"], image_blob["byteCount"])
+            image_match = json.loads(db.execute(lookup, image_identity).fetchone()[0])
+            self.assertEqual(identities[42], image_match["id"])
+            wrong_size = (*image_identity[:3], image_blob["byteCount"] + 1)
+            self.assertIsNone(db.execute(lookup, wrong_size).fetchone())
+            self.assertIsNone(db.execute(lookup, ("text", *image_identity[1:])).fetchone())
+            self.assertIn("blob", records[identities[81]]["source"])
+            text_identity = ("text", "text-caf\u00e9", None, None)
+            text_match = json.loads(db.execute(lookup, text_identity).fetchone()[0])
+            self.assertEqual(identities[81], text_match["id"])
+            wrong_text_blob = (*text_identity[:2], image_blob["digest"], image_blob["byteCount"])
+            self.assertIsNone(db.execute(lookup, wrong_text_blob).fetchone())
+            plan = db.execute("EXPLAIN QUERY PLAN " + lookup, image_identity).fetchall()
+            self.assertTrue(any("USING INDEX sync_records_identity" in row[3] for row in plan), plan)
 
     def test_initial_import_failure_rollback_and_bound_authority_checks(self):
         migration.backfill_legacy(self.source, "captures.sqlite")
