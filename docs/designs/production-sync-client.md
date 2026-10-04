@@ -8,17 +8,17 @@ The async client checks library and device binding before credentials or network
 
 `SyncEnrollment` contains only public identity and endpoint metadata. `SyncCredentialStore` separates credentials from library databases. The Keychain implementation uses a service namespace plus service/library/device account identity, disables iCloud synchronization, and uses `AfterFirstUnlockThisDeviceOnly`. Reads, replacement and removal report generic failures. Tests and previews use `MemorySyncCredentialStore`; the preparation tests do not read or write real Keychain items.
 
-## Activation gate
+## Legacy activation gate and bound-store integration
 
-The app remains local-only. `EnrolledSyncAdapter` construction calls `SyncEnrollmentActivation.requireReady()`, which refuses activation. The setup screen keeps connection disabled. A DEBUG simulator launch with `--capd-synthetic-enrollment` exposes a disposable setup form: it validates synthetic details, exercises in-memory credentials and verifies a queued capture survives reopening a temporary bound SQLite library. It never contacts its entered address or touches the app library.
+`SyncEnrollmentActivation.requireReady()` refuses activation through the legacy globally gated constructor. Transport support alone does not authorize or enroll an existing library. Higher-level clients must supply a separately validated bound-store opening and activation path; this guard does not describe whether those clients expose connection settings.
 
-The existing guard still refuses enrollment of a used, unbound database. Migration and backup acceptance, an authorized cutover, and an explicit gate change are required before real-library enrollment. This change supplies async `MobileStore` push/pull methods and coordinator injection, without changing the store initializer or migrating any library. The migration owner supplies the separately verified bound-store opening path. No connection is enabled by importing either preparation change alone.
+The store guard refuses enrollment of a used, unbound database. Migration and backup acceptance and an authorized cutover are required before connecting existing content. A client may open a separately prepared bound store after validating its identity and backup without removing the legacy global guard. The mobile activation layer documents that path in `mobile-library-activation.md`; merely importing this package does not migrate or connect a library.
 
 ## Verification
 
-`AsyncHTTPTests` runs an actual loopback HTTP host with synthetic enrollment and disposable SQLite/blob directories. It exercises response loss after commit, exact-byte retry after reopening, cancellation while awaiting a committed response, additional queued work during that request, multi-chunk attachment upload and verified download, redirect refusal with zero target requests, declared/chunked response bounds, authentication failures, and binding guards. `EnrollmentGateTests` verifies mobile activation remains closed and unbound injection fails before credentials or HTTP access.
+`AsyncHTTPTests` runs an actual loopback HTTP host with synthetic enrollment and disposable SQLite/blob directories. It exercises response loss after commit, exact-byte retry after reopening, cancellation while awaiting a committed response, additional queued work during that request, multi-chunk attachment upload and verified download, redirect refusal with zero target requests, declared/chunked response bounds, authentication failures, and binding guards. It also verifies that the legacy global activation guard remains closed.
 
-The simulator UI test `AutomaticSyncUITests.testSyntheticSetupIsDisposableAndLiveConnectionRemainsDisabled` verifies temporary setup and the disabled connection action. It requires an owned disposable simulator; do not run it against a physical phone or reset an existing library.
+Mobile setup and activation checks belong to the client layer. They use disposable synthetic libraries and do not require resetting an existing library.
 
 
 ## Shared metadata contract
@@ -74,7 +74,7 @@ Authenticated successful `SyncHTTPReply` messages remain response version 1 and 
 
 Guarded applies use request envelope version 2. The upgraded handler accepts versions 1, 2 and 3, and requires at least version 2 for these metadata semantics before resolving storage; an old version-1 handler rejects version 2 before accessing mutation storage. This also refuses a server downgrade between probe and apply. Legacy operations continue to use envelope version 1 without the extra probe. Operation ID, sequence, predecessor and canonical queued payload bytes do not change across negotiation or retry.
 
-Upgrade the authority to this contract before enabling clients that create metadata or send the new edits. Verify it advertises the capability under the correct enrolled principal. Then integrate the separately proven Store/mobile migration and backup path and authorize activation. Keep the default local-only behavior and activation gate closed until that acceptance is complete. This handoff does not update a NAS binary, enroll a real device or change a live library.
+Upgrade the authority to this contract before enabling clients that create metadata or send the new edits. Verify it advertises the capability under the correct enrolled principal. Then integrate the separately proven Store/mobile migration and backup path and authorize activation. Unconfigured clients remain local-only; an existing bound-store activation path does not bypass capability checks. This package does not update a server binary, enroll a real device or change a live library.
 
 ## Metadata and transaction verification
 
