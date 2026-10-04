@@ -39,6 +39,20 @@ public struct EnrolledSyncAdapter: MobileSyncAdapter {
             credential: { try credentials.read(for: enrollment) })
     }
 
+    /// Only a factory-selected, already bound store may enable enrolled sync.
+    public init(
+        enrollment: SyncEnrollment, store: MobileStore,
+        credentials: any SyncCredentialStore
+    ) throws {
+        guard store.libraryBinding == enrollment.binding, store.deviceID == enrollment.deviceID
+        else { throw SyncBindingError.mismatch }
+        connection = MobileAsyncSyncConnection(
+            transport: try URLSessionSyncTransport(
+                endpoint: enrollment.endpoint,
+                binding: enrollment.binding, deviceID: enrollment.deviceID),
+            credential: { try credentials.read(for: enrollment) })
+    }
+
     public func availability() async -> SyncAvailability { .ready }
     public func transport() async -> (any SyncTransport)? { nil }
     public func asyncConnection() async -> MobileAsyncSyncConnection? { connection }
@@ -66,6 +80,7 @@ public actor MobileSyncCoordinator {
     private let store: MobileStore
     private let adapter: any MobileSyncAdapter
     private var flight: (id: UUID, pullOnly: Bool, task: Task<SyncResult, any Error>)?
+    private var draining = false
 
     public init(store: MobileStore, adapter: any MobileSyncAdapter = LocalOnlySyncAdapter()) {
         self.store = store
@@ -76,13 +91,24 @@ public actor MobileSyncCoordinator {
     public func refresh() async throws { _ = try await run(pullOnly: true) }
     public func cancel() { flight?.task.cancel() }
 
+    public func cancelAndDrain() async {
+        draining = true
+        let running = flight
+        running?.task.cancel()
+        _ = try? await running?.task.value
+        if flight?.id == running?.id { flight = nil }
+        draining = false
+    }
+
     private func run(pullOnly: Bool) async throws -> SyncResult {
+        guard !draining else { throw CancellationError() }
         try Task.checkCancellation()
         while let current = flight {
             if current.pullOnly == pullOnly { return try await join(current.task) }
             // Opposite modes share exclusive access, not the earlier operation's result.
             do { _ = try await join(current.task) } catch {}
             try Task.checkCancellation()
+            guard !draining else { throw CancellationError() }
             if flight?.id == current.id { flight = nil }
         }
         let id = UUID()

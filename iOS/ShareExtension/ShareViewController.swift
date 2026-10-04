@@ -69,7 +69,7 @@ final class ShareViewController: UIViewController {
         draft.saving = true
         capture.note = draft.note
         do {
-            try MobileEnvironment.store().save(capture)
+            _ = try MobileEnvironment.session(role: .shareExtension).save(capture)
             extensionContext?.completeRequest(returningItems: nil)
         } catch {
             draft.error = error.localizedDescription
@@ -127,7 +127,7 @@ struct ShareCaptureView: View {
                         .lineLimit(2...5).accessibilityIdentifier("shareNoteInput")
                 }
                 if let error = draft.error { Text(error).foregroundStyle(.red) }
-                Text("Saves to this iPhone.").font(.footnote).foregroundStyle(
+                Text("Saves to this device.").font(.footnote).foregroundStyle(
                     palette.textSecondary)
             }
             .capdCanvas()

@@ -66,6 +66,7 @@ public actor AutomaticSyncController {
     private var timerID: UUID?
     private var timerKind: TimerKind?
     private var worker: Task<Void, Never>?
+    private var draining = false
     private var active = false
     private var connected = true
     private var unconfigured = false
@@ -100,7 +101,7 @@ public actor AutomaticSyncController {
     public func currentState() -> AutomaticSyncState { snapshot() }
 
     public func foreground() async {
-        guard !active else { return }
+        guard !active, !draining else { return }
         active = true
         unconfigured = false
         halted = false
@@ -115,6 +116,17 @@ public actor AutomaticSyncController {
         worker?.cancel()
         state.phase = .paused
         publish()
+    }
+
+    /// Cutover barrier: cancellation alone does not mean the transport has stopped.
+    /// Reentrant foreground/retry calls cannot restart work during the drain.
+    public func suspendAndDrain() async {
+        draining = true
+        suspend()
+        let running = worker
+        await coordinator.cancelAndDrain()
+        await running?.value
+        draining = false
     }
 
     public func localChange() async {
@@ -149,7 +161,7 @@ public actor AutomaticSyncController {
     }
 
     private func arm(after delay: TimeInterval, kind: TimerKind) async {
-        guard active, connected, !unconfigured, !halted, worker == nil else {
+        guard active, connected, !unconfigured, !halted, !draining, worker == nil else {
             publish()
             return
         }
@@ -158,7 +170,7 @@ public actor AutomaticSyncController {
         timerID = id
         timerKind = kind
         if kind == .retry { state.nextRetryAt = await clock.now().addingTimeInterval(delay) }
-        guard timerID == id, active, connected, worker == nil else { return }
+        guard timerID == id, active, connected, !draining, worker == nil else { return }
         let clock = clock
         timer = Task { [weak self] in
             do {
@@ -171,7 +183,8 @@ public actor AutomaticSyncController {
     }
 
     private func timerFired(_ id: UUID) {
-        guard timerID == id, active, connected, !unconfigured, !halted, worker == nil else {
+        guard timerID == id, active, connected, !unconfigured, !halted, !draining, worker == nil
+        else {
             return
         }
         timer = nil

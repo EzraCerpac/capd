@@ -1,8 +1,17 @@
 import CapdMobile
+import CapdSync
 import Foundation
 
 enum MobileEnvironment {
     static let groupID = "group.dev.jxd.capd.iphone.prototype"
+
+    static var holdsSyntheticOfflineWork: Bool {
+        #if DEBUG
+            return ProcessInfo.processInfo.arguments.contains("--capd-offline-fixture")
+        #else
+            return false
+        #endif
+    }
 
     static func syncPolicy() -> AutomaticSyncPolicy {
         #if DEBUG && targetEnvironment(simulator)
@@ -18,7 +27,7 @@ enum MobileEnvironment {
         return AutomaticSyncPolicy()
     }
 
-    static func adapter() -> any MobileSyncAdapter {
+    static func syntheticAdapter() -> (any MobileSyncAdapter)? {
         #if DEBUG && targetEnvironment(simulator)
             let arguments = ProcessInfo.processInfo.arguments
             if arguments.contains("--capd-synthetic-sync"),
@@ -29,17 +38,34 @@ enum MobileEnvironment {
                 return ReferenceSyncAdapter(port: port)
             }
         #endif
-        return LocalOnlySyncAdapter()
+        return nil
     }
 
+    static func adapter() -> any MobileSyncAdapter { syntheticAdapter() ?? LocalOnlySyncAdapter() }
+
+    static let credentials = KeychainSyncCredentialStore(service: "dev.jxd.capd.phone.sync")
+
     static func store() throws -> MobileStore {
+        try session(role: .shareExtension).store
+    }
+
+    static func root() throws -> URL {
         guard
             let container = FileManager.default.containerURL(
                 forSecurityApplicationGroupIdentifier: groupID)
         else {
             throw EnvironmentError.sharedContainerUnavailable
         }
-        return try MobileStore(url: container.appendingPathComponent("Library/captures.sqlite"))
+        return container
+    }
+
+    static func session(role: MobileLibrarySession.Role) throws -> MobileLibrarySession {
+        try MobileLibrarySession.open(root: root(), role: role, credentials: credentials)
+    }
+
+    static func selectedDatabaseURL() throws -> URL {
+        let container = try root()
+        return try MobileLibraryAccess.selected(in: container).databaseURL(in: container)
     }
 
     enum EnvironmentError: Error, LocalizedError {
