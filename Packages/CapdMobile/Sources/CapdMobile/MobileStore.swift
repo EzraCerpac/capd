@@ -105,7 +105,27 @@ public final class MobileStore: Sendable {
             createdAt: capture.createdAt, note: capture.note.isEmpty ? nil : capture.note,
             metadata: capture.metadata)
         record.manualTags = capture.manualTags
-        return try client.enqueue(captureID: record.id, mutation: .create(record)).id
+        return try enqueue(captureID: record.id, mutation: .create(record))
+    }
+
+    @discardableResult
+    private func enqueue(captureID: UUID, mutation: CaptureMutation, baseRevision: Int64? = nil)
+        throws -> UUID
+    {
+        return try database.write { db in
+            let operation = try client.enqueue(
+                in: db, captureID: captureID, mutation: mutation, baseRevision: baseRevision)
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.sortedKeys]
+            // Enrollment identifiers have fixed-width UUID encodings, including before enrollment.
+            let envelope = SyncHTTPEnvelope(
+                expectedServiceID: deviceID, expectedLibraryID: deviceID,
+                expectedDeviceID: deviceID, action: .apply(operation))
+            guard try encoder.encode(envelope).count <= SyncHTTPHandler.maximumBodyBytes else {
+                throw CaptureValidationError.tooLarge
+            }
+            return operation.id
+        }
     }
 
     @discardableResult
@@ -128,12 +148,12 @@ public final class MobileStore: Sendable {
             note: noteChanged ? NoteEdit(note.isEmpty ? nil : note, resolving: resolving) : nil,
             addTags: Array(next.subtracting(previous)).sorted(),
             removeTags: Array(previous.subtracting(next)).sorted())
-        return try client.enqueue(
+        return try enqueue(
             captureID: observed.id, mutation: .edit(edit), baseRevision: observed.revision
-        ).id
+        )
     }
 
-    public func delete(id: UUID) throws { try client.enqueue(captureID: id, mutation: .delete) }
+    public func delete(id: UUID) throws { try enqueue(captureID: id, mutation: .delete) }
 
     public func capture(id: UUID) throws -> MobileCapture? {
         try database.read { db in
@@ -189,12 +209,11 @@ public final class MobileStore: Sendable {
     }
 
     public func pull(from transport: any SyncTransport) throws {
-        for _ in 0..<100 {
+        while true {
             let before = try client.cursor()
             try client.pull(from: transport)
             if try client.cursor() == before { return }
         }
-        throw SyncError.invalidCursor
     }
 
     @discardableResult
@@ -209,13 +228,12 @@ public final class MobileStore: Sendable {
         from transport: any AsyncSyncTransport,
         credential: @escaping @Sendable () throws -> String
     ) async throws {
-        for _ in 0..<100 {
+        while true {
             try Task.checkCancellation()
             let before = try client.cursor()
             try await client.pull(from: transport, credential: credential)
             if try client.cursor() == before { return }
         }
-        throw SyncError.invalidCursor
     }
 
     private static func project(_ db: Database, record: SharedCapture) throws {
