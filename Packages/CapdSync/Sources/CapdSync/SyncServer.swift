@@ -311,13 +311,15 @@ public final class SyncServer: SyncTransport, Sendable {
                 arguments: [after?.uuidString ?? "", limit]
             )
             .map { try SyncDatabase.decode(SharedCapture.self, $0) }
-            return Baseline(cursor: cursor, captures: captures, deviceSequences: sequences)
+            return Baseline(
+                cursor: cursor, captures: captures, deviceSequences: sequences,
+                totalCaptureCount: try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM sync_records")!)
         }
     }
 
     func boundedBaseline(
         after: UUID? = nil, limit: Int? = nil, expectedCursor: Int64? = nil,
-        baselineOverhead: (Int64) throws -> Int
+        baselineOverhead: (Int64, Int) throws -> Int
     ) throws -> Baseline {
         if let limit, !(0...1000).contains(limit) { throw SyncError.invalidCursor }
         return try read { db in
@@ -325,7 +327,9 @@ public final class SyncServer: SyncTransport, Sendable {
             guard expectedCursor == nil || expectedCursor == cursor else {
                 throw SyncError.invalidCursor
             }
-            var remaining = SyncHTTPHandler.maximumBodyBytes - (try baselineOverhead(cursor))
+            let totalCaptureCount = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM sync_records")!
+            var remaining =
+                SyncHTTPHandler.maximumBodyBytes - (try baselineOverhead(cursor, totalCaptureCount))
             guard remaining >= 0 else { throw SyncHTTPError.resourceLimit }
             var sequences: [UUID: Int64] = [:]
             let devices = try Row.fetchCursor(
@@ -361,7 +365,9 @@ public final class SyncServer: SyncTransport, Sendable {
                 remaining -= bytes
                 captures.append(record)
             }
-            return Baseline(cursor: cursor, captures: captures, deviceSequences: sequences)
+            return Baseline(
+                cursor: cursor, captures: captures, deviceSequences: sequences,
+                totalCaptureCount: totalCaptureCount)
         }
     }
 

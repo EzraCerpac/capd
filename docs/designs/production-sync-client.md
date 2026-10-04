@@ -65,12 +65,17 @@ adapter. It requires metadata capability 1 and uses the same cancellation, size,
 response-version and principal checks as ordinary sync. It submits no mutation and
 does not enroll a device. The Store handoff additionally validates the initial cursor,
 empty device history, copied rows, identity map and image bytes before attachment.
+Baseline pages require `totalCaptureCount` on the wire. Both HTTP assemblers pin
+that total with the cursor and device sequences and verify that every expected
+record arrives before returning a complete baseline. `summaryOnly` explicitly
+requests zero records while retaining the full total. Replies without this field
+are rejected; this contract requires an upgraded authority.
 Mac activation must call `importBaseline(credential:requiringGeneratedProcessingContract:)`
 with `true` before committing Store binding or configuration. This requires both metadata
 capability 1 and generated-processing capability 1 under the enrolled principal. The
 default remains `false`, preserving the metadata-only import requirement.
 
-Authenticated successful `SyncHTTPReply` messages remain response version 1 and add optional `metadataContractVersion: 1`. Both HTTP action executors freshly probe `.baseline` before submitting a create with metadata/descriptive extensions or an edit with metadata, source-content, generated-content patches or extensions. They validate status, JSON, response version and the enrolled service/library/device principal before trusting that capability. An absent or unsupported capability throws `unsupportedVersion`; malformed or incorrectly scoped replies throw `invalidResponse`, with no apply request and queued work retained. No capability result is cached.
+Authenticated successful `SyncHTTPReply` messages remain response version 1 and add optional `metadataContractVersion: 1`. Both HTTP action executors freshly probe a zero-limit `.baselinePage` before submitting a create with metadata/descriptive extensions or an edit with metadata, source-content, generated-content patches or extensions. They validate status, JSON, response version and the enrolled service/library/device principal before trusting that capability. An absent or unsupported capability throws `unsupportedVersion`; malformed or incorrectly scoped replies throw `invalidResponse`, with no apply request and queued work retained. No capability result is cached.
 
 Guarded applies use request envelope version 2. The upgraded handler accepts versions 1, 2 and 3, and requires at least version 2 for these metadata semantics before resolving storage; an old version-1 handler rejects version 2 before accessing mutation storage. This also refuses a server downgrade between probe and apply. Legacy operations continue to use envelope version 1 without the extra probe. Operation ID, sequence, predecessor and canonical queued payload bytes do not change across negotiation or retry.
 

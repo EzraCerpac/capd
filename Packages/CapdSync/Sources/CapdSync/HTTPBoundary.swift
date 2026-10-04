@@ -208,15 +208,17 @@ public struct SyncHTTPHandler: Sendable {
                     })
             case .baseline:
                 result = .baseline(
-                    try authority.boundedBaseline { baselineCursor in
-                        try baselineOverhead(cursor: baselineCursor, principal: principal)
+                    try authority.boundedBaseline { baselineCursor, count in
+                        try baselineOverhead(
+                            cursor: baselineCursor, count: count, principal: principal)
                     })
             case .baselinePage(let after, let limit, let expectedCursor):
                 result = .baseline(
                     try authority.boundedBaseline(
                         after: after, limit: limit, expectedCursor: expectedCursor
-                    ) { baselineCursor in
-                        try baselineOverhead(cursor: baselineCursor, principal: principal)
+                    ) { baselineCursor, count in
+                        try baselineOverhead(
+                            cursor: baselineCursor, count: count, principal: principal)
                     })
             case .upload(let blob, let offset, let chunk, let final):
                 try authority.upload(blob, offset: offset, chunk: chunk, final: final)
@@ -248,10 +250,14 @@ public struct SyncHTTPHandler: Sendable {
         reply(.failure(error), status: status)
     }
 
-    private func baselineOverhead(cursor: Int64, principal: SyncPrincipal) throws -> Int {
+    private func baselineOverhead(cursor: Int64, count: Int, principal: SyncPrincipal) throws -> Int
+    {
         try SyncDatabase.encode(
             replyPayload(
-                .baseline(Baseline(cursor: cursor, captures: [], deviceSequences: [:])),
+                .baseline(
+                    Baseline(
+                        cursor: cursor, captures: [], deviceSequences: [:], totalCaptureCount: count
+                    )),
                 principal: principal)
         ).count
     }
@@ -408,9 +414,11 @@ public struct SyncHTTPTransport: BoundSyncTransport {
                 continue
             }
             guard case .baseline(let page) = result,
-                page.captures.count <= limit,
+                page.totalCaptureCount >= captures.count,
+                page.captures.count == min(limit, page.totalCaptureCount - captures.count),
                 first == nil
                     || (page.cursor == first!.cursor
+                        && page.totalCaptureCount == first!.totalCaptureCount
                         && page.deviceSequences == first!.deviceSequences),
                 page.captures.allSatisfy({ after == nil || $0.id.uuidString > after!.uuidString }),
                 zip(page.captures, page.captures.dropFirst()).allSatisfy({
@@ -419,7 +427,7 @@ public struct SyncHTTPTransport: BoundSyncTransport {
             else { throw SyncHTTPError.invalidResponse }
             if first == nil { first = page }
             captures.append(contentsOf: page.captures)
-            if page.captures.count < limit {
+            if captures.count == page.totalCaptureCount {
                 return Baseline(
                     cursor: page.cursor, captures: captures, deviceSequences: page.deviceSequences)
             }

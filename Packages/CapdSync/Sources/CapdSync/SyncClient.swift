@@ -227,6 +227,7 @@ public final class SyncClient: Sendable {
                 }
             }
             let receipt = try transport.apply(operation)
+            try read { try validate(receipt, for: operation, in: $0) }
             try cacheBlob(receipt.capture, from: transport)
             try acknowledge(operation, receipt: receipt)
             receipts.append(receipt)
@@ -235,11 +236,11 @@ public final class SyncClient: Sendable {
     }
 
     private func acknowledge(_ operation: SyncOperation, receipt: SyncReceipt) throws {
-        guard receipt.operationID == operation.id else { throw SyncError.invalidOperation }
         try write { db in
             guard let pending = try operations(db).first, pending == operation else {
                 throw SyncError.invalidOperation
             }
+            try validate(receipt, for: operation, in: db)
             if let record = receipt.capture {
                 try SyncDatabase.alias(db, operation.captureID, to: record.id)
                 try accept(db, record)
@@ -259,6 +260,50 @@ public final class SyncClient: Sendable {
         }
     }
 
+    private func validate(_ receipt: SyncReceipt, for operation: SyncOperation, in db: Database)
+        throws
+    {
+        guard receipt.operationID == operation.id else { throw SyncError.invalidOperation }
+        if receipt.outcome == .missing {
+            guard receipt.capture == nil else { throw SyncError.invalidOperation }
+            if case .create = operation.mutation { throw SyncError.invalidOperation }
+            return
+        }
+        guard let record = receipt.capture else { throw SyncError.invalidOperation }
+        let id = try SyncDatabase.canonical(db, operation.captureID)
+        if record.id != id {
+            guard case .create(let incoming) = operation.mutation,
+                CaptureFingerprint.matches(record.source, incoming.source)
+            else { throw SyncError.invalidOperation }
+        }
+        switch receipt.outcome {
+        case .accepted:
+            let deleted: Bool
+            if case .delete = operation.mutation { deleted = true } else { deleted = false }
+            guard record.deleted == deleted else { throw SyncError.invalidOperation }
+        case .noteConflict:
+            let hasNote: Bool
+            switch operation.mutation {
+            case .create(let incoming): hasNote = incoming.note != nil
+            case .edit(let edit): hasNote = edit.note != nil
+            default: hasNote = false
+            }
+            guard hasNote, !record.deleted,
+                record.noteConflicts.contains(where: { $0.operationID == operation.id })
+            else { throw SyncError.invalidOperation }
+        case .deleted:
+            guard record.deleted else { throw SyncError.invalidOperation }
+            if case .restore = operation.mutation { throw SyncError.invalidOperation }
+        case .staleRestore:
+            guard case .restore = operation.mutation else { throw SyncError.invalidOperation }
+        case .alreadyExists:
+            guard case .create = operation.mutation, !record.deleted else {
+                throw SyncError.invalidOperation
+            }
+        case .missing: break
+        }
+    }
+
     public func pull(from transport: any SyncTransport, limit: Int = 100) throws {
         try checkBinding(transport)
         try Task.checkCancellation()
@@ -271,6 +316,7 @@ public final class SyncClient: Sendable {
             try commit(page, after: oldCursor)
         } catch SyncError.cursorExpired {
             let baseline = try transport.baseline()
+            try validate(baseline, after: oldCursor)
             for record in baseline.captures { try cacheBlob(record, from: transport) }
             try Task.checkCancellation()
             try commit(baseline, after: oldCursor)
@@ -317,6 +363,7 @@ public final class SyncClient: Sendable {
                 }
             }
             let receipt = try await actions.apply(operation)
+            try read { try validate(receipt, for: operation, in: $0) }
             try await cacheBlob(receipt.capture, from: actions)
             try Task.checkCancellation()
             try acknowledge(operation, receipt: receipt)
@@ -341,6 +388,7 @@ public final class SyncClient: Sendable {
             try commit(page, after: oldCursor)
         } catch SyncError.cursorExpired {
             let baseline = try await actions.baseline()
+            try validate(baseline, after: oldCursor)
             for record in baseline.captures { try await cacheBlob(record, from: actions) }
             try Task.checkCancellation()
             try commit(baseline, after: oldCursor)
@@ -366,7 +414,9 @@ public final class SyncClient: Sendable {
     private func validate(_ page: FeedPage, after oldCursor: Int64) throws {
         var cursor = oldCursor
         for change in page.changes {
-            guard cursor < Int64.max, change.cursor == cursor + 1 else {
+            guard cursor < Int64.max, change.cursor == cursor + 1,
+                change.capture.revision == change.cursor
+            else {
                 throw SyncError.invalidCursor
             }
             cursor = change.cursor
@@ -375,6 +425,7 @@ public final class SyncClient: Sendable {
     }
 
     private func commit(_ page: FeedPage, after oldCursor: Int64) throws {
+        try validate(page, after: oldCursor)
         try write { db in
             guard try Int64.fetchOne(db, sql: "SELECT cursor FROM sync_meta") == oldCursor
             else {
@@ -395,9 +446,9 @@ public final class SyncClient: Sendable {
     }
 
     private func commit(_ baseline: Baseline, after oldCursor: Int64) throws {
+        try validate(baseline, after: oldCursor)
         try write { db in
-            guard try Int64.fetchOne(db, sql: "SELECT cursor FROM sync_meta") == oldCursor,
-                baseline.cursor >= oldCursor
+            guard try Int64.fetchOne(db, sql: "SELECT cursor FROM sync_meta") == oldCursor
             else { throw SyncError.invalidCursor }
             let acceptedSequence = baseline.deviceSequences[deviceID] ?? 0
             let observed = try String.fetchSet(db, sql: "SELECT id FROM sync_observed")
@@ -419,6 +470,11 @@ public final class SyncClient: Sendable {
             try rebuild(db)
             try db.execute(sql: "UPDATE sync_meta SET cursor = ?", arguments: [baseline.cursor])
         }
+    }
+
+    private func validate(_ baseline: Baseline, after oldCursor: Int64) throws {
+        guard baseline.cursor >= oldCursor, baseline.totalCaptureCount == baseline.captures.count
+        else { throw SyncError.invalidCursor }
     }
 
     private func checkBinding(_ transport: any SyncTransport) throws {

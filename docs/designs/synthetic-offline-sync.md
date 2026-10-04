@@ -89,8 +89,24 @@ advancing past it; clients retain their existing adaptive page retry behavior.
 HTTP baseline reads count device-sequence and capture bytes incrementally under
 the same envelope budget. An oversized whole baseline or requested baseline page
 returns a resource-limit error; a partial page could falsely signal end of data.
-Paged clients reduce the requested count and retry at the same position. The
-in-process baseline APIs retain their full-library and count-bounded behavior.
+Paged clients reduce the requested count and retry at the same position. Every
+baseline carries required `totalCaptureCount`, including tombstones, computed in
+the same read transaction as its cursor and records. Both HTTP clients pin the
+cursor, device sequences and total across pages, require each page to contain
+`min(limit, totalCaptureCount - capturesAlreadyReceived)` records in UUID order,
+and finish only after receiving the advertised total. A zero-limit request
+returns an explicit summary with the full total. Missing, negative or inconsistent
+totals are invalid responses; short pages do not independently prove completion.
+Complete native baselines also require the total to match their records before
+blob downloads or shadow replacement. The in-process baseline APIs retain their
+full-library and count-bounded behavior.
+
+Clients require feed cursors to be contiguous and each capture revision to equal
+its change cursor before downloading blobs or committing the page. Receipt checks
+require each outcome's capture presence, canonical identity and compatible
+mutation before blob caching or durable outbox removal. Duplicate creates can
+introduce fingerprint-matching aliases, and saved retry receipts can precede the
+current local revision.
 
 A stale note edit creates explicit variants, including a cleared note. Resolving
 variants requires their IDs and the revision the resolver observed. A resolution

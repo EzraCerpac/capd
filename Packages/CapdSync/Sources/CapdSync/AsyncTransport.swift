@@ -179,9 +179,11 @@ struct AsyncHTTPActions {
                     || reply.generatedProcessingContractVersion == 1,
                 !requiringExtractionQualityContract || reply.extractionQualityContractVersion == 1
             else { throw SyncHTTPError.unsupportedVersion }
-            guard page.captures.count <= limit,
+            guard page.totalCaptureCount >= captures.count,
+                page.captures.count == min(limit, page.totalCaptureCount - captures.count),
                 first == nil
                     || (page.cursor == first!.cursor
+                        && page.totalCaptureCount == first!.totalCaptureCount
                         && page.deviceSequences == first!.deviceSequences),
                 page.captures.allSatisfy({ after == nil || $0.id.uuidString > after!.uuidString }),
                 zip(page.captures, page.captures.dropFirst()).allSatisfy({
@@ -190,9 +192,10 @@ struct AsyncHTTPActions {
             else { throw SyncHTTPError.invalidResponse }
             if first == nil { first = page }
             captures.append(contentsOf: page.captures)
-            if summaryOnly || page.captures.count < limit {
+            if summaryOnly || captures.count == page.totalCaptureCount {
                 return Baseline(
-                    cursor: page.cursor, captures: captures, deviceSequences: page.deviceSequences)
+                    cursor: page.cursor, captures: captures, deviceSequences: page.deviceSequences,
+                    totalCaptureCount: page.totalCaptureCount)
             }
             after = page.captures.last!.id
         }

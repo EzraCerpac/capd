@@ -344,6 +344,17 @@ public struct Baseline: Codable, Equatable, Sendable {
     public let cursor: Int64
     public let captures: [SharedCapture]
     public let deviceSequences: [UUID: Int64]
+    public let totalCaptureCount: Int
+
+    public init(
+        cursor: Int64, captures: [SharedCapture], deviceSequences: [UUID: Int64],
+        totalCaptureCount: Int? = nil
+    ) {
+        self.cursor = cursor
+        self.captures = captures
+        self.deviceSequences = deviceSequences
+        self.totalCaptureCount = totalCaptureCount ?? captures.count
+    }
 }
 
 public enum SyncError: Error, Equatable, Codable, Sendable {

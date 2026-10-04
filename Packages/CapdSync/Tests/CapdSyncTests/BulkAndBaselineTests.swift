@@ -23,6 +23,8 @@ struct BulkAndBaselineTests {
         let summary = try await f.wire.importBaseline(
             credential: { f.token }, requiringGeneratedProcessingContract: true, summaryOnly: true)
         #expect(summary.captures.isEmpty)
+        #expect(summary.totalCaptureCount == 24)
+        #expect(try f.server.baselinePage(after: nil, limit: 1).totalCaptureCount == 24)
         #expect(summary.deviceSequences[device] == 24)
         let baseline = try await f.wire.importBaseline(credential: { f.token })
         #expect(baseline.captures.count == 24)

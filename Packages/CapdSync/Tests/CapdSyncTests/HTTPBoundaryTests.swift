@@ -5,6 +5,209 @@ import Testing
 
 @Suite("Prepared authenticated sync boundary")
 struct HTTPBoundaryTests {
+    @Test func incompleteNativeBaselineIsRejectedBeforeDownloadingBlobs() throws {
+        let f = try HTTPFixture()
+        defer { f.clean() }
+        let client = try f.client("native-baseline")
+        let original = SharedCapture(source: CaptureSource(kind: .text, selection: "original"))
+        try client.enqueue(captureID: original.id, mutation: .create(original))
+        try client.push(to: f.transport("A"))
+        try client.pull(from: f.transport("A"))
+        let before = try client.captures()
+        let bytes = Data("synthetic baseline image".utf8)
+        var image = SharedCapture(
+            source: CaptureSource(kind: .image, blob: BlobReference(data: bytes)))
+        image.revision = 2
+        let downloads = Counter()
+        let transport = IncompleteBaselineTransport(
+            backing: f.transport("A"),
+            snapshot: Baseline(
+                cursor: 2, captures: [image], deviceSequences: [:], totalCaptureCount: 2),
+            bytes: bytes, downloads: downloads)
+        #expect(throws: SyncError.invalidCursor) { try client.pull(from: transport) }
+        #expect(downloads.value == 0)
+        #expect(try client.cursor() == 1)
+        #expect(try client.captures() == before)
+        #expect(throws: SyncError.blobMissing) { try client.blobs.read(image.source.blob!) }
+    }
+
+    @Test(arguments: [false, true], [Int64(0), 3])
+    func feedCaptureRevisionMustMatchItsCursor(asynchronous: Bool, revision: Int64) async throws {
+        let f = try HTTPFixture()
+        defer { f.clean() }
+        let client = try f.client("feed-revision")
+        let capture = SharedCapture(source: CaptureSource(kind: .text, selection: "original"))
+        try client.enqueue(captureID: capture.id, mutation: .create(capture))
+        try client.push(to: f.transport("A"))
+        try client.pull(from: f.transport("A"))
+        let before = try client.captures()
+        _ = try f.a.apply(
+            SyncOperation(
+                deviceID: UUID(), sequence: 1, captureID: capture.id, baseRevision: 1,
+                mutation: .edit(CaptureEdit(rating: 5))))
+        let page = try f.a.changes(after: 1)
+        var poisoned = page.changes[0].capture
+        poisoned.revision = revision
+        let change = page.changes[0]
+        let result = SyncHTTPResult.page(
+            FeedPage(
+                cursor: page.cursor,
+                changes: [
+                    FeedChange(
+                        cursor: change.cursor, operationID: change.operationID,
+                        deviceID: change.deviceID, sequence: change.sequence,
+                        requestedCaptureID: change.requestedCaptureID, capture: poisoned)
+                ]))
+        let execute: @Sendable (SyncHTTPRequest) throws -> SyncHTTPResponse = { _ in
+            try syntheticReply(result, principal: f.principal)
+        }
+        if asynchronous {
+            await #expect(throws: SyncError.invalidCursor) {
+                try await client.pull(
+                    from: QualityWire(execute: execute, binding: f.binding, deviceID: f.device),
+                    credential: { "A" })
+            }
+        } else {
+            #expect(throws: SyncError.invalidCursor) {
+                try client.pull(
+                    from: SyncHTTPTransport(
+                        binding: f.binding, deviceID: f.device, credential: { "A" },
+                        execute: execute))
+            }
+        }
+        #expect(try client.cursor() == 1)
+        #expect(try client.captures() == before)
+        try client.pull(from: f.transport("A"))
+        #expect(try client.captures().first?.revision == 2)
+        #expect(try client.captures().first?.rating == 5)
+    }
+
+    @Test(arguments: [false, true], ["short", "missingCount", "negativeCount", "inflatedCount"])
+    func incompleteBaselineDoesNotDeleteShadows(asynchronous: Bool, corruption: String) async throws
+    {
+        let f = try HTTPFixture()
+        defer { f.clean() }
+        let client = try f.client("incomplete-baseline")
+        for index in 0..<3 {
+            let record = SharedCapture(
+                source: CaptureSource(kind: .text, selection: "row \(index)"))
+            try client.enqueue(captureID: record.id, mutation: .create(record))
+        }
+        try client.push(to: f.transport("A"))
+        try client.pull(from: f.transport("A"))
+        let before = try client.captures()
+        let cursor = try client.cursor()
+        let extra = SharedCapture(source: CaptureSource(kind: .text, selection: "extra row"))
+        _ = try f.a.apply(
+            SyncOperation(
+                deviceID: UUID(), sequence: 1, captureID: extra.id, baseRevision: 0,
+                mutation: .create(extra)))
+        try f.a.expireFeed(through: cursor + 1)
+        let execute: @Sendable (SyncHTTPRequest) throws -> SyncHTTPResponse = { request in
+            let response = f.handler.handle(request)
+            var json = try JSONSerialization.jsonObject(with: response.body) as! [String: Any]
+            var result = json["result"] as! [String: Any]
+            if var container = result["baseline"] as? [String: Any],
+                var baseline = container["_0"] as? [String: Any]
+            {
+                switch corruption {
+                case "short":
+                    baseline["captures"] = Array((baseline["captures"] as! [Any]).prefix(1))
+                case "missingCount": baseline.removeValue(forKey: "totalCaptureCount")
+                case "negativeCount": baseline["totalCaptureCount"] = -1
+                default: baseline["totalCaptureCount"] = 5
+                }
+                container["_0"] = baseline
+                result["baseline"] = container
+                json["result"] = result
+            }
+            return SyncHTTPResponse(
+                status: response.status, headers: response.headers,
+                body: try JSONSerialization.data(withJSONObject: json))
+        }
+        if asynchronous {
+            await #expect(throws: SyncHTTPError.invalidResponse) {
+                try await client.pull(
+                    from: QualityWire(execute: execute, binding: f.binding, deviceID: f.device),
+                    credential: { "A" })
+            }
+        } else {
+            #expect(throws: SyncHTTPError.invalidResponse) {
+                try client.pull(
+                    from: SyncHTTPTransport(
+                        binding: f.binding, deviceID: f.device, credential: { "A" },
+                        execute: execute))
+            }
+        }
+        let reopened = try f.client("incomplete-baseline")
+        #expect(try reopened.cursor() == cursor)
+        #expect(try reopened.captures() == before)
+        try reopened.pull(from: f.transport("A"))
+        #expect(try reopened.captures().count == 4)
+    }
+
+    @Test(arguments: [false, true], InvalidReceipt.allCases)
+    private func impossibleReceiptsPreserveDurableOutbox(
+        asynchronous: Bool, invalid: InvalidReceipt
+    ) async throws {
+        let f = try HTTPFixture()
+        defer { f.clean() }
+        let client = try f.client("invalid-receipt")
+        let capture = SharedCapture(source: CaptureSource(kind: .text, contentHash: "original"))
+        try client.enqueue(captureID: capture.id, mutation: .create(capture))
+        try client.push(to: f.transport("A"))
+        try client.pull(from: f.transport("A"))
+        let duplicate = SharedCapture(source: CaptureSource(kind: .text, contentHash: "duplicate"))
+        let mutation: CaptureMutation =
+            invalid == .wrongCreateIdentity
+            ? .create(duplicate)
+            : invalid == .liveDelete ? .delete : .edit(CaptureEdit(rating: 4))
+        let operation = try client.enqueue(
+            captureID: invalid == .wrongCreateIdentity ? duplicate.id : capture.id,
+            mutation: mutation)
+        let before = try client.captures()
+        var record = try #require(try f.a.baseline().captures.first)
+        if invalid == .wrongIdentity || invalid == .wrongCreateIdentity {
+            record = SharedCapture(source: record.source)
+            record.revision = 1
+        }
+        let outcome: SyncReceipt.Outcome
+        switch invalid {
+        case .noteConflictWithoutCapture, .noteConflictWithoutNote: outcome = .noteConflict
+        case .deletedWithoutCapture, .liveDeleted: outcome = .deleted
+        case .staleRestoreWithoutCapture, .staleRestoreForEdit: outcome = .staleRestore
+        case .alreadyExistsWithoutCapture, .alreadyExistsForEdit: outcome = .alreadyExists
+        case .missingWithCapture: outcome = .missing
+        default: outcome = .accepted
+        }
+        let receipt = SyncReceipt(
+            operationID: operation.id, outcome: outcome,
+            capture: invalid.rawValue.hasSuffix("WithoutCapture") ? nil : record)
+        let execute: @Sendable (SyncHTTPRequest) throws -> SyncHTTPResponse = { _ in
+            try syntheticReply(.receipt(receipt), principal: f.principal)
+        }
+        if asynchronous {
+            await #expect(throws: SyncError.invalidOperation) {
+                try await client.push(
+                    to: QualityWire(execute: execute, binding: f.binding, deviceID: f.device),
+                    credential: { "A" })
+            }
+        } else {
+            #expect(throws: SyncError.invalidOperation) {
+                try client.push(
+                    to: SyncHTTPTransport(
+                        binding: f.binding, deviceID: f.device, credential: { "A" },
+                        execute: execute))
+            }
+        }
+        let reopened = try f.client("invalid-receipt")
+        #expect(try reopened.pendingOperations() == [operation])
+        #expect(try reopened.captures() == before)
+        #expect(try reopened.rejectedWork().isEmpty)
+        #expect(try reopened.push(to: f.transport("A")).map(\.operationID) == [operation.id])
+        #expect(try reopened.pendingOperations().isEmpty)
+    }
+
     @Test(arguments: [false, true], [0, 1, 2, 3])
     func skippedFeedCursorsLeaveDurableStateUnchanged(asynchronous: Bool, gap: Int) async throws {
         let f = try HTTPFixture()
@@ -990,11 +1193,11 @@ struct HTTPBoundaryTests {
             }
         }
         #expect(throws: SyncHTTPError.resourceLimit) {
-            try f.a.boundedBaseline(limit: 0) { _ in
+            try f.a.boundedBaseline(limit: 0) { _, _ in
                 SyncHTTPHandler.maximumBodyBytes - pairBytes
             }
         }
-        let summary = try f.a.boundedBaseline(limit: 0) { _ in
+        let summary = try f.a.boundedBaseline(limit: 0) { _, _ in
             SyncHTTPHandler.maximumBodyBytes - (1000 * pairBytes + 999)
         }
         #expect(summary.deviceSequences.count == 1000)
@@ -1060,6 +1263,43 @@ private struct QualityWire: AsyncSyncTransport {
     func send(_ request: SyncHTTPRequest) async throws -> SyncHTTPResponse { try execute(request) }
 }
 
+private struct IncompleteBaselineTransport: BoundSyncTransport {
+    let backing: SyncHTTPTransport
+    let snapshot: Baseline
+    let bytes: Data
+    let downloads: Counter
+    var binding: SyncLibraryBinding { backing.binding }
+    var deviceID: UUID { backing.deviceID }
+    func apply(_ operation: SyncOperation) throws -> SyncReceipt { try backing.apply(operation) }
+    func changes(after cursor: Int64, limit: Int) throws -> FeedPage {
+        throw SyncError.cursorExpired
+    }
+    func baseline() throws -> Baseline { snapshot }
+    func upload(_ blob: BlobReference, offset: Int, chunk: Data, final: Bool) throws {
+        try backing.upload(blob, offset: offset, chunk: chunk, final: final)
+    }
+    func download(_ blob: BlobReference) throws -> Data {
+        downloads.increment()
+        return bytes
+    }
+}
+
+private enum InvalidReceipt: String, CaseIterable {
+    case acceptedWithoutCapture, noteConflictWithoutCapture, deletedWithoutCapture
+    case staleRestoreWithoutCapture, alreadyExistsWithoutCapture
+    case wrongIdentity, wrongCreateIdentity, noteConflictWithoutNote, staleRestoreForEdit
+    case alreadyExistsForEdit, missingWithCapture, liveDeleted, liveDelete
+}
+
+private func syntheticReply(_ result: SyncHTTPResult, principal: SyncPrincipal) throws
+    -> SyncHTTPResponse
+{
+    SyncHTTPResponse(
+        status: 200, headers: ["Content-Type": "application/json"],
+        body: try SyncDatabase.encode(
+            SyncHTTPReply(version: 1, principal: principal, result: result)))
+}
+
 private struct RetainedImageWire: AsyncSyncTransport {
     let binding: SyncLibraryBinding
     let deviceID: UUID
@@ -1102,6 +1342,9 @@ private final class HTTPFixture: Sendable {
     let auth: SyntheticAuthorizer
     let resolutions = Counter()
     var binding: SyncLibraryBinding { SyncLibraryBinding(libraryID: libraryA, serviceID: service) }
+    var principal: SyncPrincipal {
+        SyncPrincipal(serviceID: service, libraryID: libraryA, deviceID: device)
+    }
     var handler: SyncHTTPHandler {
         SyncHTTPHandler(
             serviceID: service, authorizer: auth,

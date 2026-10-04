@@ -34,7 +34,7 @@ flowchart LR
     R --> C
 ```
 
-The five actions are apply, changes, baseline, upload and download. Fixture controls
+The actions are apply, changes, baseline, baselinePage, upload and download. Fixture controls
 and administrative actions are absent. Domain DTOs use their existing Codable
 representation inside the separate versioned envelope; dates use JSONEncoder's
 reference-date numeric representation and binary data uses base64. Version changes
@@ -46,7 +46,11 @@ credential headers are rejected. This boundary accepts the exact JSON media type
 a host must normalize any permitted media-type parameters deliberately. Request and
 response JSON are bounded at 16 MiB, upload chunks at 64 KiB, feed pages at 1,000
 changes, and blobs at the existing 8 MiB domain limit. Oversized full baselines fail
-with a bounded resource-limit response; there is no streaming baseline implementation.
+with a bounded resource-limit response. Clients recover through cursor-pinned
+baseline pages with a required `totalCaptureCount` computed in the same read
+transaction. They verify the total and UUID ordering before treating recovery as
+complete; missing or inconsistent totals are invalid responses. Summary requests
+use a zero page limit and carry the full count without records.
 The HTTP host must enforce admission limits while reading the body, before buffering
 it into the handler's `Data` value.
 
@@ -123,7 +127,7 @@ checks before activation. See Apple's [URLSession documentation](https://develop
 and [redirect callback](https://developer.apple.com/documentation/foundation/urlsessiontaskdelegate/urlsession(_:task:willperformhttpredirection:newrequest:completionhandler:)).
 
 Total storage/history quotas, partial-upload cleanup, receipt/tombstone retention,
-rate limits and streaming/paged baseline recovery remain host/design work.
+rate limits and streaming baseline delivery remain host/design work.
 Current in-process blob locking does not support multiple authority
 processes staging the same root. The current tests establish synthetic protocol and
 isolation behavior; they do not establish production performance, power-loss recovery
