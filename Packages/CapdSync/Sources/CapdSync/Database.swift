@@ -43,6 +43,7 @@ enum SyncDatabase {
             let storedBinding = try checkEnrollment(
                 db, role: role, deviceID: deviceID, binding: binding,
                 hasUnboundBlobs: hasUnboundBlobs)
+            try prepareDeduplication(db)
             if binding != nil && storedBinding == nil {
                 if let binding {
                     try db.execute(
@@ -163,13 +164,70 @@ enum SyncDatabase {
             .map { try decode(SharedCapture.self, $0) }
     }
 
-    static func save(_ db: Database, _ record: SharedCapture, table: String = "sync_records") throws
-    {
+    private static func prepareDeduplication(_ db: Database) throws {
+        guard !(try db.columns(in: "sync_records")).contains(where: { $0.name == "source_kind" })
+        else { return }
         try db.execute(
             sql: """
-                INSERT INTO \(table) (id, payload) VALUES (?, ?)
-                ON CONFLICT(id) DO UPDATE SET payload = excluded.payload
-                """, arguments: [record.id.uuidString, try encode(record)])
+                ALTER TABLE sync_records ADD COLUMN source_kind TEXT;
+                ALTER TABLE sync_records ADD COLUMN content_hash TEXT;
+                ALTER TABLE sync_records ADD COLUMN blob_digest TEXT;
+                ALTER TABLE sync_records ADD COLUMN blob_byte_count INTEGER;
+                CREATE INDEX sync_records_identity
+                ON sync_records (source_kind, content_hash, blob_digest, blob_byte_count, id);
+                """)
+        let rows = try Row.fetchCursor(db, sql: "SELECT id, payload FROM sync_records ORDER BY id")
+        while let row = try rows.next() {
+            let record = try decode(SharedCapture.self, row["payload"])
+            try db.execute(
+                sql: """
+                    UPDATE sync_records
+                    SET source_kind=?, content_hash=?, blob_digest=?, blob_byte_count=? WHERE id=?
+                    """, arguments: identityArguments(record.source) + [row["id"] as String])
+        }
+    }
+
+    static let deduplicationSQL = """
+        SELECT payload FROM sync_records
+        WHERE source_kind=? AND content_hash=? AND blob_digest IS ? AND blob_byte_count IS ?
+        ORDER BY id LIMIT 1
+        """
+
+    static func matchingRecord(_ db: Database, source: CaptureSource) throws -> SharedCapture? {
+        guard source.contentHash != nil else { return nil }
+        return try Data.fetchOne(db, sql: deduplicationSQL, arguments: identityArguments(source))
+            .map { try decode(SharedCapture.self, $0) }
+    }
+
+    private static func identityArguments(_ source: CaptureSource) -> StatementArguments {
+        let blob = source.kind == .image ? source.blob : nil
+        return [
+            source.kind.rawValue, source.contentHash?.precomposedStringWithCanonicalMapping,
+            blob?.digest, blob?.byteCount,
+        ]
+    }
+
+    static func save(_ db: Database, _ record: SharedCapture, table: String = "sync_records") throws
+    {
+        if table == "sync_records" {
+            try db.execute(
+                sql: """
+                    INSERT INTO sync_records
+                    (id, payload, source_kind, content_hash, blob_digest, blob_byte_count)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(id) DO UPDATE SET payload=excluded.payload,
+                        source_kind=excluded.source_kind, content_hash=excluded.content_hash,
+                        blob_digest=excluded.blob_digest, blob_byte_count=excluded.blob_byte_count
+                    """,
+                arguments: [record.id.uuidString, try encode(record)]
+                    + identityArguments(record.source))
+        } else {
+            try db.execute(
+                sql: """
+                    INSERT INTO \(table) (id, payload) VALUES (?, ?)
+                    ON CONFLICT(id) DO UPDATE SET payload = excluded.payload
+                    """, arguments: [record.id.uuidString, try encode(record)])
+        }
     }
 
     static func canonical(_ db: Database, _ id: UUID) throws -> UUID {

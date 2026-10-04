@@ -76,6 +76,10 @@ blob failure also leaves the operation available for retry.
 A new fingerprint match represents one recapture and increments `seenCount`
 once. A dedicated recapture operation does the same. Replaying either operation
 does not increment it again. Deduplication receipts identify the canonical UUID.
+The authority queries an index of source kind, normalized content hash and image
+blob identity, including tombstones and choosing the first matching UUID. Every
+record save updates these fields. Shared database preparation backfills older
+payload-only databases one record at a time inside the migration transaction.
 
 A stale note edit creates explicit variants, including a cleared note. Resolving
 variants requires their IDs and the revision the resolver observed. A resolution

@@ -111,9 +111,9 @@ public final class SyncServer: SyncTransport, Sendable {
             case .create(var incoming):
                 if record != nil {
                     outcome = record!.deleted ? .deleted : .alreadyExists
-                } else if var existing = try SyncDatabase.records(db).first(where: {
-                    CaptureFingerprint.matches($0.source, incoming.source)
-                }) {
+                } else if var existing = try SyncDatabase.matchingRecord(
+                    db, source: incoming.source)
+                {
                     try SyncDatabase.alias(db, incoming.id, to: existing.id)
                     if existing.deleted {
                         outcome = .deleted

@@ -1,4 +1,5 @@
 import Foundation
+import GRDB
 import Testing
 
 @testable import CapdSync
@@ -145,6 +146,114 @@ struct SyncDeduplicationTests {
         #expect(try client.captures().count == 1)
         #expect(try client.captures().first?.id == original.id)
         #expect(try client.captures().first?.seenCount == Int.max)
+    }
+
+    @Test func indexedFingerprintPreservesCanonicalUnicodeEquality() throws {
+        let fixture = try DeduplicationFixture()
+        defer { fixture.clean() }
+        let first = SharedCapture(source: CaptureSource(kind: .text, contentHash: "café"))
+        let incoming = SharedCapture(source: CaptureSource(kind: .text, contentHash: "cafe\u{301}"))
+        #expect(CaptureFingerprint.matches(first.source, incoming.source))
+        let device = UUID()
+        _ = try fixture.server.apply(
+            SyncOperation(
+                deviceID: device, sequence: 1, captureID: first.id, baseRevision: 0,
+                mutation: .create(first)))
+        let receipt = try fixture.server.apply(
+            SyncOperation(
+                deviceID: device, sequence: 2, captureID: incoming.id, baseRevision: 0,
+                mutation: .create(incoming)))
+        #expect(receipt.capture?.id == first.id)
+        #expect(receipt.capture?.seenCount == 2)
+    }
+
+    @Test func indexedCreateDoesNotDecodeUnrelatedLibraryPayloads() throws {
+        let fixture = try DeduplicationFixture()
+        defer { fixture.clean() }
+        let writer = try SyncDatabase.open(at: fixture.root.appendingPathComponent("server.sqlite"))
+        let source = CaptureSource(kind: .text, contentHash: "target", selection: "target text")
+        let original = SharedCapture(source: source)
+        try writer.write { db in
+            for index in 0..<1000 {
+                let unrelated = SharedCapture(
+                    source: CaptureSource(kind: .text, contentHash: "other \(index)"))
+                try SyncDatabase.save(db, unrelated)
+                try db.execute(
+                    sql: "UPDATE sync_records SET payload=? WHERE id=?",
+                    arguments: [Data("unrelated invalid payload".utf8), unrelated.id.uuidString])
+            }
+            try SyncDatabase.save(db, original)
+            let plan = try Row.fetchAll(
+                db, sql: "EXPLAIN QUERY PLAN " + SyncDatabase.deduplicationSQL,
+                arguments: ["text", "target", nil, nil])
+            let details = plan.map { $0["detail"] as String }.joined(separator: " ")
+            #expect(details.contains("USING INDEX sync_records_identity"))
+            #expect(!details.contains("SCAN sync_records"))
+            #expect(!details.contains("TEMP B-TREE"))
+        }
+        let incoming = SharedCapture(source: source)
+        let device = UUID()
+        let receipt = try fixture.server.apply(
+            SyncOperation(
+                deviceID: device, sequence: 1, captureID: incoming.id, baseRevision: 0,
+                mutation: .create(incoming)))
+        #expect(receipt.capture?.id == original.id)
+        #expect(receipt.capture?.seenCount == 2)
+        #expect(receipt.outcome == .accepted)
+        let distinct = SharedCapture(source: CaptureSource(kind: .text, contentHash: "new"))
+        let created = try fixture.server.apply(
+            SyncOperation(
+                deviceID: device, sequence: 2, captureID: distinct.id, baseRevision: 0,
+                mutation: .create(distinct)))
+        #expect(created.capture?.id == distinct.id)
+    }
+
+    @Test func legacyBackfillRetainsFirstIDTombstoneAndTracksSourceUpdates() throws {
+        let fixture = try DeduplicationFixture()
+        defer { fixture.clean() }
+        let url = fixture.root.appendingPathComponent("legacy.sqlite")
+        let writer = try SyncDatabase.open(at: url)
+        let source = CaptureSource(kind: .text, contentHash: "legacy hash", selection: "old source")
+        var first = SharedCapture(
+            id: UUID(uuidString: "00000000-0000-0000-0000-000000000001")!, source: source)
+        first.deleted = true
+        let second = SharedCapture(
+            id: UUID(uuidString: "00000000-0000-0000-0000-000000000002")!, source: source)
+        try writer.write { db in
+            try db.execute(
+                sql: "CREATE TABLE sync_records (id TEXT PRIMARY KEY, payload BLOB NOT NULL)")
+            for record in [first, second] {
+                try db.execute(
+                    sql: "INSERT INTO sync_records (id, payload) VALUES (?, ?)",
+                    arguments: [record.id.uuidString, try SyncDatabase.encode(record)])
+            }
+        }
+        let server = try SyncServer(
+            databaseURL: url, blobDirectory: fixture.root.appendingPathComponent("legacy-blobs"))
+        let duplicate = SharedCapture(source: source)
+        let receipt = try server.apply(
+            SyncOperation(
+                deviceID: UUID(), sequence: 1, captureID: duplicate.id, baseRevision: 0,
+                mutation: .create(duplicate)))
+        #expect(receipt.outcome == .deleted)
+        #expect(receipt.capture?.id == first.id)
+        try writer.write { db in
+            #expect(try SyncDatabase.canonical(db, duplicate.id) == first.id)
+            var changed = second
+            changed.source.contentHash = "changed hash"
+            try SyncDatabase.save(db, changed)
+            #expect(try SyncDatabase.matchingRecord(db, source: changed.source)?.id == second.id)
+            #expect(try SyncDatabase.matchingRecord(db, source: source)?.id == first.id)
+            changed.source.contentHash = nil
+            try SyncDatabase.save(db, changed)
+            #expect(try SyncDatabase.matchingRecord(db, source: changed.source) == nil)
+            #expect(
+                try SyncDatabase.matchingRecord(
+                    db, source: CaptureSource(kind: .text, contentHash: "changed hash")) == nil)
+        }
+        _ = try SyncDatabase.prepare(writer, role: "server")
+        #expect(
+            try writer.read { try SyncDatabase.matchingRecord($0, source: source)?.id } == first.id)
     }
 
     private func verifyDistinct(
