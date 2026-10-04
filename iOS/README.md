@@ -5,6 +5,11 @@ resolves note variants, and deletes captures. The share extension writes to the 
 App Group SQLite database while the main app is closed. The library refreshes when
 active. Web fetching, OCR and image capture are not implemented in the mobile UI.
 
+Ask Cap answers questions from saved local text using Apple's on-device model
+when available. It displays supporting quotes and opens saved sources. Questions
+and answers are not persisted, and there is no remote fallback. See
+[local answers](../docs/designs/iphone-local-answers.md).
+
 `Packages/CapdMobile` uses the shared `CapdSync` outbox, device identity and sequence.
 There is no separate mobile pending queue or set-of-IDs acknowledgement path. Local
 source rows and their FTS index are a transactional projection of accepted shared
