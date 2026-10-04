@@ -4,6 +4,7 @@ import Foundation
 public struct MacNoteConflict: Codable, Equatable, Sendable, Identifiable {
     public let id: UUID
     public let title: String
+    public let revision: Int64
     public let variants: [NoteVariant]
 }
 

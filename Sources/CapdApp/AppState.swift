@@ -146,16 +146,73 @@ final class AppState {
     }
 
     func showNoteConflicts() {
-        let alert = NSAlert()
-        alert.messageText = "Conflicting notes"
-        alert.informativeText = noteConflicts.map { conflict in
+        guard let session = librarySession else { return }
+        let snapshots = noteConflicts
+        NSApp.activate()
+        for (index, conflict) in snapshots.enumerated() {
+            let alert = NSAlert()
+            alert.messageText = "Resolve note: \(conflict.title)"
             let variants = conflict.variants.enumerated().map { index, variant in
                 "Version \(index + 1):\n\(variant.value ?? "(Note removed)")"
             }.joined(separator: "\n\n")
-            return "\(conflict.title)\n\n\(variants)"
-        }.joined(separator: "\n\n────────\n\n")
-        NSApp.activate()
-        alert.runModal()
+            alert.informativeText =
+                "Review the versions and edit the merged note. A newer version may keep this note in conflict."
+            let accessory = NSView(frame: NSRect(x: 0, y: 0, width: 420, height: 370))
+            let variantScroll = NSScrollView(frame: NSRect(x: 0, y: 190, width: 420, height: 180))
+            variantScroll.hasVerticalScroller = true
+            variantScroll.borderType = .bezelBorder
+            let variantText = NSTextView(frame: variantScroll.bounds)
+            variantText.isEditable = false
+            variantText.isRichText = false
+            variantText.font = .systemFont(ofSize: NSFont.systemFontSize)
+            variantText.textContainer?.widthTracksTextView = true
+            variantText.autoresizingMask = [.width]
+            variantText.string = variants
+            variantText.setAccessibilityLabel("Note versions")
+            variantScroll.documentView = variantText
+            accessory.addSubview(variantScroll)
+            let label = NSTextField(labelWithString: "Merged note")
+            label.frame = NSRect(x: 0, y: 165, width: 420, height: 20)
+            accessory.addSubview(label)
+            let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: 420, height: 160))
+            scroll.hasVerticalScroller = true
+            scroll.borderType = .bezelBorder
+            let editor = NSTextView(frame: scroll.bounds)
+            editor.isRichText = false
+            editor.font = .systemFont(ofSize: NSFont.systemFontSize)
+            editor.textContainer?.widthTracksTextView = true
+            editor.autoresizingMask = [.width]
+            editor.string = conflict.variants.compactMap(\.value).joined(separator: "\n\n")
+            editor.setAccessibilityLabel("Merged note")
+            scroll.documentView = editor
+            accessory.addSubview(scroll)
+            alert.accessoryView = accessory
+            alert.addButton(withTitle: "Save Merged Note")
+            alert.addButton(withTitle: "Cancel")
+            if index + 1 < snapshots.count { alert.addButton(withTitle: "Next") }
+            alert.window.initialFirstResponder = editor
+            let response = alert.runModal()
+            if response == .alertSecondButtonReturn { return }
+            guard response == .alertFirstButtonReturn else { continue }
+            do {
+                try session.store.resolveNoteConflict(conflict, note: editor.string)
+                noteConflicts = try session.store.noteConflicts()
+                if let runtime = session.runtime {
+                    Task { [weak self] in
+                        let status = await runtime.sync(within: .seconds(5))
+                        self?.syncIssue = status.issue
+                        self?.noteConflicts = status.noteConflicts
+                    }
+                }
+            } catch {
+                let failure = NSAlert()
+                failure.alertStyle = .warning
+                failure.messageText = "Couldn’t save merged note"
+                failure.informativeText = error.localizedDescription
+                failure.runModal()
+                return
+            }
+        }
     }
 
     private func start() throws {

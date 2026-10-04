@@ -36,6 +36,11 @@ sequences through offline failures, cancellation, lost responses and restart.
 Rejected operations remain inspectable and report attention in status, the app's
 degraded indicator and CLI stderr. They are never discarded or resequenced.
 
+The menu's conflicting-notes action shows each note's saved versions and an editable
+merged note. Saving queues an explicit resolution using the displayed variant IDs
+and observed revision. A newer, unseen version remains in conflict and requires
+another review; saving locally does not establish remote resolution.
+
 The app polls from a background sync actor every five seconds (30 seconds after
 an issue). The agent syncs before processing incoming pending captures and after
 writing generated results. Ordinary CLI commands try a five-second flush after

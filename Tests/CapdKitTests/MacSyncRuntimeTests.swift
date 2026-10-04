@@ -102,15 +102,7 @@ struct MacSyncRuntimeTests {
         #expect(offline.phase == .attention)
         #expect(offline.noteConflicts == status.noteConflicts)
         await f.wire.setFault(.none)
-        let current = try #require(try f.server.baseline().captures.first)
-        _ = try f.server.apply(
-            SyncOperation(
-                deviceID: remoteDevice, sequence: 3, captureID: remote.id,
-                baseRevision: current.revision,
-                mutation: .edit(
-                    CaptureEdit(
-                        note: NoteEdit(
-                            "Resolved note", resolving: conflict.variants.map(\.operationID))))))
+        try session.store.resolveNoteConflict(conflict, note: "Resolved note")
         let resolved = await session.runtime!.sync()
         #expect(resolved.phase == .idle)
         #expect(resolved.issue == nil)

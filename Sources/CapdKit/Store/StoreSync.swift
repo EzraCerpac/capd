@@ -194,8 +194,38 @@ extension Store {
                     return MacNoteConflict(
                         id: record.id,
                         title: record.source.title ?? record.source.url ?? "Untitled capture",
+                        revision: record.revision,
                         variants: record.noteConflicts)
                 }
+        }
+    }
+
+    public func resolveNoteConflict(
+        _ snapshot: MacNoteConflict, note: String?, now: Date = Date()
+    ) throws {
+        try write { db in
+            let ids = snapshot.variants.map(\.operationID)
+            guard let client = syncClient, snapshot.revision > 0, !ids.isEmpty,
+                Set(ids).count == ids.count,
+                let record = try StoreSync.visible(db, id: snapshot.id),
+                record.id == snapshot.id, !record.deleted,
+                snapshot.revision <= record.revision,
+                snapshot.variants.allSatisfy({ record.noteConflicts.contains($0) }),
+                let localID = try Int64.fetchOne(
+                    db,
+                    sql: "SELECT local_id FROM sync_capture_ids WHERE global_id=? COLLATE NOCASE",
+                    arguments: [snapshot.id.uuidString]),
+                try Capture.fetchOne(db, key: localID) != nil
+            else { throw MacSyncError.noteConflictChanged }
+            let trimmed = note?.trimmingCharacters(in: .whitespacesAndNewlines)
+            let value = trimmed?.isEmpty == false ? trimmed : nil
+            try client.enqueue(
+                in: db, captureID: snapshot.id,
+                mutation: .edit(
+                    CaptureEdit(
+                        note: NoteEdit(value, resolving: ids),
+                        metadata: CaptureMetadataPatch(updatedAt: now))),
+                baseRevision: snapshot.revision)
         }
     }
 

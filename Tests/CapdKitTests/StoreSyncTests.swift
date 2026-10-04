@@ -7,6 +7,84 @@ import Testing
 
 @Suite("Opt-in Mac Store sync")
 struct StoreSyncTests {
+    @Test("Conflict resolution freezes displayed IDs and revision while retaining unseen variants")
+    func noteResolutionRetainsNewerVariants() throws {
+        for pullNewVariant in [false, true] {
+            try fixture { paths, binding, server in
+                let store = try Store(paths: paths, syncBinding: binding)
+                let client = try #require(store.syncClient)
+                let transport = StoreTestTransport(
+                    server: server, binding: binding, deviceID: client.deviceID)
+                let captured = try CaptureService(store: store).ingest(
+                    CaptureRequest(text: "Note conflict", note: "Original")
+                ).capture
+                try client.push(to: transport)
+                let id = try #require(try server.baseline().captures.first?.id)
+                _ = try store.updateNote(id: captured.id!, note: "Mac variant")
+                _ = try server.apply(
+                    SyncOperation(
+                        deviceID: UUID(), sequence: 1, captureID: id, baseRevision: 1,
+                        mutation: .edit(CaptureEdit(note: NoteEdit("Remote variant")))))
+                try client.push(to: transport)
+                try client.pull(from: transport)
+                let snapshot = try #require(try store.noteConflicts().first)
+                let originalIDs = snapshot.variants.map(\.operationID)
+                let latest = try #require(try server.baseline().captures.first)
+                _ = try server.apply(
+                    SyncOperation(
+                        deviceID: UUID(), sequence: 1, captureID: id, baseRevision: latest.revision,
+                        mutation: .edit(CaptureEdit(note: NoteEdit("Unseen variant")))))
+                if pullNewVariant { try client.pull(from: transport) }
+                try store.resolveNoteConflict(snapshot, note: "  Merged note  ")
+                let operation = try #require(try client.pendingOperations().first)
+                #expect(operation.captureID == snapshot.id)
+                #expect(operation.baseRevision == snapshot.revision)
+                guard case .edit(let edit) = operation.mutation else {
+                    Issue.record("Expected a resolution edit")
+                    return
+                }
+                #expect(edit.note?.resolving == originalIDs)
+                #expect(edit.note?.value == "Merged note")
+                #expect(try client.push(to: transport).first?.outcome == .noteConflict)
+                try client.pull(from: transport)
+                let remaining = try #require(try store.noteConflicts().first)
+                #expect(
+                    Set(remaining.variants.compactMap(\.value)) == [
+                        "Mac variant", "Remote variant", "Unseen variant", "Merged note",
+                    ])
+                try store.resolveNoteConflict(remaining, note: " \n ")
+                try client.push(to: transport)
+                try client.pull(from: transport)
+                #expect(try store.noteConflicts().isEmpty)
+                #expect(try SearchService(store: store).capture(id: captured.id!)?.note == nil)
+                #expect(throws: MacSyncError.noteConflictChanged) {
+                    try store.resolveNoteConflict(snapshot, note: "Obsolete resolution")
+                }
+                #expect(try client.pendingOperations().isEmpty)
+            }
+        }
+    }
+
+    @Test("Resolution refuses empty or foreign conflict snapshots without changing the capture")
+    func invalidNoteResolutionSnapshot() throws {
+        try fixture { paths, binding, _ in
+            let store = try Store(paths: paths, syncBinding: binding)
+            let client = try #require(store.syncClient)
+            let capture = try CaptureService(store: store).ingest(
+                CaptureRequest(text: "Unrelated", note: "Keep note")
+            ).capture
+            let pending = try client.pendingOperations()
+            for variants in [[], [NoteVariant(operationID: UUID(), value: "Foreign note")]] {
+                let snapshot = MacNoteConflict(
+                    id: UUID(), title: "Foreign", revision: 1, variants: variants)
+                #expect(throws: MacSyncError.noteConflictChanged) {
+                    try store.resolveNoteConflict(snapshot, note: "Never written")
+                }
+            }
+            #expect(try SearchService(store: store).capture(id: capture.id!)?.note == "Keep note")
+            #expect(try client.pendingOperations() == pending)
+        }
+    }
     @Test("Thin extraction remains retryable locally, on peers and through same-body corrections")
     func thinExtractionQuality() throws {
         try fixture { paths, binding, server in

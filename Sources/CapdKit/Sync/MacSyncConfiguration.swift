@@ -2,7 +2,8 @@ import CapdSync
 import Foundation
 
 public enum MacSyncError: Error, Equatable, Sendable {
-    case invalidConfiguration, configurationRequired, configurationChanged, busy
+    case invalidConfiguration, configurationRequired, configurationChanged, busy,
+        noteConflictChanged
 }
 
 extension MacSyncError: LocalizedError {
@@ -13,6 +14,7 @@ extension MacSyncError: LocalizedError {
             "This library is bound. Restore its matching sync configuration before opening it."
         case .configurationChanged: "The sync configuration changed. Reopen the library."
         case .busy: "Another Capd process is synchronizing this library."
+        case .noteConflictChanged: "This note conflict changed. Review its current versions."
         }
     }
 }
