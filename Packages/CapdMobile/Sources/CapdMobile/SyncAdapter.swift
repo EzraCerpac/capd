@@ -81,6 +81,7 @@ public actor MobileSyncCoordinator {
     private let adapter: any MobileSyncAdapter
     private var flight: (id: UUID, pullOnly: Bool, task: Task<SyncResult, any Error>)?
     private var draining = false
+    private var flightGeneration = UUID()
 
     public init(store: MobileStore, adapter: any MobileSyncAdapter = LocalOnlySyncAdapter()) {
         self.store = store
@@ -93,6 +94,7 @@ public actor MobileSyncCoordinator {
 
     public func cancelAndDrain() async {
         draining = true
+        flightGeneration = UUID()
         let running = flight
         running?.task.cancel()
         _ = try? await running?.task.value
@@ -102,13 +104,14 @@ public actor MobileSyncCoordinator {
 
     private func run(pullOnly: Bool) async throws -> SyncResult {
         guard !draining else { throw CancellationError() }
+        let generation = flightGeneration
         try Task.checkCancellation()
         while let current = flight {
             if current.pullOnly == pullOnly { return try await join(current.task) }
             // Opposite modes share exclusive access, not the earlier operation's result.
             do { _ = try await join(current.task) } catch {}
             try Task.checkCancellation()
-            guard !draining else { throw CancellationError() }
+            guard !draining, generation == flightGeneration else { throw CancellationError() }
             if flight?.id == current.id { flight = nil }
         }
         let id = UUID()
