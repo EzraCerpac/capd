@@ -108,14 +108,12 @@ public final class BlobStore: Sendable {
             guard offset >= 0, offset <= data.count, chunk.count <= blob.byteCount,
                 offset <= blob.byteCount - chunk.count
             else { throw SyncError.invalidOffset }
-            if offset < data.count {
-                guard offset + chunk.count <= data.count,
-                    data.subdata(in: offset..<(offset + chunk.count)) == chunk
-                else {
-                    throw SyncError.invalidOffset
-                }
-            } else {
-                data.append(chunk)
+            let overlap = min(data.count - offset, chunk.count)
+            guard data.subdata(in: offset..<(offset + overlap)) == chunk.prefix(overlap) else {
+                throw SyncError.invalidOffset
+            }
+            if overlap < chunk.count {
+                data.append(chunk.dropFirst(overlap))
                 try data.write(to: partial, options: .atomic)
             }
             if final {

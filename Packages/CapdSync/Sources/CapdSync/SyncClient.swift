@@ -356,9 +356,13 @@ public final class SyncClient: Sendable {
             let ahead = try SyncDatabase.records(db).filter { $0.revision > baseline.cursor }
             try db.execute(sql: "DELETE FROM sync_records")
             for record in baseline.captures + ahead { try accept(db, record) }
+            let acceptedSequence = baseline.deviceSequences[deviceID] ?? 0
             try db.execute(
-                sql: "UPDATE sync_meta SET observed_sequence = MAX(observed_sequence, ?)",
-                arguments: [baseline.deviceSequences[deviceID] ?? 0])
+                sql: """
+                    UPDATE sync_meta SET observed_sequence = MAX(observed_sequence, ?),
+                        sequence = MAX(sequence, ?)
+                    """,
+                arguments: [acceptedSequence, acceptedSequence])
             try rebuild(db)
             try db.execute(sql: "UPDATE sync_meta SET cursor = ?", arguments: [baseline.cursor])
         }
