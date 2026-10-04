@@ -264,6 +264,45 @@ private func observedCancellationWhilePaused(_ observation: FlightCancellationOb
 
 private enum FlightPause { case availability, postPushPull, failedApply }
 
+@Test(arguments: [true, false])
+func coordinatorDrainInvalidatesPreexistingOppositeModeWaiters(pullOnlyFirst: Bool) async throws {
+    let fixture = try FlightModeFixture(pause: .availability)
+    defer { fixture.clean() }
+    try fixture.store.save(
+        MobileCapture(
+            kind: .text, title: "Retained during drain", selection: "Synthetic cutover work"))
+    let queued = try fixture.store.pending()
+    let first = Task { try await fixture.run(pullOnly: pullOnlyFirst) }
+    await fixture.adapter.waitUntilPaused()
+    let started = FlightCallerStart()
+    let waiting = Task {
+        await started.signal()
+        return try await fixture.run(pullOnly: !pullOnlyFirst)
+    }
+    await started.wait()
+    for _ in 0..<20 { await Task.yield() }
+    let drainStarted = FlightCallerStart()
+    let drain = Task(priority: .high) {
+        await drainStarted.signal()
+        await fixture.coordinator.cancelAndDrain()
+    }
+    await drainStarted.wait()
+    for _ in 0..<20 { await Task.yield() }
+    await fixture.adapter.release()
+    await drain.value
+    await #expect(throws: CancellationError.self) { try await first.value }
+    await #expect(throws: CancellationError.self) { try await waiting.value }
+    #expect(await fixture.adapter.count() == 1)
+    #expect(fixture.remote.cursors().isEmpty)
+    #expect(fixture.remote.operations().isEmpty)
+    #expect(try fixture.store.pending() == queued)
+    try await fixture.coordinator.refresh()
+    #expect(await fixture.adapter.count() == 2)
+    #expect(fixture.remote.cursors() == [0, 0])
+    #expect(fixture.remote.operations().isEmpty)
+    #expect(try fixture.store.pending() == queued)
+}
+
 private struct FlightModeFixture: Sendable {
     let root: URL
     let store: MobileStore
