@@ -234,18 +234,26 @@ enum SyncDatabase {
                 record.noteConflicts = []
             }
             if server && (base < record.noteRevision || !record.noteConflicts.isEmpty) {
-                if record.noteConflicts.isEmpty {
+                if note.value != record.note,
+                    !record.noteConflicts.contains(where: { $0.value == note.value })
+                {
+                    if record.noteConflicts.isEmpty {
+                        record.noteConflicts.append(
+                            NoteVariant(operationID: record.noteOperationID, value: record.note))
+                    }
                     record.noteConflicts.append(
-                        NoteVariant(operationID: record.noteOperationID, value: record.note))
+                        NoteVariant(operationID: operation.id, value: note.value))
+                    record.noteRevision = record.revision
+                    conflict = true
+                } else if record.noteConflicts.isEmpty {
+                    // The coalesced receipt must still prove causality for its queued successor.
+                    record.noteOperationID = operation.id
                 }
-                record.noteConflicts.append(
-                    NoteVariant(operationID: operation.id, value: note.value))
-                conflict = true
             } else {
                 record.note = note.value
                 record.noteOperationID = operation.id
+                record.noteRevision = record.revision
             }
-            record.noteRevision = record.revision
         }
         if let rating = edit.rating { record.rating = rating }
         record.manualTags = Array(
