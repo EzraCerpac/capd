@@ -79,7 +79,7 @@ struct PhoneReconciliationTests {
         }
     }
 
-    @Test("Incompatible cursor epochs refuse pull, and unverified high-water suppresses overlays")
+    @Test("Incompatible cursor epochs and unverified high-water refuse pull without changing work")
     func cursorAndHighWater() throws {
         try fixture { root in
             let mac = SharedCapture(
@@ -101,15 +101,31 @@ struct PhoneReconciliationTests {
             try database.write { db in try db.execute(sql: "UPDATE sync_meta SET cursor=0") }
             let authorityDB = try DatabaseQueue(
                 path: root.appendingPathComponent("server.sqlite").path)
+            let pending = try phone.pendingOperations()
+            let visible = try phone.captures()
+            let baseline = try database.read { db in
+                try Data.fetchAll(db, sql: "SELECT payload FROM sync_records ORDER BY id")
+            }
+            let metadata = try database.read { db in
+                try Row.fetchOne(db, sql: "SELECT * FROM sync_meta")
+            }
             try authorityDB.write { db in
                 try db.execute(
                     sql: "INSERT INTO sync_devices VALUES (?,1)",
                     arguments: [phone.deviceID.uuidString])
             }
-            try phone.pull(from: server)
+            #expect(throws: SyncError.recoverySequenceCollision) { try phone.pull(from: server) }
             #expect(try pendingBytes(phoneURL) == bytes)
-            #expect(try phone.captures().map(\.id) == [mac.id])
-            #expect(try phone.pendingOperations().count == 1)
+            #expect(try phone.pendingOperations() == pending)
+            #expect(try phone.captures() == visible)
+            #expect(
+                try database.read { db in
+                    try Data.fetchAll(db, sql: "SELECT payload FROM sync_records ORDER BY id")
+                } == baseline)
+            #expect(
+                try database.read { db in
+                    try Row.fetchOne(db, sql: "SELECT * FROM sync_meta")
+                } == metadata)
             let futureRevision = SyncOperation(
                 deviceID: UUID(), sequence: 1, captureID: mac.id, baseRevision: 9,
                 mutation: .edit(CaptureEdit(note: NoteEdit("Wrong epoch"))))

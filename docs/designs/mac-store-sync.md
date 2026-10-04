@@ -104,8 +104,9 @@ reconciliation candidate, not permission to bind a used phone database.
 An advanced outbox starting at 9 is rejected by a Mac-seeded authority expecting 1.
 An unknown alias can yield a missing receipt and consume its sequence. A missing
 predecessor receipt fails, and old cursor/revision epochs cannot be assumed compatible
-with cursor 1. An unverified device high-water in a baseline can suppress pending
-overlays without proving their receipt or alias history. These cases are tested.
+with cursor 1. Baseline recovery refuses an unverified device high-water that
+collides with pending operations without observed acceptance evidence. It preserves
+the exact outbox, accepted baseline, visible library and cursor. These cases are tested.
 
 If authoritative original operation receipts, canonical aliases and revision/history
 provenance are unavailable, preserve the phone snapshot and exact outbox unchanged
