@@ -59,15 +59,7 @@ public final class Authority: @unchecked Sendable {
     func server(for id: UUID, requireExisting: Bool) throws -> SyncServer {
         let root = libraryRoot(id)
         let database = root.appendingPathComponent("authority.sqlite")
-        if requireExisting { try validateExistingLibrary(id) }
-        try Self.validateStoragePath(root, directory: true)
-        try Self.validateStoragePath(root.appendingPathComponent("blobs"), directory: true)
-        for name in [
-            "authority.sqlite", "authority.sqlite-wal", "authority.sqlite-shm",
-            "authority.sqlite-journal",
-        ] {
-            try Self.validateStoragePath(root.appendingPathComponent(name))
-        }
+        try validateLibraryStorage(id, requireExisting: requireExisting)
         if let existing = servers[id] {
             recentlyUsedLibraries.removeAll { $0 == id }
             recentlyUsedLibraries.append(id)
@@ -87,21 +79,29 @@ public final class Authority: @unchecked Sendable {
 
     // Validate without constructing a read-write SyncServer or creating directories.
     func validateExistingLibrary(_ id: UUID) throws {
-        let root = libraryRoot(id)
-        let database = root.appendingPathComponent("authority.sqlite")
-        let rootValues = try root.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])
-        let databaseValues = try database.resourceValues(forKeys: [
-            .isRegularFileKey, .isSymbolicLinkKey,
-        ])
-        guard rootValues.isDirectory == true, rootValues.isSymbolicLink != true,
-            databaseValues.isRegularFile == true, databaseValues.isSymbolicLink != true
-        else { throw HostError.invalidDataDirectory }
+        try validateLibraryStorage(id, requireExisting: true)
     }
 
-    private static func validateStoragePath(_ path: URL, directory: Bool = false) throws {
+    private func validateLibraryStorage(_ id: UUID, requireExisting: Bool) throws {
+        let root = libraryRoot(id)
+        try Self.validateStoragePath(root, directory: true, mustExist: requireExisting)
+        try Self.validateStoragePath(root.appendingPathComponent("blobs"), directory: true)
+        for name in [
+            "authority.sqlite", "authority.sqlite-wal", "authority.sqlite-shm",
+            "authority.sqlite-journal",
+        ] {
+            try Self.validateStoragePath(
+                root.appendingPathComponent(name),
+                mustExist: requireExisting && name == "authority.sqlite")
+        }
+    }
+
+    private static func validateStoragePath(
+        _ path: URL, directory: Bool = false, mustExist: Bool = false
+    ) throws {
         var status = stat()
         if lstat(path.path, &status) != 0 {
-            guard errno == ENOENT else { throw HostError.invalidDataDirectory }
+            guard errno == ENOENT, !mustExist else { throw HostError.invalidDataDirectory }
             return
         }
         guard status.st_mode & S_IFMT == (directory ? S_IFDIR : S_IFREG),

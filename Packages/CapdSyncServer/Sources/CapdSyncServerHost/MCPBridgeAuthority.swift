@@ -162,6 +162,7 @@ extension Authority {
                     "Request expired before execution; retry identical arguments without renumbering"
                 )
             }
+            // Reject unsafe SQLite paths before GRDB opens the read-only store.
             try validateExistingLibrary(grant.binding.libraryID)
             let store = try AcceptedStore(
                 databaseURL: libraryRoot(grant.binding.libraryID).appendingPathComponent(

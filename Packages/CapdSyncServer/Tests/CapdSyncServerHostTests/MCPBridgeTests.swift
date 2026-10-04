@@ -52,6 +52,33 @@ import Testing
         }
     }
 
+    @Test(
+        arguments: [
+            "authority.sqlite-wal", "authority.sqlite-shm", "authority.sqlite-journal",
+        ])
+    func unsafeSQLiteSidecarsAreRejectedBeforeMCPStoreOpen(name: String) async throws {
+        let f = try BridgeFixture()
+        defer { f.clean() }
+        var authority: Authority? = try f.authority()
+        #expect(await authority!.handle(try f.sync(.baseline)).status == 200)
+        authority = nil
+
+        let sidecar = f.libraryRoot.appendingPathComponent(name)
+        if FileManager.default.fileExists(atPath: sidecar.path) {
+            try FileManager.default.removeItem(at: sidecar)
+        }
+        let target = f.root.appendingPathComponent("outside-sqlite-sidecar")
+        let sentinel = Data("outside synthetic sidecar sentinel".utf8)
+        try sentinel.write(to: target)
+        try FileManager.default.createSymbolicLink(at: sidecar, withDestinationURL: target)
+
+        let reopened = try f.authority()
+        #expect(await reopened.handleMCP(try f.rpc()).status == 503)
+        #expect(
+            try FileManager.default.destinationOfSymbolicLink(atPath: sidecar.path) == target.path)
+        #expect(try Data(contentsOf: target) == sentinel)
+    }
+
     @Test func partialAuthoritySchemaIsRefusedWithoutRepair() async throws {
         let f = try BridgeFixture()
         defer { f.clean() }
