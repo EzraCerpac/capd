@@ -294,11 +294,13 @@ public struct SyncOperation: Codable, Equatable, Sendable {
     public let captureID: UUID
     public let baseRevision: Int64
     public let predecessorID: UUID?
+    public let requestIdentity: JSONValue?
     public let mutation: CaptureMutation
 
     public init(
         id: UUID = UUID(), deviceID: UUID, sequence: Int64, captureID: UUID,
-        baseRevision: Int64, predecessorID: UUID? = nil, mutation: CaptureMutation
+        baseRevision: Int64, predecessorID: UUID? = nil, mutation: CaptureMutation,
+        requestIdentity: JSONValue? = nil
     ) {
         self.id = id
         self.deviceID = deviceID
@@ -306,6 +308,7 @@ public struct SyncOperation: Codable, Equatable, Sendable {
         self.captureID = captureID
         self.baseRevision = baseRevision
         self.predecessorID = predecessorID
+        self.requestIdentity = requestIdentity
         self.mutation = mutation
     }
 }
