@@ -92,12 +92,11 @@ final class LibraryModel {
     }
 
     private func finishTransition() async {
+        changingLibrary = false
         do {
             try openSelectedSession()
-            changingLibrary = false
             reload()
         } catch {
-            changingLibrary = false
             storeOpenError = error
             self.error = error.localizedDescription
         }
