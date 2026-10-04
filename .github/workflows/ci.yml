@@ -26,7 +26,12 @@ jobs:
         run: sudo xcode-select -s /Applications/Xcode_26.3.app
 
       - name: Lint
-        run: swift format lint --strict --recursive --parallel Sources Tests Package.swift
+        run: |
+          paths=(Sources Tests Package.swift)
+          for path in Packages/*/Sources Packages/*/Tests Packages/*/Package.swift iOS/App iOS/Shared iOS/ShareExtension iOS/UITests; do
+            if test -e "$path"; then paths+=("$path"); fi
+          done
+          swift format lint --strict --recursive --parallel "${paths[@]}"
 
   build-test:
     runs-on: macos-26
@@ -49,8 +54,28 @@ jobs:
             spm-debug-${{ github.event.repository.name }}-${{ runner.os }}-
             spm-${{ github.event.repository.name }}-${{ runner.os }}-
 
+      - name: Build HTTP integration fixture
+        run: |
+          if test -f Packages/CapdSyncServer/Package.swift; then
+            swift build --package-path Packages/CapdSyncServer --product capd-sync-server --jobs 4
+          fi
+
+      - name: Test snapshot and migration helpers
+        run: |
+          if test -f Scripts/test_synthetic_library_migration.py; then
+            /usr/bin/python3 -m unittest discover -s Scripts -p 'test_*library*.py' -v
+          fi
+
       - name: Test
         run: swift test --parallel
+
+      - name: Test portable packages
+        run: |
+          for package in CapdSync CapdSyncServer CapdSyncAdmin CapdMobile CapdSystemIntegration CapdAnswers CapdMCP; do
+            if test -f "Packages/$package/Package.swift"; then
+              swift test --package-path "Packages/$package" --jobs 4 --no-parallel
+            fi
+          done
 
   raycast:
     runs-on: ubuntu-latest
