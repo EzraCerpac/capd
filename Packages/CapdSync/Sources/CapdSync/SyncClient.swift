@@ -106,6 +106,12 @@ public final class SyncClient: Sendable {
         let acceptedRevision = try SyncDatabase.record(db, id: id)?.revision ?? 0
         let base = baseRevision ?? acceptedRevision
         guard base >= 0, base <= acceptedRevision else { throw SyncError.invalidOperation }
+        if case .restore = mutation,
+            let record = try SyncDatabase.record(db, id: id, table: "sync_visible"),
+            record.deleted, record.revision == base, let blob = record.source.blob
+        {
+            _ = try blobs.read(blob)
+        }
         let pending = try operations(db)
         let predecessor = try pending.last {
             try SyncDatabase.canonical(db, $0.captureID) == id
@@ -507,7 +513,6 @@ public final class SyncClient: Sendable {
                 sql: "DELETE FROM sync_visible WHERE id = ?", arguments: [old.id.uuidString])
         }
         for record in records.values.sorted(by: { $0.id.uuidString < $1.id.uuidString }) {
-            if !record.deleted, let blob = record.source.blob { _ = try blobs.read(blob) }
             try SyncDatabase.save(db, record, table: "sync_visible")
             try projectionGate.project { try project(db, record) }
         }

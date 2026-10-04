@@ -120,7 +120,11 @@ removed so a full retry can repair it.
 The authority accepts an image capture only after its referenced blob verifies.
 The client downloads and verifies referenced assets before committing pulled
 records or cursor advancement. A corrupt local cache can be replaced by verified
-bytes, with the old path retained until atomic replacement. Published assets must
+bytes, with the old path retained until atomic replacement. Local image creates and
+tombstone restores verify their assets before queuing. An unavailable
+older cache entry preserves its visible record and does not block unrelated offline
+edits; reading that asset still reports the missing or invalid blob, and a later pull
+of its record rehydrates it from the authority. Published authority assets must
 remain under the store's ownership. External file deletion/corruption, disk-full
 recovery and power-loss durability across SQLite and filesystem writes are not
 proven by these tests. No blob garbage collection runs in the prototype.

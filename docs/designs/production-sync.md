@@ -84,12 +84,14 @@ or implement and validate an explicit migration before enabling sync.
 A server authority also persists the full service/library binding. Its blob directory
 has an exclusively created ownership marker for that same binding, so two library
 identities or services cannot silently share an asset root. Opening bound storage
-without its binding fails. Rejected database enrollment occurs before a new blob
-ownership marker is written. Initialization fails closed if the marker is corrupt or
-its creation is interrupted. Database and blob-root enrollment are not one atomic
-filesystem transaction; failed new enrollment may leave an empty bound database that
-requires the same identity to reopen. The host owns one authority/BlobStore instance
-per library and must not reuse existing unbound handles during enrollment.
+without its binding fails. Reopening a bound database requires its matching blob-root
+marker; a missing marker or directory fails before database preparation or directory
+creation. Rejected database enrollment occurs before a new blob ownership marker is
+written. Initialization fails closed if the marker is corrupt or its creation is
+interrupted. Database and blob-root enrollment are not one atomic filesystem
+transaction; failed new enrollment may require restoring the correctly paired storage.
+The host owns one authority/BlobStore instance per library and must not reuse existing
+unbound handles during enrollment.
 
 ## Integration still required
 

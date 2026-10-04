@@ -21,12 +21,24 @@ public final class SyncServer: SyncTransport, Sendable {
         }
         self.libraryID = libraryID
         self.serviceID = serviceID
-        binding = libraryID.flatMap { library in
+        let binding = libraryID.flatMap { library in
             serviceID.map { SyncLibraryBinding(libraryID: library, serviceID: $0) }
         }
-        try BlobStore.validateExistingOwnership(blobDirectory, binding: binding)
-        writer = try SyncDatabase.open(at: databaseURL)
+        self.binding = binding
+        let ownsBlobs = try BlobStore.validateExistingOwnership(blobDirectory, binding: binding)
         let files = (try? FileManager.default.contentsOfDirectory(atPath: blobDirectory.path)) ?? []
+        if FileManager.default.fileExists(atPath: databaseURL.path) {
+            var configuration = Configuration()
+            configuration.readonly = true
+            let reader = try DatabaseQueue(path: databaseURL.path, configuration: configuration)
+            let storedBinding = try reader.read {
+                try SyncDatabase.checkEnrollment(
+                    $0, role: "server", deviceID: nil, binding: binding,
+                    hasUnboundBlobs: files.contains { $0 != "library-owner" })
+            }
+            guard storedBinding == nil || ownsBlobs else { throw SyncBindingError.mismatch }
+        }
+        writer = try SyncDatabase.open(at: databaseURL)
         _ = try SyncDatabase.prepare(
             writer, role: "server", binding: binding,
             hasUnboundBlobs: files.contains { $0 != "library-owner" })
