@@ -191,6 +191,44 @@ public final class MobileStore: Sendable {
     public func pending() throws -> [SyncOperation] { try client.pendingOperations() }
     public func rejectedWork() throws -> [RejectedWork] { try client.rejectedWork() }
 
+    /// A lightweight revision of committed local and synchronized library work.
+    public func libraryRevision() throws -> MobileLibraryRevision {
+        try database.read(Self.libraryRevision)
+    }
+
+    func syncSnapshot(previousRevision: MobileLibraryRevision?, previousConflictCount: Int) throws
+        -> (revision: MobileLibraryRevision, conflictCount: Int)
+    {
+        try database.read { db in
+            let revision = try Self.libraryRevision(db)
+            let conflicts =
+                revision == previousRevision
+                ? previousConflictCount
+                : try Int.fetchOne(
+                    db,
+                    sql:
+                        "SELECT COUNT(*) FROM mobile_captures WHERE json_array_length(noteConflicts) > 0"
+                )!
+            return (revision, conflicts)
+        }
+    }
+
+    private static func libraryRevision(_ db: Database) throws -> MobileLibraryRevision {
+        guard
+            let row = try Row.fetchOne(
+                db,
+                sql: """
+                    SELECT cursor, sequence,
+                        (SELECT COUNT(*) FROM sync_outbox) AS pendingChanges,
+                        (SELECT COUNT(*) FROM sync_rejections) AS rejectedChanges
+                    FROM sync_meta WHERE id = 1
+                    """)
+        else { throw SyncError.invalidOperation }
+        return MobileLibraryRevision(
+            cursor: row["cursor"], sequence: row["sequence"],
+            pendingChanges: row["pendingChanges"], rejectedChanges: row["rejectedChanges"])
+    }
+
     public func pendingCaptureIDs() throws -> Set<UUID> {
         let operations = try pending()
         return try database.read { db in

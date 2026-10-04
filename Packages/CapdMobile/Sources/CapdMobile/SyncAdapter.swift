@@ -79,9 +79,9 @@ public actor MobileSyncCoordinator {
     private func run(pullOnly: Bool) async throws -> SyncResult {
         try Task.checkCancellation()
         while let current = flight {
-            if current.pullOnly == pullOnly { return try await wait(for: current.task) }
+            if current.pullOnly == pullOnly { return try await join(current.task) }
             // Opposite modes share exclusive access, not the earlier operation's result.
-            do { _ = try await wait(for: current.task) } catch {}
+            do { _ = try await join(current.task) } catch {}
             try Task.checkCancellation()
             if flight?.id == current.id { flight = nil }
         }
@@ -129,5 +129,45 @@ public actor MobileSyncCoordinator {
         } onCancel: {
             task.cancel()
         }
+    }
+
+    private func join(_ task: Task<SyncResult, any Error>) async throws -> SyncResult {
+        let waiter = FlightWaiter()
+        return try await withTaskCancellationHandler {
+            try Task.checkCancellation()
+            return try await withCheckedThrowingContinuation { continuation in
+                waiter.install(continuation)
+                Task { waiter.finish(await task.result) }
+            }
+        } onCancel: {
+            waiter.finish(.failure(CancellationError()))
+        }
+    }
+}
+
+private final class FlightWaiter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<SyncResult, any Error>?
+    private var result: Result<SyncResult, any Error>?
+
+    func install(_ continuation: CheckedContinuation<SyncResult, any Error>) {
+        let completed: Result<SyncResult, any Error>? = lock.withLock {
+            if let result { return result }
+            self.continuation = continuation
+            return nil
+        }
+        if let completed { continuation.resume(with: completed) }
+    }
+
+    func finish(_ result: Result<SyncResult, any Error>) {
+        let waiting: CheckedContinuation<SyncResult, any Error>? = lock.withLock {
+            guard self.result == nil else {
+                return nil
+            }
+            self.result = result
+            defer { continuation = nil }
+            return continuation
+        }
+        waiting?.resume(with: result)
     }
 }

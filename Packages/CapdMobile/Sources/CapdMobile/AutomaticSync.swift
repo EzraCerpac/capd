@@ -13,6 +13,7 @@ public struct AutomaticSyncState: Equatable, Sendable {
     public var nextRetryAt: Date?
     public var lastSuccessfulSync: Date?
     public var lastError: String?
+    public var libraryRevision: MobileLibraryRevision?
 
     public init() {}
 }
@@ -70,6 +71,8 @@ public actor AutomaticSyncController {
     private var unconfigured = false
     private var halted = false
     private var needsPull = false
+    private var lastSnapshotRevision: MobileLibraryRevision?
+    private var lastSnapshotConflictCount = 0
 
     public init(
         store: MobileStore, adapter: any MobileSyncAdapter = LocalOnlySyncAdapter(),
@@ -253,9 +256,15 @@ public actor AutomaticSyncController {
     private func snapshot() -> AutomaticSyncState {
         var snapshot = state
         do {
-            snapshot.pendingChanges = try store.pending().count
-            snapshot.conflictCount = try store.search().filter { !$0.noteConflicts.isEmpty }.count
-            snapshot.rejectedChanges = try store.rejectedWork().count
+            let library = try store.syncSnapshot(
+                previousRevision: lastSnapshotRevision,
+                previousConflictCount: lastSnapshotConflictCount)
+            snapshot.libraryRevision = library.revision
+            snapshot.pendingChanges = library.revision.pendingChanges
+            snapshot.conflictCount = library.conflictCount
+            snapshot.rejectedChanges = library.revision.rejectedChanges
+            lastSnapshotRevision = library.revision
+            lastSnapshotConflictCount = library.conflictCount
             if (snapshot.conflictCount > 0 || snapshot.rejectedChanges > 0)
                 && snapshot.phase == .idle
             {
