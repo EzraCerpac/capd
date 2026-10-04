@@ -59,6 +59,72 @@ struct MacSystemSearchTests {
         await host.settle()
     }
 
+    @Test func unchangedPollsSkipSnapshotsAndOtherWritersInvalidateTheIndex() async throws {
+        let root = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent(
+            "capd-discovery-refresh-\(UUID())")
+        let suite = "capd-discovery-refresh-\(UUID())"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer {
+            defaults.removePersistentDomain(forName: suite)
+            try? FileManager.default.removeItem(at: root)
+        }
+        let paths = StoragePaths(root: root)
+        let store = try MacLibrarySession.open(paths: paths).store
+        _ = try CaptureService(store: store).ingest(CaptureRequest(text: "First", title: "First"))
+        let backend = DiscoveryMemoryIndex()
+        var loads = 0
+        var failNextLoad = false
+        var issue: String?
+        let host = MacSystemSearch(
+            paths: paths, enabled: true, defaults: defaults, backend: backend,
+            loadSnapshot: { paths, localID in
+                loads += 1
+                if failNextLoad {
+                    failNextLoad = false
+                    throw DiscoveryTestError.injected
+                }
+                return try MacDiscoverySnapshot.load(paths: paths, localLibraryID: localID)
+            }, dispatch: { _, _ in })
+        host.reportIssue = { issue = $0 }
+        host.refresh()
+        await host.settle()
+        #expect(loads == 1)
+        for _ in 0..<20 { host.refresh() }
+        await host.settle()
+        #expect(loads == 1)
+        #expect(backend.items.count == 1)
+        let otherWriter = try MacLibrarySession.open(paths: paths).store
+        _ = try CaptureService(store: otherWriter).ingest(
+            CaptureRequest(text: "Second", title: "Second"))
+        failNextLoad = true
+        host.refresh()
+        await host.settle()
+        #expect(loads == 2)
+        #expect(issue != nil)
+        #expect(backend.items.isEmpty)
+        host.refresh()
+        await host.settle()
+        #expect(loads == 3)
+        #expect(issue == nil)
+        #expect(backend.items.count == 2)
+        host.refresh()
+        await host.settle()
+        #expect(loads == 3)
+        host.setEnabled(false)
+        await host.settle()
+        #expect(backend.items.isEmpty)
+        host.setEnabled(true)
+        await host.settle()
+        #expect(loads == 4)
+        #expect(backend.items.count == 2)
+        try Data("invalid configuration".utf8).write(to: MacSyncConfiguration.url(paths: paths))
+        host.refresh()
+        await host.settle()
+        #expect(loads == 5)
+        #expect(issue != nil)
+        #expect(backend.items.isEmpty)
+    }
+
     @Test func exactSourcePresentationWinsOverInFlightQuery() async throws {
         let selected = Capture(
             kind: .text, title: "Selected source", selection: "synthetic", createdAt: Date())
@@ -88,3 +154,5 @@ private final class DiscoveryMemoryIndex: SpotlightBackend {
     }
     func delete(domain: String) async throws { items.removeAll() }
 }
+
+private enum DiscoveryTestError: Error { case injected }

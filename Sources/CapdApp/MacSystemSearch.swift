@@ -7,6 +7,9 @@ import Foundation
 final class MacSystemSearch: CaptureActionHost {
     private(set) var systemSearchEnabled: Bool
     private let paths: StoragePaths
+    private let changes: MacDiscoveryChangeMonitor
+    private let loadSnapshot: (StoragePaths, UUID) throws -> MacDiscoverySnapshot
+    private var indexedRevision: MacDiscoveryChangeMonitor.Revision?
     private let localID: UUID
     private let defaults: UserDefaults
     private let backend: any SpotlightBackend
@@ -19,9 +22,14 @@ final class MacSystemSearch: CaptureActionHost {
     init(
         paths: StoragePaths, enabled: Bool, defaults: UserDefaults = .standard,
         backend: (any SpotlightBackend)? = nil,
+        loadSnapshot: @escaping (StoragePaths, UUID) throws -> MacDiscoverySnapshot = {
+            try MacDiscoverySnapshot.load(paths: $0, localLibraryID: $1)
+        },
         dispatch: @escaping (CaptureAction, Int64?) throws -> Void
     ) {
         self.paths = paths
+        changes = MacDiscoveryChangeMonitor(paths: paths)
+        self.loadSnapshot = loadSnapshot
         self.defaults = defaults
         self.dispatch = dispatch
         systemSearchEnabled = enabled
@@ -40,6 +48,7 @@ final class MacSystemSearch: CaptureActionHost {
 
     func setEnabled(_ enabled: Bool) {
         systemSearchEnabled = enabled
+        indexedRevision = nil
         refresh()
     }
 
@@ -87,6 +96,8 @@ final class MacSystemSearch: CaptureActionHost {
             await previous?.value
             guard let self else { return }
             do {
+                let revision = self.systemSearchEnabled ? try self.changes.revision() : nil
+                if let revision, revision == self.indexedRevision { return }
                 let current = self.systemSearchEnabled ? try self.snapshot() : nil
                 if let oldID = self.defaults.string(forKey: self.cleanupKey).flatMap(
                     UUID.init(uuidString:)),
@@ -108,6 +119,7 @@ final class MacSystemSearch: CaptureActionHost {
                             Self.record($0, libraryID: current.libraryID)
                         }, enabled: true)
                 }
+                self.indexedRevision = revision
                 self.reportIssue(nil)
             } catch {
                 if let oldID = self.defaults.string(forKey: self.cleanupKey).flatMap(
@@ -131,7 +143,7 @@ final class MacSystemSearch: CaptureActionHost {
 
     private func snapshot() throws -> MacDiscoverySnapshot {
         guard systemSearchEnabled else { throw SystemIntegrationError.privacyDisabled }
-        return try MacDiscoverySnapshot.load(paths: paths, localLibraryID: localID)
+        return try loadSnapshot(paths, localID)
     }
 
     private static func record(_ entry: MacDiscoveryCapture, libraryID: UUID) -> SearchCapture {
