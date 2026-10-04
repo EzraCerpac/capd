@@ -1,28 +1,29 @@
+import CapdDesignSystem
 import SwiftUI
 
 /// Capd's fixed design language: near-black surfaces, light small type, mono for
 /// machine-ish text (domains, ages, counts, keycaps). Surfaces read these tokens
 /// instead of system materials so the app looks the same in light and dark mode.
 enum Theme {
-    static let background = Color(red: 0.075, green: 0.075, blue: 0.086)
-    static let raised = Color.white.opacity(0.05)
+    static let background = CapdPalette.dark.background
+    static let raised = CapdPalette.dark.raised
     /// Chip behind dark favicon artwork: bright enough to carry a black glyph,
     /// shy of searing pure white in a near-black UI.
-    static let raisedLight = Color.white.opacity(0.9)
+    static let raisedLight = CapdPalette.dark.raisedLight
     /// Pure black so the capture bar merges with the physical notch.
-    static let bar = Color.black
-    static let border = Color.white.opacity(0.09)
-    static let text = Color.white.opacity(0.93)
-    static let textSecondary = Color.white.opacity(0.56)
-    static let textTertiary = Color.white.opacity(0.34)
-    static let selection = Color.white.opacity(0.08)
-    static let accent = Color(red: 0.38, green: 0.55, blue: 1.0)
-    static let accentSecondary = Color(red: 0.66, green: 0.42, blue: 0.92)
-    static let success = Color(red: 0.35, green: 0.84, blue: 0.5)
-    static let warning = Color(red: 1.0, green: 0.62, blue: 0.26)
+    static let bar = CapdPalette.dark.bar
+    static let border = CapdPalette.dark.border
+    static let text = CapdPalette.dark.text
+    static let textSecondary = CapdPalette.dark.textSecondary
+    static let textTertiary = CapdPalette.dark.textTertiary
+    static let selection = CapdPalette.dark.selection
+    static let accent = CapdPalette.dark.accent
+    static let accentSecondary = CapdPalette.dark.accentSecondary
+    static let success = CapdPalette.dark.success
+    static let warning = CapdPalette.dark.warning
 
     static func mono(_ size: CGFloat, weight: Font.Weight = .medium) -> Font {
-        .system(size: size, weight: weight, design: .monospaced)
+        CapdTypography.mono(size, weight: weight)
     }
 
     static let spring = Animation.spring(response: 0.32, dampingFraction: 0.78)
@@ -31,7 +32,7 @@ enum Theme {
 
 /// Shared visual language for Capd's floating panels — the search bar and capture HUD.
 enum PanelStyle {
-    static let cornerRadius: CGFloat = 12
+    static let cornerRadius: CGFloat = CapdRadius.panel
 
     static var shape: RoundedRectangle {
         RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
