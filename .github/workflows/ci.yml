@@ -78,7 +78,8 @@ jobs:
 
       - name: Test snapshot and migration helpers
         run: |
-          if test -f Scripts/test_synthetic_library_migration.py; then
+          if test -f Scripts/test_synthetic_library_migration.py ||
+             test -f Scripts/test_synthetic_library_cli_defaults.py; then
             /usr/bin/python3 -m unittest discover -s Scripts -p 'test_*library*.py' -v
           fi
 
