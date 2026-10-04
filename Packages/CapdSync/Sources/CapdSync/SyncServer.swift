@@ -230,6 +230,32 @@ public final class SyncServer: SyncTransport, Sendable {
         }
     }
 
+    /// Returns a bounded page pinned to the authority cursor, or just its summary with limit zero.
+    public func baselinePage(after: UUID?, limit: Int, expectedCursor: Int64? = nil) throws
+        -> Baseline
+    {
+        guard (0...1000).contains(limit) else { throw SyncError.invalidCursor }
+        return try read { db in
+            let cursor = try Int64.fetchOne(db, sql: "SELECT cursor FROM sync_meta")!
+            guard expectedCursor == nil || expectedCursor == cursor else {
+                throw SyncError.invalidCursor
+            }
+            let sequences = try Dictionary(
+                uniqueKeysWithValues: Row.fetchAll(
+                    db, sql: "SELECT id, sequence FROM sync_devices"
+                ).map { row in
+                    (UUID(uuidString: row["id"] as String)!, row["sequence"] as Int64)
+                })
+            let captures = try Data.fetchAll(
+                db,
+                sql: "SELECT payload FROM sync_records WHERE id > ? ORDER BY id LIMIT ?",
+                arguments: [after?.uuidString ?? "", limit]
+            )
+            .map { try SyncDatabase.decode(SharedCapture.self, $0) }
+            return Baseline(cursor: cursor, captures: captures, deviceSequences: sequences)
+        }
+    }
+
     public func previewContentSnapshotImport(_ snapshot: ContentSnapshotImport) throws
         -> ContentSnapshotImportPreview
     {

@@ -11,12 +11,13 @@ extension AsyncSyncTransport {
     /// Fetches an authenticated baseline with the capabilities required before initial import.
     public func importBaseline(
         credential: @escaping @Sendable () throws -> String,
-        requiringGeneratedProcessingContract: Bool = false
+        requiringGeneratedProcessingContract: Bool = false, summaryOnly: Bool = false
     ) async throws -> Baseline {
         try await AsyncHTTPActions(transport: self, credential: credential)
             .baseline(
                 requiringMetadataContract: true,
-                requiringGeneratedProcessingContract: requiringGeneratedProcessingContract)
+                requiringGeneratedProcessingContract: requiringGeneratedProcessingContract,
+                summaryOnly: summaryOnly)
     }
 }
 
@@ -60,7 +61,8 @@ struct AsyncHTTPActions {
     func request(_ action: SyncHTTPAction) async throws -> SyncHTTPResult {
         let version = action.requiredEnvelopeVersion
         if version > 1 {
-            try await requestReply(.baseline).checkCapabilities(for: action)
+            try await requestReply(.baselinePage(after: nil, limit: 0, expectedCursor: nil))
+                .checkCapabilities(for: action)
         }
         return try await requestReply(action, version: version).result
     }
@@ -125,30 +127,69 @@ struct AsyncHTTPActions {
         return receipt
     }
 
-    func changes(after cursor: Int64, limit: Int) async throws -> FeedPage {
-        guard case .page(let page) = try await request(.changes(cursor: cursor, limit: limit))
-        else {
-            throw SyncHTTPError.invalidResponse
+    func changes(after cursor: Int64, limit requestedLimit: Int) async throws -> FeedPage {
+        var limit = requestedLimit
+        while true {
+            do {
+                guard
+                    case .page(let page) = try await request(.changes(cursor: cursor, limit: limit))
+                else { throw SyncHTTPError.invalidResponse }
+                return page
+            } catch SyncHTTPError.resourceLimit where limit > 1 {
+                limit = max(1, limit / 2)
+            } catch SyncConnectionError.responseTooLarge where limit > 1 {
+                limit = max(1, limit / 2)
+            }
         }
-        return page
     }
 
     func baseline(
         requiringMetadataContract: Bool = false,
-        requiringGeneratedProcessingContract: Bool = false
+        requiringGeneratedProcessingContract: Bool = false, summaryOnly: Bool = false
     ) async throws -> Baseline {
-        let reply = try await requestReply(.baseline)
-        guard case .baseline(let baseline) = reply.result else {
-            throw SyncHTTPError.invalidResponse
+        var limit = summaryOnly ? 0 : 100
+        var after: UUID?
+        var first: Baseline?
+        var captures: [SharedCapture] = []
+        while true {
+            let reply: SyncHTTPReply
+            do {
+                reply = try await requestReply(
+                    .baselinePage(
+                        after: after, limit: limit, expectedCursor: first?.cursor))
+            } catch SyncHTTPError.resourceLimit where limit > 1 {
+                limit = max(1, limit / 2)
+                continue
+            } catch SyncConnectionError.responseTooLarge where limit > 1 {
+                limit = max(1, limit / 2)
+                continue
+            }
+            guard case .baseline(let page) = reply.result else {
+                throw SyncHTTPError.invalidResponse
+            }
+            guard
+                !(requiringMetadataContract || requiringGeneratedProcessingContract)
+                    || reply.metadataContractVersion == 1,
+                !requiringGeneratedProcessingContract
+                    || reply.generatedProcessingContractVersion == 1
+            else { throw SyncHTTPError.unsupportedVersion }
+            guard page.captures.count <= limit,
+                first == nil
+                    || (page.cursor == first!.cursor
+                        && page.deviceSequences == first!.deviceSequences),
+                page.captures.allSatisfy({ after == nil || $0.id.uuidString > after!.uuidString }),
+                zip(page.captures, page.captures.dropFirst()).allSatisfy({
+                    $0.id.uuidString < $1.id.uuidString
+                })
+            else { throw SyncHTTPError.invalidResponse }
+            if first == nil { first = page }
+            captures.append(contentsOf: page.captures)
+            if summaryOnly || page.captures.count < limit {
+                return Baseline(
+                    cursor: page.cursor, captures: captures, deviceSequences: page.deviceSequences)
+            }
+            after = page.captures.last!.id
         }
-        guard
-            !(requiringMetadataContract || requiringGeneratedProcessingContract)
-                || reply.metadataContractVersion == 1,
-            !requiringGeneratedProcessingContract || reply.generatedProcessingContractVersion == 1
-        else {
-            throw SyncHTTPError.unsupportedVersion
-        }
-        return baseline
     }
 
     func upload(_ blob: BlobReference, offset: Int, chunk: Data, final: Bool) async throws {

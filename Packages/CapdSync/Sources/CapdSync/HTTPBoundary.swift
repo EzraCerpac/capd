@@ -47,6 +47,7 @@ public enum SyncHTTPAction: Codable, Sendable {
     case apply(SyncOperation)
     case changes(cursor: Int64, limit: Int)
     case baseline
+    case baselinePage(after: UUID?, limit: Int, expectedCursor: Int64?)
     case upload(BlobReference, offset: Int, chunk: Data, final: Bool)
     case download(BlobReference)
 }
@@ -170,6 +171,11 @@ public struct SyncHTTPHandler: Sendable {
         {
             return domainFailure(.invalidCursor)
         }
+        if case .baselinePage(_, let limit, _) = envelope.action,
+            !(0...Self.maximumPageSize).contains(limit)
+        {
+            return domainFailure(.invalidCursor)
+        }
         do {
             let authority = try server(principal.libraryID)
             guard authority.libraryID == principal.libraryID, authority.serviceID == serviceID
@@ -182,6 +188,10 @@ public struct SyncHTTPHandler: Sendable {
             case .changes(let cursor, let limit):
                 result = .page(try authority.changes(after: cursor, limit: limit))
             case .baseline: result = .baseline(try authority.baseline())
+            case .baselinePage(let after, let limit, let expectedCursor):
+                result = .baseline(
+                    try authority.baselinePage(
+                        after: after, limit: limit, expectedCursor: expectedCursor))
             case .upload(let blob, let offset, let chunk, let final):
                 try authority.upload(blob, offset: offset, chunk: chunk, final: final)
                 result = .okay
@@ -265,7 +275,8 @@ public struct SyncHTTPTransport: BoundSyncTransport {
     public func request(_ action: SyncHTTPAction) throws -> SyncHTTPResult {
         let version = action.requiredEnvelopeVersion
         if version > 1 {
-            try requestReply(.baseline).checkCapabilities(for: action)
+            try requestReply(.baselinePage(after: nil, limit: 0, expectedCursor: nil))
+                .checkCapabilities(for: action)
         }
         return try requestReply(action, version: version).result
     }

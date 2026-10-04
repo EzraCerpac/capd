@@ -124,6 +124,43 @@ public final class SyncClient: Sendable {
         return operation
     }
 
+    /// Enqueues an ordered batch of edits and rebuilds its projection once in the caller's transaction.
+    @discardableResult
+    public func enqueue(in db: Database, edits: [(captureID: UUID, edit: CaptureEdit)]) throws
+        -> [SyncOperation]
+    {
+        guard ObjectIdentifier(db) == writerIdentity else { throw SyncTransactionError.wrongWriter }
+        guard db.isInsideTransaction else { throw SyncTransactionError.requiresTransaction }
+        try projectionGate.check()
+        try SyncDatabase.checkBinding(db, binding)
+        guard !edits.isEmpty else { return [] }
+        var predecessors: [UUID: UUID] = [:]
+        for pending in try operations(db) {
+            predecessors[try SyncDatabase.canonical(db, pending.captureID)] = pending.id
+        }
+        var sequence = try Int64.fetchOne(db, sql: "SELECT sequence FROM sync_meta")!
+        var appended: [SyncOperation] = []
+        for (captureID, edit) in edits {
+            let id = try SyncDatabase.canonical(db, captureID)
+            guard sequence < Int64.max else { throw SyncError.invalidOperation }
+            sequence += 1
+            let operation = SyncOperation(
+                deviceID: deviceID, sequence: sequence,
+                captureID: captureID,
+                baseRevision: try SyncDatabase.record(db, id: id)?.revision ?? 0,
+                predecessorID: predecessors[id], mutation: .edit(edit))
+            try SyncDatabase.validate(operation)
+            try db.execute(
+                sql: "INSERT INTO sync_outbox (sequence, id, payload) VALUES (?, ?, ?)",
+                arguments: [sequence, operation.id.uuidString, try SyncDatabase.encode(operation)])
+            predecessors[id] = operation.id
+            appended.append(operation)
+        }
+        try db.execute(sql: "UPDATE sync_meta SET sequence = ?", arguments: [sequence])
+        try rebuild(db)
+        return appended
+    }
+
     /// Export visible content without changing the original device history or pending BLOBs.
     public func contentSnapshotImport(snapshotID: UUID, targetBinding: SyncLibraryBinding) throws
         -> ContentSnapshotImport
