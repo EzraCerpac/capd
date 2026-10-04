@@ -84,7 +84,9 @@ struct LibraryView: View {
             }
             .sheet(isPresented: $capturing) { CaptureForm(model: model) }
             .sheet(isPresented: $showingSyncSettings) {
-                SyncSettingsView(state: model.syncState, retry: { model.retrySync() })
+                SyncSettingsView(
+                    state: model.syncState, retry: { model.retrySync() },
+                    connection: model.connection)
             }
             .alert(
                 "Library message",

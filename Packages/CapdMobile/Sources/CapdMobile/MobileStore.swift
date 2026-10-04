@@ -6,9 +6,46 @@ public final class MobileStore: Sendable {
     static let pullPageBudget = 100
     private let database: DatabasePool
     private let client: SyncClient
+    private let access: MobileLibraryAccess?
     public var deviceID: UUID { client.deviceID }
+    public var libraryBinding: SyncLibraryBinding? { client.binding }
 
-    public init(url: URL) throws {
+    public init(
+        url: URL, deviceID: UUID? = nil, binding: SyncLibraryBinding? = nil,
+        access: MobileLibraryAccess? = nil
+    ) throws {
+        self.access = access
+        let lease = try access?.lease()
+        defer { withExtendedLifetime(lease) {} }
+        // Reject rebinding before migrations or blob ownership publication can alter
+        // an existing library. Activation always uses a fresh database path.
+        if let binding, FileManager.default.fileExists(atPath: url.path) {
+            var check = Configuration()
+            check.readonly = true
+            check.busyMode = .timeout(2)
+            let reader = try DatabaseQueue(path: url.path, configuration: check)
+            try reader.read { db in
+                let stored =
+                    try db.tableExists("sync_binding")
+                    ? Data.fetchOne(db, sql: "SELECT payload FROM sync_binding WHERE id=1") : nil
+                if let stored {
+                    guard try JSONDecoder().decode(SyncLibraryBinding.self, from: stored) == binding
+                    else {
+                        throw SyncBindingError.mismatch
+                    }
+                } else {
+                    throw SyncBindingError.enrollmentRequiresEmptyLibrary
+                }
+                if let deviceID, try db.tableExists("sync_meta") {
+                    guard
+                        try String.fetchOne(db, sql: "SELECT device FROM sync_meta WHERE id=1")
+                            == deviceID.uuidString
+                    else {
+                        throw SyncError.wrongDevice
+                    }
+                }
+            }
+        }
         try FileManager.default.createDirectory(
             at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
         var configuration = Configuration()
@@ -75,22 +112,53 @@ public final class MobileStore: Sendable {
                         """)
             }
         }
+        migrator.registerMigration("mobile-system-search-handoff-v4") { db in
+            try db.execute(
+                sql:
+                    "CREATE TABLE mobile_system_search (id INTEGER PRIMARY KEY CHECK(id=1), revision TEXT)"
+            )
+            try db.execute(
+                sql: "INSERT INTO mobile_system_search VALUES (1, ?)",
+                arguments: [UUID().uuidString])
+        }
         try migrator.migrate(database)
         client = try SyncClient(
             writer: database,
             blobs: BlobStore(
-                directory: url.deletingLastPathComponent().appendingPathComponent("assets")),
+                directory: url.deletingLastPathComponent().appendingPathComponent("assets"),
+                binding: binding),
+            deviceID: deviceID, binding: binding,
             project: Self.project)
     }
 
     public func contentSnapshotImport(snapshotID: UUID, targetBinding: SyncLibraryBinding) throws
         -> ContentSnapshotImport
     {
-        try client.contentSnapshotImport(snapshotID: snapshotID, targetBinding: targetBinding)
+        let lease = try access?.lease()
+        defer { withExtendedLifetime(lease) {} }
+        return try client.contentSnapshotImport(
+            snapshotID: snapshotID, targetBinding: targetBinding)
     }
 
     @discardableResult
     public func save(_ capture: MobileCapture) throws -> UUID {
+        let lease = try access?.lease()
+        defer { withExtendedLifetime(lease) {} }
+        return try enqueue(capture)
+    }
+
+    /// Returns the actual visible capture, including canonical ID after deduplication.
+    public func saveProjected(_ capture: MobileCapture) throws -> MobileCapture {
+        let lease = try access?.lease()
+        defer { withExtendedLifetime(lease) {} }
+        _ = try enqueue(capture)
+        guard let saved = try canonicalCaptureUnleased(id: capture.id) else {
+            throw SyncError.invalidOperation
+        }
+        return saved
+    }
+
+    private func enqueue(_ capture: MobileCapture) throws -> UUID {
         let hash: String
         if let raw = capture.url, let url = URL(string: raw) {
             hash = CaptureFingerprint.contentHash(for: url)
@@ -133,13 +201,25 @@ public final class MobileStore: Sendable {
     public func update(id: UUID, note: String, tags: [String], resolving: [UUID] = []) throws
         -> UUID?
     {
-        guard let current = try capture(id: id) else { throw SyncError.invalidOperation }
-        return try update(current, note: note, tags: tags, resolving: resolving)
+        let lease = try access?.lease()
+        defer { withExtendedLifetime(lease) {} }
+        guard let current = try canonicalCaptureUnleased(id: id) else {
+            throw SyncError.invalidOperation
+        }
+        return try updateUnleased(current, note: note, tags: tags, resolving: resolving)
     }
 
     @discardableResult
     public func update(
         _ observed: MobileCapture, note: String, tags: [String], resolving: [UUID] = []
+    ) throws -> UUID? {
+        let lease = try access?.lease()
+        defer { withExtendedLifetime(lease) {} }
+        return try updateUnleased(observed, note: note, tags: tags, resolving: resolving)
+    }
+
+    private func updateUnleased(
+        _ observed: MobileCapture, note: String, tags: [String], resolving: [UUID]
     ) throws -> UUID? {
         let previous = Set(observed.manualTags)
         let next = Set(tags)
@@ -154,19 +234,37 @@ public final class MobileStore: Sendable {
         )
     }
 
-    public func delete(id: UUID) throws { try enqueue(captureID: id, mutation: .delete) }
+    public func delete(id: UUID) throws {
+        let lease = try access?.lease()
+        defer { withExtendedLifetime(lease) {} }
+        try enqueue(captureID: id, mutation: .delete)
+    }
 
     public func capture(id: UUID) throws -> MobileCapture? {
+        try canonicalCapture(id: id)
+    }
+
+    public func canonicalCapture(id: UUID) throws -> MobileCapture? {
+        let lease = try access?.lease()
+        defer { withExtendedLifetime(lease) {} }
+        return try canonicalCaptureUnleased(id: id)
+    }
+
+    private func canonicalCaptureUnleased(id: UUID) throws -> MobileCapture? {
         try database.read { db in
-            let alias = try String.fetchOne(
-                db, sql: "SELECT canonical FROM sync_aliases WHERE id = ?",
-                arguments: [id.uuidString])
-            let canonical = alias.flatMap(UUID.init(uuidString:)) ?? id
-            return try MobileCapture.filter(Column("id") == canonical.uuidString).fetchOne(db)
+            let canonical =
+                try String.fetchOne(
+                    db,
+                    sql: "SELECT canonical FROM sync_aliases WHERE id = ?",
+                    arguments: [id.uuidString])
+                ?? id.uuidString
+            return try MobileCapture.filter(Column("id") == canonical).fetchOne(db)
         }
     }
 
     public func search(_ query: String = "") throws -> [MobileCapture] {
+        let lease = try access?.lease()
+        defer { withExtendedLifetime(lease) {} }
         let value = query.trimmingCharacters(in: .whitespacesAndNewlines)
         return try database.read { db in
             guard !value.isEmpty else {
@@ -192,8 +290,16 @@ public final class MobileStore: Sendable {
         }
     }
 
-    public func pending() throws -> [SyncOperation] { try client.pendingOperations() }
-    public func rejectedWork() throws -> [RejectedWork] { try client.rejectedWork() }
+    public func pending() throws -> [SyncOperation] {
+        let lease = try access?.lease()
+        defer { withExtendedLifetime(lease) {} }
+        return try client.pendingOperations()
+    }
+    public func rejectedWork() throws -> [RejectedWork] {
+        let lease = try access?.lease()
+        defer { withExtendedLifetime(lease) {} }
+        return try client.rejectedWork()
+    }
 
     /// A lightweight revision of committed local and synchronized library work.
     public func libraryRevision() throws -> MobileLibraryRevision {
@@ -234,7 +340,9 @@ public final class MobileStore: Sendable {
     }
 
     public func pendingCaptureIDs() throws -> Set<UUID> {
-        let operations = try pending()
+        let lease = try access?.lease()
+        defer { withExtendedLifetime(lease) {} }
+        let operations = try client.pendingOperations()
         return try database.read { db in
             try Set(
                 operations.map { operation in
@@ -248,11 +356,15 @@ public final class MobileStore: Sendable {
 
     @discardableResult
     public func push(to transport: any SyncTransport) throws -> [SyncReceipt] {
-        try client.push(to: transport)
+        let lease = try access?.lease()
+        defer { withExtendedLifetime(lease) {} }
+        return try client.push(to: transport)
     }
 
     /// Pulls one bounded cycle. Further calls resume from the durable cursor.
     public func pull(from transport: any SyncTransport) throws {
+        let lease = try access?.lease()
+        defer { withExtendedLifetime(lease) {} }
         for _ in 0..<Self.pullPageBudget {
             let before = try client.cursor()
             try client.pull(from: transport)
@@ -265,7 +377,9 @@ public final class MobileStore: Sendable {
         to transport: any AsyncSyncTransport,
         credential: @escaping @Sendable () throws -> String
     ) async throws -> [SyncReceipt] {
-        try await client.push(to: transport, credential: credential)
+        let lease = try access?.lease()
+        defer { withExtendedLifetime(lease) {} }
+        return try await client.push(to: transport, credential: credential)
     }
 
     /// Pulls one bounded cycle. Further calls resume from the durable cursor.
@@ -273,6 +387,8 @@ public final class MobileStore: Sendable {
         from transport: any AsyncSyncTransport,
         credential: @escaping @Sendable () throws -> String
     ) async throws {
+        let lease = try access?.lease()
+        defer { withExtendedLifetime(lease) {} }
         for _ in 0..<Self.pullPageBudget {
             try Task.checkCancellation()
             let before = try client.cursor()
@@ -281,7 +397,34 @@ public final class MobileStore: Sendable {
         }
     }
 
+    public func systemSearchSnapshot() throws -> MobileSystemSearchSnapshot {
+        let lease = try access?.lease()
+        defer { withExtendedLifetime(lease) {} }
+        return try database.read { db in
+            MobileSystemSearchSnapshot(
+                revision: try String.fetchOne(
+                    db, sql: "SELECT revision FROM mobile_system_search WHERE id=1"
+                )
+                .flatMap(UUID.init(uuidString:)),
+                captures: try MobileCapture.order(Column("id")).fetchAll(db))
+        }
+    }
+
+    public func acknowledgeSystemSearch(_ revision: UUID?) throws {
+        guard let revision else { return }
+        let lease = try access?.lease()
+        defer { withExtendedLifetime(lease) {} }
+        try database.write { db in
+            try db.execute(
+                sql: "UPDATE mobile_system_search SET revision=NULL WHERE id=1 AND revision=?",
+                arguments: [revision.uuidString])
+        }
+    }
+
     private static func project(_ db: Database, record: SharedCapture) throws {
+        try db.execute(
+            sql: "UPDATE mobile_system_search SET revision=? WHERE id=1",
+            arguments: [UUID().uuidString])
         let previous = try MobileCapture.filter(Column("id") == record.id.uuidString).fetchOne(db)
         if record.deleted {
             try MobileCapture.filter(Column("id") == record.id.uuidString).deleteAll(db)

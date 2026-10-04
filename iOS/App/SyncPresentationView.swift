@@ -9,8 +9,9 @@ struct SetupHintView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: CapdSpacing.small) {
-            Text("Captures stay on this iPhone").font(CapdTypography.rowTitle)
-            Text("Device sync is not available in this build.").font(.footnote)
+            Text("Captures stay on this device").font(CapdTypography.rowTitle)
+            Text("Connect an existing library after preserving and reviewing these captures.").font(
+                .footnote)
             HStack {
                 Button("Device sync", action: openDetails)
                     .accessibilityIdentifier("openSyncSettings")
@@ -40,13 +41,14 @@ struct AttentionHintView: View {
 struct SyncSettingsView: View {
     let state: AutomaticSyncState
     let retry: () -> Void
+    var connection: PhoneLibraryConnection? = nil
     @Environment(\.dismiss) private var dismiss
     @State private var showingSetup = false
 
     var body: some View {
         NavigationStack {
             Form {
-                Section("On this iPhone") {
+                Section("On this device") {
                     Text("Captures save here immediately and stay available offline.")
                 }
                 Section("Device sync") {
@@ -112,7 +114,21 @@ struct SyncSettingsView: View {
                 }
             }
         }.capdCanvas()
-            .sheet(isPresented: $showingSetup) { EnrollmentPreparationView() }
+            .sheet(isPresented: $showingSetup) {
+                if let connection, !syntheticEnrollmentPreview {
+                    LibraryConnectionView(connection: connection)
+                } else {
+                    EnrollmentPreparationView()
+                }
+            }
+    }
+
+    private var syntheticEnrollmentPreview: Bool {
+        #if DEBUG && targetEnvironment(simulator)
+            ProcessInfo.processInfo.arguments.contains("--capd-synthetic-enrollment")
+        #else
+            false
+        #endif
     }
 }
 
@@ -138,7 +154,7 @@ enum SyncPresentationCopy {
     static func explanation(_ state: AutomaticSyncState) -> String {
         switch state.phase {
         case .setupRequired:
-            "Device sync isn't connected in this build. Your captures stay on this iPhone. Connection requires a verified library migration."
+            "This device is not connected. Prepare a backup and review the library import before connecting."
         case .idle:
             "capd delivers changes automatically between connected devices. Captures remain available here when you're offline."
         case .syncing:
@@ -175,7 +191,7 @@ private struct EnrollmentPreparationView: View {
             Form {
                 Section("Preserve your library") {
                     Text(
-                        "Your captures stay on this iPhone. Connecting this library requires a verified migration and backup before device enrollment is available."
+                        "Your captures stay on this device. Connecting this library requires a verified migration and backup before device enrollment is available."
                     )
                     Button("Connect this device") {}
                         .disabled(true)

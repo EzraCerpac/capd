@@ -28,8 +28,12 @@ It connects only to 127.0.0.1 and has no authentication. Custom is the accepted
 engine direction; this backend remains a synthetic reference. Physical-device and release builds do not enable it through
 these flags. The separate portable HTTP boundary validates authenticated
 service/library/device identities and durable enrollment, as described in
-`docs/designs/production-sync.md`. The app does not configure that adapter; no
-credentials or development team are configured.
+`docs/designs/production-sync.md`. Device sync settings prepares a retained backup
+and connects an explicitly authorized HTTPS library after verifying the reviewed
+import receipt or an archive-only choice. App and share sessions select the same
+bound database; the share extension stays local-only. Credentials enter Keychain
+only after verified activation. See [mobile library activation](../docs/designs/mobile-library-activation.md).
+No credentials or development team are included in this repository.
 
 Open `CapdPhone.xcodeproj` in Xcode. `project.yml` is the XcodeGen source. Regenerate
 with `xcodegen generate --spec iOS/project.yml`. iPhone targets iOS 17 or later;
