@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		01540605EBE382F0CCB1B14C /* PhoneLibraryConnection.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9AE246EDC86BA766E1C08396 /* PhoneLibraryConnection.swift */; };
 		066939C79A7874CC77D8FA76 /* LibraryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 865B8CBF2E7C2E49FCF78738 /* LibraryView.swift */; };
 		0843E848622C66B7BE5147E0 /* CapdSync in Frameworks */ = {isa = PBXBuildFile; productRef = 32016C2DDDA9044286CE62B1 /* CapdSync */; };
 		26BE43D2BAF07B38B5EFC356 /* SyncPresentationView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 72541B549B40FFD6D1335B7F /* SyncPresentationView.swift */; };
@@ -16,6 +17,7 @@
 		55B5BC98FAAB1F3D0D65981D /* StylingUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0E857836222DA75C81B45803 /* StylingUITests.swift */; };
 		595C6033F433E46DF5547627 /* QuietUXUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5C57E4197CB2EFB87AA2E7EE /* QuietUXUITests.swift */; };
 		5BE511C34C2E608B99079921 /* MobileEnvironment.swift in Sources */ = {isa = PBXBuildFile; fileRef = 13F4FF7B0C75828DD365DEC9 /* MobileEnvironment.swift */; };
+		664358DA0C16D562FEF5674F /* LibraryConnectionUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2EB24A1344CA7429A48C3120 /* LibraryConnectionUITests.swift */; };
 		6BD45A48619F330B688D48D7 /* SyncConnectivity.swift in Sources */ = {isa = PBXBuildFile; fileRef = AEB2701B5EA7C64824A3E94B /* SyncConnectivity.swift */; };
 		6D4EFE435E074F287D0BDD98 /* CapdMobile in Frameworks */ = {isa = PBXBuildFile; productRef = BF7A41DAA9F141D8653E525D /* CapdMobile */; };
 		857B4C557D98AD42C4A571DE /* FixtureApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1FDFF150E743ED04B890284D /* FixtureApp.swift */; };
@@ -26,6 +28,7 @@
 		AD0D2BA687DA2A92D9E71A5F /* AutomaticSyncUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9D8EC38C1A1EB29623CFB32C /* AutomaticSyncUITests.swift */; };
 		D33B43488450EAB2353620CE /* AppIcon.icon in Resources */ = {isa = PBXBuildFile; fileRef = 50E3689DFBCCEA2A86FBD62A /* AppIcon.icon */; };
 		DA987C97D9C10A04CE3E0797 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = C80BDCC1A3482229B71C1EE9 /* Assets.xcassets */; };
+		E971D1CE01FCC9D4017E16C6 /* LibraryConnectionView.swift in Sources */ = {isa = PBXBuildFile; fileRef = D1EB23FB345DC6EA0225CF6C /* LibraryConnectionView.swift */; };
 		F52759E998BA2B6B080AF75C /* CapdMobile in Frameworks */ = {isa = PBXBuildFile; productRef = FB7500C9B2DEF2F5B518C690 /* CapdMobile */; };
 		F7BFBF20D6F461E70411E850 /* CapdDesignSystem in Frameworks */ = {isa = PBXBuildFile; productRef = 2E2A0FA4371229E338EF431B /* CapdDesignSystem */; };
 /* End PBXBuildFile section */
@@ -68,6 +71,7 @@
 		1FDFF150E743ED04B890284D /* FixtureApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FixtureApp.swift; sourceTree = "<group>"; };
 		283660568CC4584299338273 /* CapdMobile */ = {isa = PBXFileReference; lastKnownFileType = folder; name = CapdMobile; path = ../Packages/CapdMobile; sourceTree = SOURCE_ROOT; };
 		289D50F35CCEED0C7513C6CB /* CapdPhoneShare.appex */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = "wrapper.app-extension"; path = CapdPhoneShare.appex; sourceTree = BUILT_PRODUCTS_DIR; };
+		2EB24A1344CA7429A48C3120 /* LibraryConnectionUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LibraryConnectionUITests.swift; sourceTree = "<group>"; };
 		3117EC257394B3A35E8761D2 /* ShareViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShareViewController.swift; sourceTree = "<group>"; };
 		50E3689DFBCCEA2A86FBD62A /* AppIcon.icon */ = {isa = PBXFileReference; lastKnownFileType = wrapper.icon; path = AppIcon.icon; sourceTree = "<group>"; };
 		5C57E4197CB2EFB87AA2E7EE /* QuietUXUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QuietUXUITests.swift; sourceTree = "<group>"; };
@@ -76,6 +80,7 @@
 		865B8CBF2E7C2E49FCF78738 /* LibraryView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LibraryView.swift; sourceTree = "<group>"; };
 		8A7E2736D65D6A157FE1AFD4 /* CapdPhoneUITests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = CapdPhoneUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		95865E41F398B59B1604A610 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
+		9AE246EDC86BA766E1C08396 /* PhoneLibraryConnection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhoneLibraryConnection.swift; sourceTree = "<group>"; };
 		9D8EC38C1A1EB29623CFB32C /* AutomaticSyncUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AutomaticSyncUITests.swift; sourceTree = "<group>"; };
 		A264E6A3FA4A57D533CD62AC /* CapdDesignSystem */ = {isa = PBXFileReference; lastKnownFileType = folder; name = CapdDesignSystem; path = ../Packages/CapdDesignSystem; sourceTree = SOURCE_ROOT; };
 		AEB2701B5EA7C64824A3E94B /* SyncConnectivity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SyncConnectivity.swift; sourceTree = "<group>"; };
@@ -83,6 +88,7 @@
 		B8BE02CD8D40A4250EDB9745 /* CapdPhoneFixtureHost.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = CapdPhoneFixtureHost.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		C80BDCC1A3482229B71C1EE9 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		C8859FFD24300A1B57DABA40 /* CaptureUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CaptureUITests.swift; sourceTree = "<group>"; };
+		D1EB23FB345DC6EA0225CF6C /* LibraryConnectionView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LibraryConnectionView.swift; sourceTree = "<group>"; };
 		DB16E5A36A1E7AB558F46350 /* SyncIntegrationUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SyncIntegrationUITests.swift; sourceTree = "<group>"; };
 		EBA5332F7F8B987B43A87730 /* CapdSync */ = {isa = PBXFileReference; lastKnownFileType = folder; name = CapdSync; path = ../Packages/CapdSync; sourceTree = SOURCE_ROOT; };
 		FF06731FA974E59B0DEB2C90 /* CapdPhone.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = CapdPhone.entitlements; sourceTree = "<group>"; };
@@ -133,7 +139,9 @@
 				C80BDCC1A3482229B71C1EE9 /* Assets.xcassets */,
 				1F0C6E75A20B69503EC36647 /* CapdPhoneApp.swift */,
 				61E4499B1B2CF30036051DE9 /* Info.plist */,
+				D1EB23FB345DC6EA0225CF6C /* LibraryConnectionView.swift */,
 				865B8CBF2E7C2E49FCF78738 /* LibraryView.swift */,
+				9AE246EDC86BA766E1C08396 /* PhoneLibraryConnection.swift */,
 				AEB2701B5EA7C64824A3E94B /* SyncConnectivity.swift */,
 				72541B549B40FFD6D1335B7F /* SyncPresentationView.swift */,
 			);
@@ -187,6 +195,7 @@
 			children = (
 				9D8EC38C1A1EB29623CFB32C /* AutomaticSyncUITests.swift */,
 				C8859FFD24300A1B57DABA40 /* CaptureUITests.swift */,
+				2EB24A1344CA7429A48C3120 /* LibraryConnectionUITests.swift */,
 				5C57E4197CB2EFB87AA2E7EE /* QuietUXUITests.swift */,
 				0E857836222DA75C81B45803 /* StylingUITests.swift */,
 				DB16E5A36A1E7AB558F46350 /* SyncIntegrationUITests.swift */,
@@ -361,6 +370,7 @@
 			files = (
 				AD0D2BA687DA2A92D9E71A5F /* AutomaticSyncUITests.swift in Sources */,
 				A9C1113E9F0934DC3DE3AC9E /* CaptureUITests.swift in Sources */,
+				664358DA0C16D562FEF5674F /* LibraryConnectionUITests.swift in Sources */,
 				595C6033F433E46DF5547627 /* QuietUXUITests.swift in Sources */,
 				55B5BC98FAAB1F3D0D65981D /* StylingUITests.swift in Sources */,
 				2729C4F54903874D0B6D00B9 /* SyncIntegrationUITests.swift in Sources */,
@@ -389,8 +399,10 @@
 			buildActionMask = 2147483647;
 			files = (
 				A72820FC04EAAEC2824C1670 /* CapdPhoneApp.swift in Sources */,
+				E971D1CE01FCC9D4017E16C6 /* LibraryConnectionView.swift in Sources */,
 				066939C79A7874CC77D8FA76 /* LibraryView.swift in Sources */,
 				5BE511C34C2E608B99079921 /* MobileEnvironment.swift in Sources */,
+				01540605EBE382F0CCB1B14C /* PhoneLibraryConnection.swift in Sources */,
 				6BD45A48619F330B688D48D7 /* SyncConnectivity.swift in Sources */,
 				26BE43D2BAF07B38B5EFC356 /* SyncPresentationView.swift in Sources */,
 			);
