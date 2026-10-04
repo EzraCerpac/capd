@@ -201,7 +201,7 @@ public struct GroundedAnswerService: Sendable {
                 // Reject the whole statement if any purported source or verbatim support
                 // is invented. This verifies source membership and quotes, not entailment.
                 guard let source = byNumber[citation.number], quote.count >= 8, quote.count <= 240,
-                    Self.normalized(source.excerpt).contains(quote)
+                    Self.fragments(source.excerpt).contains(where: { $0.contains(quote) })
                 else { return nil }
                 if seenSources.insert(citation.number).inserted {
                     citations.append(.init(number: citation.number, quote: quote))
@@ -254,15 +254,16 @@ public struct GroundedAnswerService: Sendable {
     }
 
     private static func mergedExcerpts(_ fragments: [String], limit: Int) -> String {
-        let fragments = Array(fragments.prefix(limit))
+        let separator = "\n\n"
+        let fragments = Array(fragments.prefix((limit + separator.count) / (separator.count + 1)))
         guard !fragments.isEmpty else { return "" }
-        var remaining = limit - (fragments.count - 1)
+        var remaining = limit - separator.count * (fragments.count - 1)
         let parts = fragments.enumerated().map { index, fragment in
             let part = String(fragment.prefix(remaining / (fragments.count - index)))
             remaining -= part.count
             return part
         }
-        return parts.joined(separator: " ")
+        return parts.joined(separator: separator)
     }
 
     static func normalized(_ text: String) -> String {
