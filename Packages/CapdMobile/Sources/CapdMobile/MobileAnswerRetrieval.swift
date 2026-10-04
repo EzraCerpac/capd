@@ -18,66 +18,84 @@ public actor MobileAnswerRetrieval: AnswerRetrieving {
         database = try DatabasePool(path: databaseURL.path, configuration: configuration)
     }
 
+    init(database: DatabasePool) {
+        self.database = database
+        access = nil
+    }
+
     public func search(_ query: String, limit: Int) async throws -> [AnswerEvidence] {
+        try await search([query], limit: limit)[0]
+    }
+
+    public func search(_ queries: [String], limit: Int) async throws -> [[AnswerEvidence]] {
         let lease = try access?.lease()
         defer { withExtendedLifetime(lease) {} }
         try Task.checkCancellation()
+        let results = try await database.read { db in
+            try queries.map { query in
+                try Task.checkCancellation()
+                return try Self.search(query, limit: limit, in: db)
+            }
+        }
+        try Task.checkCancellation()
+        return results
+    }
+
+    private static func search(_ query: String, limit: Int, in db: Database) throws
+        -> [AnswerEvidence]
+    {
         let query = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !query.isEmpty, limit > 0 else { return [] }
         let cap = min(limit, 12)
         let pattern = FTS5Pattern(matchingAllPrefixesIn: query)
         let literalTerms = Self.literalTerms(query)
         guard pattern != nil || !literalTerms.isEmpty else { return [] }
-        let evidence = try await database.read { db in
-            // Match and snippet use the same tokenizer, including Porter stemming.
-            // Titles can find sources, but excerpts must come from saved prose.
-            var evidence: [AnswerEvidence] = []
-            if let pattern {
-                let prosePattern = "{title selection note body ocrText} : (\(pattern.rawPattern))"
-                let rows = try Row.fetchAll(
-                    db,
-                    sql: """
-                        SELECT mobile_captures.id, mobile_captures.title,
-                            CASE WHEN highlight(mobile_captures_fts, 1, '', '|') != mobile_captures.selection
-                                THEN snippet(mobile_captures_fts, 1, '', '', '', 64) END AS selectionExcerpt,
-                            snippet(mobile_captures_fts, 1, char(1), '', '', 64) AS selectionHighlighted,
-                            CASE WHEN highlight(mobile_captures_fts, 2, '', '|') != mobile_captures.note
-                                THEN snippet(mobile_captures_fts, 2, '', '', '', 64) END AS noteExcerpt,
-                            snippet(mobile_captures_fts, 2, char(1), '', '', 64) AS noteHighlighted,
-                            CASE WHEN highlight(mobile_captures_fts, 5, '', '|') != coalesce(mobile_captures.body, '')
-                                THEN snippet(mobile_captures_fts, 5, '', '', '', 64) END AS bodyExcerpt,
-                            snippet(mobile_captures_fts, 5, char(1), '', '', 64) AS bodyHighlighted,
-                            CASE WHEN highlight(mobile_captures_fts, 6, '', '|') != coalesce(mobile_captures.ocrText, '')
-                                THEN snippet(mobile_captures_fts, 6, '', '', '', 64) END AS ocrTextExcerpt,
-                            snippet(mobile_captures_fts, 6, char(1), '', '', 64) AS ocrTextHighlighted,
-                            snippet(mobile_captures_fts,
-                                CASE
-                                    WHEN length(mobile_captures.selection) > 0 THEN 1
-                                    WHEN length(mobile_captures.note) > 0 THEN 2
-                                    WHEN length(coalesce(mobile_captures.body, '')) > 0 THEN 5
-                                    ELSE 6
-                                END, '', '', '', 64) AS fallbackExcerpt
-                        FROM mobile_captures_fts
-                        JOIN mobile_captures ON mobile_captures.localID = mobile_captures_fts.rowid
-                        WHERE mobile_captures_fts MATCH ?
-                            AND length(mobile_captures.selection || mobile_captures.note ||
-                                coalesce(mobile_captures.body, '') || coalesce(mobile_captures.ocrText, '')) > 0
-                        ORDER BY bm25(mobile_captures_fts), mobile_captures.createdAt DESC,
-                            mobile_captures.localID DESC LIMIT ?
-                        """, arguments: [prosePattern, cap])
-                evidence = rows.map { row in
-                    AnswerEvidence(
-                        id: row["id"], title: row["title"], excerpt: Self.excerpt(row))
-                }
+        // Match and snippet use the same tokenizer, including Porter stemming.
+        // Titles can find sources, but excerpts must come from saved prose.
+        var evidence: [AnswerEvidence] = []
+        if let pattern {
+            let prosePattern = "{title selection note body ocrText} : (\(pattern.rawPattern))"
+            let rows = try Row.fetchAll(
+                db,
+                sql: """
+                    SELECT mobile_captures.id, mobile_captures.title,
+                        CASE WHEN highlight(mobile_captures_fts, 1, '', '|') != mobile_captures.selection
+                            THEN snippet(mobile_captures_fts, 1, '', '', '', 64) END AS selectionExcerpt,
+                        snippet(mobile_captures_fts, 1, char(1), '', '', 64) AS selectionHighlighted,
+                        CASE WHEN highlight(mobile_captures_fts, 2, '', '|') != mobile_captures.note
+                            THEN snippet(mobile_captures_fts, 2, '', '', '', 64) END AS noteExcerpt,
+                        snippet(mobile_captures_fts, 2, char(1), '', '', 64) AS noteHighlighted,
+                        CASE WHEN highlight(mobile_captures_fts, 5, '', '|') != coalesce(mobile_captures.body, '')
+                            THEN snippet(mobile_captures_fts, 5, '', '', '', 64) END AS bodyExcerpt,
+                        snippet(mobile_captures_fts, 5, char(1), '', '', 64) AS bodyHighlighted,
+                        CASE WHEN highlight(mobile_captures_fts, 6, '', '|') != coalesce(mobile_captures.ocrText, '')
+                            THEN snippet(mobile_captures_fts, 6, '', '', '', 64) END AS ocrTextExcerpt,
+                        snippet(mobile_captures_fts, 6, char(1), '', '', 64) AS ocrTextHighlighted,
+                        snippet(mobile_captures_fts,
+                            CASE
+                                WHEN length(mobile_captures.selection) > 0 THEN 1
+                                WHEN length(mobile_captures.note) > 0 THEN 2
+                                WHEN length(coalesce(mobile_captures.body, '')) > 0 THEN 5
+                                ELSE 6
+                            END, '', '', '', 64) AS fallbackExcerpt
+                    FROM mobile_captures_fts
+                    JOIN mobile_captures ON mobile_captures.localID = mobile_captures_fts.rowid
+                    WHERE mobile_captures_fts MATCH ?
+                        AND length(mobile_captures.selection || mobile_captures.note ||
+                            coalesce(mobile_captures.body, '') || coalesce(mobile_captures.ocrText, '')) > 0
+                    ORDER BY bm25(mobile_captures_fts), mobile_captures.createdAt DESC,
+                        mobile_captures.localID DESC LIMIT ?
+                    """, arguments: [prosePattern, cap])
+            evidence = rows.map { row in
+                AnswerEvidence(
+                    id: row["id"], title: row["title"], excerpt: Self.excerpt(row))
             }
-            guard !literalTerms.isEmpty, evidence.count < cap else { return evidence }
-            return evidence
-                + (try Self.literalEvidence(
-                    db, terms: literalTerms, excluding: evidence.map(\.id),
-                    limit: cap - evidence.count))
         }
-        try Task.checkCancellation()
+        guard !literalTerms.isEmpty, evidence.count < cap else { return evidence }
         return evidence
+            + (try Self.literalEvidence(
+                db, terms: literalTerms, excluding: evidence.map(\.id),
+                limit: cap - evidence.count))
     }
 
     private static func literalTerms(_ query: String) -> [String] {

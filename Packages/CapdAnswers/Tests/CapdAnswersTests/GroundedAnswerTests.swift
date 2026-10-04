@@ -14,10 +14,10 @@ private actor Retriever: AnswerRetrieving {
     ) {
         self.hits = hits
     }
-    func search(_ query: String, limit: Int) async throws -> [AnswerEvidence] {
+    func search(_ queries: [String], limit: Int) async throws -> [[AnswerEvidence]] {
         calls += 1
         limits.append(limit)
-        return hits
+        return queries.map { _ in hits }
     }
 }
 
@@ -121,7 +121,7 @@ private let supportedDraft = AnswerDraft(statements: [
     #expect(
         sources.reduce(0) { $0 + $1.source.excerpt.count }
             <= GroundedAnswerService.totalExcerptLimit)
-    #expect(await reader.calls <= 9)
+    #expect(await reader.calls == 1)
     #expect(await reader.limits.allSatisfy { $0 == 12 })
 }
 
