@@ -1,10 +1,45 @@
 import Foundation
+import GRDB
 import Testing
 
 @testable import CapdSync
 
 @Suite("Snapshot import regressions")
 struct SnapshotImportRegressionTests {
+    @Test func legacyDuplicateRowsUseFirstCanonicalTombstone() throws {
+        let fixture = try SnapshotRegressionFixture()
+        defer { fixture.clean() }
+        var first = fixture.capture(id: fixture.authorityID)
+        first.deleted = true
+        let second = fixture.capture(id: fixture.sourceID)
+        let writer = try SyncDatabase.open(
+            at: fixture.root.appendingPathComponent("authority.sqlite"))
+        try writer.write { db in
+            try db.execute(
+                sql: """
+                    DROP TABLE sync_records;
+                    CREATE TABLE sync_records (id TEXT PRIMARY KEY, payload BLOB NOT NULL);
+                    """)
+            for capture in [first, second] {
+                try db.execute(
+                    sql: "INSERT INTO sync_records (id, payload) VALUES (?, ?)",
+                    arguments: [capture.id.uuidString, try SyncDatabase.encode(capture)])
+            }
+        }
+        let migrated = try fixture.openServer()
+        #expect(try migrated.baseline().captures == [first, second])
+        let incoming = fixture.capture(id: fixture.laterID)
+        let snapshot = fixture.snapshot([incoming])
+        let preview = try migrated.previewContentSnapshotImport(snapshot)
+        #expect(preview.items.first?.canonicalCaptureID == first.id)
+        #expect(preview.items.first?.disposition == .preserveTombstone)
+        #expect(preview.items.first?.authority == first)
+        let receipt = try migrated.importContentSnapshot(snapshot, preview: preview)
+        #expect(receipt.items.first?.canonicalCaptureID == first.id)
+        #expect(try migrated.baseline().captures == [first, second])
+        #expect(try fixture.openServer().baseline().captures == [first, second])
+    }
+
     @Test(arguments: [false, true])
     func incomingTombstoneDeletesLiveAuthorityAndLaterSnapshotAliases(matchID: Bool) throws {
         let fixture = try SnapshotRegressionFixture()

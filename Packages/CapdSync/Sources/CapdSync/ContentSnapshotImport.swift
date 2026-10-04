@@ -124,9 +124,9 @@ enum SnapshotImport {
                     throw ContentSnapshotImportError.identityCollision
                 }
                 existing = match
-            } else if let match = records.values.first(where: {
+            } else if let match = records.values.lazy.filter({
                 CaptureFingerprint.matches($0.source, incoming.source)
-            }) {
+            }).min(by: { $0.id.uuidString < $1.id.uuidString }) {
                 existing = match
             } else {
                 existing = nil
