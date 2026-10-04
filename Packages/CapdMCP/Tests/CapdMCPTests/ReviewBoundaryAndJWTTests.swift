@@ -46,18 +46,23 @@ final class ReviewBoundaryAndJWTTests: XCTestCase {
                 "method": .string("tools/list"), "params": .object([:]),
             ]))
 
-        for scheme in ["bearer", "BEARER", "bEaReR"] {
+        for authorization in ["bearer synthetic", "BEARER  synthetic", "bEaReR    synthetic"] {
             let response = boundary.handle(
                 MCPHTTPRequest(
                     method: "POST", path: "/mcp",
                     headers: [
-                        "Authorization": "\(scheme) synthetic",
+                        "Authorization": authorization,
                         "Accept": "application/json, text/event-stream",
                         "Content-Type": "application/json",
                         "MCP-Protocol-Version": "2025-11-25",
                     ], body: body))
-            XCTAssertEqual(response.status, 200, "scheme: \(scheme)")
+            XCTAssertEqual(response.status, 200, "authorization: \(authorization)")
         }
+
+        for authorization in ["Bearer", "Bearer ", "Bearer    ", "Bearer\tsynthetic"] {
+            XCTAssertNil(MCPHTTPBoundary.bearerCredential(authorization))
+        }
+        XCTAssertEqual(MCPHTTPBoundary.bearerCredential("Bearer synthetic "), "synthetic ")
 
         let wrongScheme = boundary.handle(
             MCPHTTPRequest(

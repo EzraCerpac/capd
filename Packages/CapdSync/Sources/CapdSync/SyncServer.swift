@@ -63,11 +63,49 @@ public final class SyncServer: SyncTransport, Sendable {
         try apply(operation, validating: { _, _, _ in })
     }
 
+    /// A dedicated service writer cannot inherit an ordinary device's retained history.
+    public func reserveServiceWriter(deviceID: UUID, principalID: String) throws {
+        guard !principalID.isEmpty else { throw SyncError.wrongDevice }
+        try write { db in
+            try db.execute(
+                sql: """
+                    CREATE TABLE IF NOT EXISTS sync_service_writers (
+                        device TEXT PRIMARY KEY, principal TEXT NOT NULL);
+                    """)
+            if let owner = try String.fetchOne(
+                db, sql: "SELECT principal FROM sync_service_writers WHERE device=?",
+                arguments: [deviceID.uuidString])
+            {
+                guard owner == principalID else { throw SyncError.wrongDevice }
+                return
+            }
+            guard
+                try Bool.fetchOne(
+                    db, sql: "SELECT EXISTS(SELECT 1 FROM sync_devices WHERE id=?)",
+                    arguments: [deviceID.uuidString]) == false
+            else { throw SyncError.wrongDevice }
+            try db.execute(
+                sql: "INSERT INTO sync_service_writers (device, principal) VALUES (?, ?)",
+                arguments: [deviceID.uuidString, principalID])
+        }
+    }
+
+    public func apply(_ operation: SyncOperation, servicePrincipalID: String?) throws -> SyncReceipt
+    {
+        try apply(operation, servicePrincipalID: servicePrincipalID, validating: { _, _, _ in })
+    }
+
     func apply(
-        _ operation: SyncOperation,
+        _ operation: SyncOperation, servicePrincipalID: String? = nil,
         validating validate: (Database, SyncReceipt, FeedChange?) throws -> Void
     ) throws -> SyncReceipt {
         try write { db in
+            let owner =
+                try db.tableExists("sync_service_writers")
+                ? String.fetchOne(
+                    db, sql: "SELECT principal FROM sync_service_writers WHERE device=?",
+                    arguments: [operation.deviceID.uuidString]) : nil
+            guard owner == servicePrincipalID else { throw SyncError.wrongDevice }
             if let row = try Row.fetchOne(
                 db, sql: "SELECT operation, receipt FROM sync_receipts WHERE id = ?",
                 arguments: [operation.id.uuidString])

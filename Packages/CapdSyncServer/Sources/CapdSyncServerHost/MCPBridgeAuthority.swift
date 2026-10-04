@@ -145,10 +145,9 @@ extension Authority {
             headers[key.lowercased()] = value
         }
         guard headers["origin"] == nil, let authorization = headers["authorization"],
-            authorization.hasPrefix("Bearer "), authorization.utf8.count == 71,
+            let bearer = MCPHTTPBoundary.bearerCredential(authorization),
             let policyURL = mcpConfigurationURL
         else { return MCPWork.failure(401) }
-        let bearer = String(authorization.dropFirst(7))
         do {
             // Intentionally AFTER queue admission and BEFORE opening capture storage.
             let policy = try MCPBridgeConfiguration.read(policyURL)
@@ -168,7 +167,11 @@ extension Authority {
                 databaseURL: libraryRoot(grant.binding.libraryID).appendingPathComponent(
                     "authority.sqlite"), binding: grant.binding)
             let server = try server(for: grant.binding.libraryID, requireExisting: true)
-            let toolbox = try MCPToolbox(store: store, authority: server)
+            if let deviceID = grant.deviceID {
+                try server.reserveServiceWriter(deviceID: deviceID, principalID: policy.principalID)
+            }
+            let toolbox = try MCPToolbox(
+                store: store, authority: server, servicePrincipalID: policy.principalID)
             let boundary = try MCPHTTPBoundary(
                 bridgeToolbox: toolbox,
                 verifier: MCPBridgeRequestVerifier(bearer: bearer, grant: grant),

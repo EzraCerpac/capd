@@ -46,7 +46,10 @@ public final class MCPToolbox: Sendable {
     public static let writeScope = "capd:write"
     private let store: AcceptedStore
     private let authority: SyncServer
-    public init(store: AcceptedStore, authority: SyncServer) throws {
+    private let servicePrincipalID: String?
+    public init(store: AcceptedStore, authority: SyncServer, servicePrincipalID: String? = nil)
+        throws
+    {
         guard authority.libraryID == store.binding.libraryID,
             authority.serviceID == store.binding.serviceID
         else {
@@ -54,6 +57,7 @@ public final class MCPToolbox: Sendable {
         }
         self.store = store
         self.authority = authority
+        self.servicePrincipalID = servicePrincipalID
     }
 
     private static func schema(_ properties: Object, required: [String] = []) -> JSONValue {
@@ -321,7 +325,8 @@ public final class MCPToolbox: Sendable {
                     SyncOperation(
                         id: opID, deviceID: device, sequence: sequence, captureID: id,
                         baseRevision: base, mutation: mutation,
-                        requestIdentity: try Self.requestIdentity(name: name, arguments: a)))
+                        requestIdentity: try Self.requestIdentity(name: name, arguments: a)),
+                    servicePrincipalID: servicePrincipalID)
                 var fields: Object = [
                     "operation_id": .string(receipt.operationID.uuidString),
                     "outcome": .string(receipt.outcome.rawValue),

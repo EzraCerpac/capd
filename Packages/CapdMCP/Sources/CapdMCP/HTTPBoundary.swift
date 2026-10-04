@@ -109,11 +109,9 @@ public final class MCPHTTPBoundary: Sendable {
         guard request.body.count <= 65_536 else { return response(413) }
         let grant: MCPGrant
         do {
-            guard let auth = h["authorization"], auth.utf8.count <= 8192,
-                let separator = auth.firstIndex(of: " "),
-                String(auth[..<separator]).caseInsensitiveCompare("Bearer") == .orderedSame
+            guard let auth = h["authorization"], let bearer = Self.bearerCredential(auth)
             else { throw MCPFailure.forbidden }
-            grant = try verifier.verify(String(auth[auth.index(after: separator)...]))
+            grant = try verifier.verify(bearer)
             guard grant.issuer == issuer, grant.audience == resource, grant.binding == binding,
                 grant.expiresAt > Date(), !grant.subject.isEmpty
             else { throw MCPFailure.forbidden }
@@ -335,6 +333,15 @@ public final class MCPHTTPBoundary: Sendable {
         }
         return response(200, .object(["jsonrpc": .string("2.0"), "id": id!, "result": output]))
     }
+    public static func bearerCredential(_ authorization: String) -> String? {
+        guard authorization.utf8.count <= 8192,
+            let separator = authorization.firstIndex(of: " "),
+            String(authorization[..<separator]).caseInsensitiveCompare("Bearer") == .orderedSame
+        else { return nil }
+        let credential = authorization[separator...].drop(while: { $0 == " " })
+        return credential.isEmpty ? nil : String(credential)
+    }
+
     private static let versions: Set<String> = [
         "2025-03-26", "2025-06-18", "2025-11-25", "2026-07-28",
     ]

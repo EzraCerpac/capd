@@ -285,6 +285,94 @@ import Testing
             ).contains("sensitive-deleted-fixture"))
     }
 
+    @Test func removedSyncDeviceHistoryCannotBecomeBridgeWriter() async throws {
+        let f = try BridgeFixture()
+        defer { f.clean() }
+        let authority = try f.authority()
+        let capture = SharedCapture(source: CaptureSource(kind: .text, selection: "retired device"))
+        let operation = SyncOperation(
+            deviceID: f.macDevice, sequence: 1, captureID: capture.id, baseRevision: 0,
+            mutation: .create(capture))
+        #expect(await authority.handle(try f.sync(.apply(operation))).status == 200)
+        let replacement = UUID()
+        try f.writeSyncConfiguration(deviceID: replacement)
+        var policy = f.policy()
+        policy["writerDeviceID"] = f.macDevice.uuidString
+        try f.write(policy)
+        #expect(await authority.handleMCP(try f.rpc()).status == 503)
+        #expect(await authority.handleMCP(try f.create(sequence: 2)).status == 503)
+        let baseline = try f.baseline(
+            await authority.handle(try f.sync(.baseline, deviceID: replacement)))
+        #expect(baseline.deviceSequences[f.macDevice] == 1)
+        #expect(baseline.captures.map(\.id) == [capture.id])
+    }
+
+    @Test func bridgeWriterReservationSurvivesRestartAndRejectsAnotherPrincipal() async throws {
+        let f = try BridgeFixture()
+        defer { f.clean() }
+        var authority: Authority? = try f.authority()
+        #expect(await authority!.handle(try f.sync(.baseline)).status == 200)
+        let first = try f.create()
+        #expect(f.success(await authority!.handleMCP(first)))
+        authority!.queue.sync {}
+        authority = nil
+        authority = try f.authority()
+        #expect(f.success(await authority!.handleMCP(first)))
+        #expect(f.success(await authority!.handleMCP(try f.create(sequence: 2))))
+        var policy = f.policy()
+        policy["principalID"] = "another-principal"
+        try f.write(policy)
+        #expect(await authority!.handleMCP(try f.rpc()).status == 503)
+        #expect(await authority!.handleMCP(try f.create(sequence: 3)).status == 503)
+        try f.writePolicy()
+        #expect(f.success(await authority!.handleMCP(try f.create(sequence: 3))))
+        let baseline = try f.baseline(await authority!.handle(try f.sync(.baseline)))
+        #expect(baseline.deviceSequences[f.writer] == 3)
+    }
+
+    @Test func reservedBridgeWriterCannotWriteThroughOrdinarySyncEnrollment() async throws {
+        let f = try BridgeFixture()
+        defer { f.clean() }
+        let authority = try f.authority()
+        #expect(await authority.handle(try f.sync(.baseline)).status == 200)
+        #expect(f.success(await authority.handleMCP(try f.create())))
+        try f.writeSyncConfiguration(deviceID: f.writer)
+        let capture = SharedCapture(source: CaptureSource(kind: .text, selection: "ordinary sync"))
+        let operation = SyncOperation(
+            deviceID: f.writer, sequence: 2, captureID: capture.id, baseRevision: 0,
+            mutation: .create(capture))
+        let response = await authority.handle(try f.sync(.apply(operation), deviceID: f.writer))
+        #expect(response.status == 422)
+        let envelope = try JSONDecoder().decode(SyncHTTPReply.self, from: response.body)
+        guard case .domainFailure(.wrongDevice) = envelope.result else {
+            Issue.record("Reserved writer did not fail with wrongDevice")
+            return
+        }
+        let baseline = try f.baseline(
+            await authority.handle(try f.sync(.baseline, deviceID: f.writer)))
+        #expect(baseline.deviceSequences[f.writer] == 1)
+        #expect(!baseline.captures.contains(where: { $0.id == capture.id }))
+        try f.writeSyncConfiguration(deviceID: f.macDevice)
+        #expect(f.success(await authority.handleMCP(try f.create(sequence: 2))))
+    }
+
+    @Test func bridgeAcceptsBearerSeparatorSpacesAndRejectsEmptyCredentials() async throws {
+        let f = try BridgeFixture()
+        defer { f.clean() }
+        let authority = try f.authority()
+        #expect(await authority.handle(try f.sync(.baseline)).status == 200)
+        for authorization in ["Bearer  \(f.bridgeBearer)", "bEaReR    \(f.bridgeBearer)"] {
+            var request = try f.rpc()
+            request.headers["Authorization"] = authorization
+            #expect(await authority.handleMCP(request).status == 200)
+        }
+        for authorization in ["Bearer", "Bearer    ", "Bearer\t\(f.bridgeBearer)"] {
+            var request = try f.rpc()
+            request.headers["Authorization"] = authorization
+            #expect(await authority.handleMCP(request).status == 401)
+        }
+    }
+
     @Test func queuedRevocationIsReadAfterAdmissionAndExpiryCannotWrite() async throws {
         let f = try BridgeFixture()
         defer { f.clean() }
@@ -436,16 +524,19 @@ private struct BridgeFixture: Sendable {
         data = root.appendingPathComponent("data")
         try FileManager.default.createDirectory(
             at: root, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        try writeSyncConfiguration(deviceID: macDevice)
+        try writePolicy()
+    }
+    func writeSyncConfiguration(deviceID: UUID) throws {
         try JSONSerialization.data(withJSONObject: [
             "serviceID": service.uuidString,
             "enrollments": [
                 [
-                    "libraryID": library.uuidString, "deviceID": macDevice.uuidString,
+                    "libraryID": library.uuidString, "deviceID": deviceID.uuidString,
                     "credentialSHA256": digest(macBearer), "revoked": false,
                 ]
             ],
-        ]).write(to: syncConfig)
-        try writePolicy()
+        ]).write(to: syncConfig, options: .atomic)
     }
     func digest(_ value: String) -> String {
         SHA256.hash(data: Data(value.utf8)).map { String(format: "%02x", $0) }.joined()
@@ -472,7 +563,9 @@ private struct BridgeFixture: Sendable {
         try Authority(
             configurationURL: syncConfig, dataDirectory: data, mcpConfigurationURL: bridgeConfig)
     }
-    func sync(_ action: SyncHTTPAction, bearer: String? = nil) throws -> SyncHTTPRequest {
+    func sync(_ action: SyncHTTPAction, bearer: String? = nil, deviceID: UUID? = nil) throws
+        -> SyncHTTPRequest
+    {
         SyncHTTPRequest(
             method: "POST", path: "/v1/sync",
             headers: [
@@ -482,7 +575,7 @@ private struct BridgeFixture: Sendable {
             body: try JSONEncoder().encode(
                 SyncHTTPEnvelope(
                     expectedServiceID: service, expectedLibraryID: library,
-                    expectedDeviceID: macDevice, action: action)))
+                    expectedDeviceID: deviceID ?? macDevice, action: action)))
     }
     func rpc(method: String = "tools/list", params: [String: Any] = [:], bearer: String? = nil)
         throws -> MCPHTTPRequest
@@ -497,13 +590,13 @@ private struct BridgeFixture: Sendable {
                 "jsonrpc": "2.0", "id": 1, "method": method, "params": params,
             ]))
     }
-    func create(id: UUID = UUID()) throws -> MCPHTTPRequest {
+    func create(id: UUID = UUID(), sequence: Int64 = 1) throws -> MCPHTTPRequest {
         try rpc(
             method: "tools/call",
             params: [
                 "name": "create_capture",
                 "arguments": [
-                    "operation_id": UUID().uuidString, "sequence": 1, "id": id.uuidString,
+                    "operation_id": UUID().uuidString, "sequence": sequence, "id": id.uuidString,
                     "kind": "text", "created_at": "2026-10-04T10:00:00Z",
                     "text": "sensitive-deleted-fixture",
                 ],
