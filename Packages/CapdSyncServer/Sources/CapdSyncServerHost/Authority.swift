@@ -61,7 +61,9 @@ public final class Authority: @unchecked Sendable {
             guard errno == ENOENT else { throw HostError.invalidDataDirectory }
             return
         }
-        guard status.st_mode & S_IFMT == (directory ? S_IFDIR : S_IFREG) else {
+        guard status.st_mode & S_IFMT == (directory ? S_IFDIR : S_IFREG),
+            directory || status.st_nlink == 1
+        else {
             throw HostError.invalidDataDirectory
         }
     }

@@ -52,13 +52,14 @@ def main(binary):
 
         def start():
             nonlocal process, log
-            log = log_path.open("w")
+            log = log_path.open("a")
+            log_offset = log_path.stat().st_size
             process = subprocess.Popen([binary, "--config", str(config_path), "--data-dir",
                 str(root / "data"), "--port", "0"], stdout=log, stderr=subprocess.STDOUT)
             deadline = time.monotonic() + 20
             while time.monotonic() < deadline:
                 check(process.poll() is None, "server startup")
-                match = re.search(r"ready 127\.0\.0\.1:(\d+)", log_path.read_text())
+                match = re.search(r"ready 127\.0\.0\.1:(\d+)", log_path.read_bytes()[log_offset:].decode())
                 if match:
                     return int(match.group(1))
                 time.sleep(0.05)
