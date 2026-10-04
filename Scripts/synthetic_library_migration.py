@@ -483,7 +483,7 @@ def main():
     parser.add_argument("action", choices=["backup", "verify", "restore", "backfill", "prepare-enrollment", "import-initial-mac"])
     parser.add_argument("source", type=Path)
     parser.add_argument("--destination", type=Path)
-    parser.add_argument("--database", default="captures.sqlite")
+    parser.add_argument("--database")
     parser.add_argument("--library-id")
     parser.add_argument("--service-id")
     parser.add_argument("--import-id")
@@ -496,18 +496,21 @@ def main():
         parser.error("--library-id and --service-id are required")
     if args.action == "import-initial-mac" and not args.import_id:
         parser.error("--import-id is required")
+    database = args.database
+    if database is None:
+        database = "capd.sqlite" if args.action == "backfill" else "captures.sqlite"
     try:
         if args.action == "backup":
-            result = backup(args.source, args.destination, args.database)
+            result = backup(args.source, args.destination, database)
         elif args.action == "verify":
             result = verify(args.source)
         elif args.action == "restore":
             result = str(restore(args.source, args.destination))
         elif args.action == "backfill":
-            result = backfill_legacy(args.source, args.database)
+            result = backfill_legacy(args.source, database)
         elif args.action == "prepare-enrollment":
             result = prepare_enrollment(args.source, args.destination,
-                                        {"libraryID": args.library_id, "serviceID": args.service_id}, args.database)
+                                        {"libraryID": args.library_id, "serviceID": args.service_id}, database)
         else:
             result = import_initial_mac(args.source, args.destination,
                                         {"libraryID": args.library_id, "serviceID": args.service_id},
