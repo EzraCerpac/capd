@@ -203,7 +203,7 @@ public actor AutomaticSyncController {
             publish()
         case .success(.offline):
             state.phase = .offline
-            publish()
+            await arm(after: policy.foregroundPullInterval, kind: .poll)
         case .success(.sent):
             state.lastSuccessfulSync = await clock.now()
             guard active, connected else {

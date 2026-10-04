@@ -91,12 +91,13 @@ public struct MobileCapture: Codable, Equatable, Sendable, Identifiable, Fetchab
     public mutating func didInsert(_ inserted: InsertionSuccess) { localID = inserted.rowID }
 }
 
-public enum CaptureValidationError: Error, LocalizedError {
-    case emptyText, invalidURL
+public enum CaptureValidationError: Error, LocalizedError, Equatable {
+    case emptyText, invalidURL, tooLarge
     public var errorDescription: String? {
         switch self {
         case .emptyText: "Add some text to save."
         case .invalidURL: "Enter a complete http or https URL."
+        case .tooLarge: "This capture is too large to sync. Save a smaller selection."
         }
     }
 }
@@ -107,6 +108,9 @@ public enum CaptureInput {
     {
         let value = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !value.isEmpty else { throw CaptureValidationError.emptyText }
+        guard value.utf8.count <= SyncHTTPHandler.maximumBodyBytes else {
+            throw CaptureValidationError.tooLarge
+        }
         if isLink {
             guard let url = URL(string: value), let scheme = url.scheme?.lowercased(),
                 ["http", "https"].contains(scheme), let host = url.host, !host.isEmpty,
