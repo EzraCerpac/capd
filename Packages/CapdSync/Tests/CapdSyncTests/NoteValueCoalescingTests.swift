@@ -93,6 +93,41 @@ struct NoteValueCoalescingTests {
         #expect(successor.capture?.note == "Next local note")
         #expect(successor.capture?.noteConflicts.isEmpty == true)
     }
+
+    @Test(arguments: [false, true])
+    func duplicateCreateProvesOnlyItsCoalescedNoteCausality(concurrentEdit: Bool) throws {
+        let fixture = try NoteFixture()
+        defer { fixture.clean() }
+        let authority = try #require(fixture.write("A", base: fixture.base).capture)
+        let duplicate = SharedCapture(source: authority.source, note: "A")
+        let device = UUID()
+        let predecessor = try fixture.server.apply(
+            SyncOperation(
+                deviceID: device, sequence: 1, captureID: duplicate.id, baseRevision: 0,
+                mutation: .create(duplicate)))
+        #expect(predecessor.outcome == .accepted)
+        #expect(predecessor.capture?.id == authority.id)
+        #expect(predecessor.capture?.noteOperationID == predecessor.operationID)
+        #expect(predecessor.capture?.noteRevision == authority.noteRevision)
+        if concurrentEdit {
+            _ = try fixture.write(
+                "Concurrent note", base: try #require(predecessor.capture).revision)
+        }
+        let successor = try fixture.server.apply(
+            SyncOperation(
+                deviceID: device, sequence: 2, captureID: duplicate.id, baseRevision: 0,
+                predecessorID: predecessor.operationID,
+                mutation: .edit(CaptureEdit(note: NoteEdit("Next local note")))))
+        #expect(successor.outcome == (concurrentEdit ? .noteConflict : .accepted))
+        if concurrentEdit {
+            #expect(
+                Set(try #require(successor.capture).noteConflicts.compactMap(\.value))
+                    == ["Concurrent note", "Next local note"])
+        } else {
+            #expect(successor.capture?.note == "Next local note")
+            #expect(successor.capture?.noteConflicts.isEmpty == true)
+        }
+    }
 }
 
 private struct NoteFixture {
@@ -108,7 +143,8 @@ private struct NoteFixture {
             databaseURL: root.appendingPathComponent("server.sqlite"),
             blobDirectory: root.appendingPathComponent("blobs"))
         let capture = SharedCapture(
-            source: CaptureSource(kind: .text, selection: "Synthetic note fixture"),
+            source: CaptureSource(
+                kind: .text, contentHash: "synthetic note", selection: "Synthetic note fixture"),
             note: "Original")
         captureID = capture.id
         let created = try server.apply(

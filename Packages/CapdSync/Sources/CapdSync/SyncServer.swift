@@ -135,7 +135,7 @@ public final class SyncServer: SyncTransport, Sendable {
                         existing.manualTags = Array(
                             Set(existing.manualTags).union(incoming.manualTags)
                         ).sorted()
-                        if incoming.note != nil, incoming.note != existing.note {
+                        if incoming.note != nil {
                             let edit = CaptureEdit(note: NoteEdit(incoming.note))
                             if try SyncDatabase.edit(
                                 &existing, edit, operation: operation, base: 0, server: true)
