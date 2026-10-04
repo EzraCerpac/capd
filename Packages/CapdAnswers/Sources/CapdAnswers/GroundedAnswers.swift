@@ -56,9 +56,9 @@ public struct AnswerEvidence: Sendable, Equatable, Identifiable {
     }
 }
 
-/// Implementations must only read local captures and honor the candidate limit.
+/// Reads local captures from one snapshot, returning one result list per query in order.
 public protocol AnswerRetrieving: Sendable {
-    func search(_ query: String, limit: Int) async throws -> [AnswerEvidence]
+    func search(_ queries: [String], limit: Int) async throws -> [[AnswerEvidence]]
 }
 
 public struct NumberedEvidence: Sendable, Equatable {
@@ -139,9 +139,9 @@ public struct GroundedAnswerService: Sendable {
         }
         var candidates: [String: Candidate] = [:]
         let queries = [(terms.joined(separator: " "), 8.0)] + terms.map { ($0, 2.0) }
-        for (query, weight) in queries {
+        let results = try await retriever.search(queries.map(\.0), limit: 12)
+        for ((_, weight), hits) in zip(queries, results) {
             try Task.checkCancellation()
-            let hits = try await retriever.search(query, limit: 12)
             var seen = Set<String>()
             for (rank, evidence) in hits.prefix(12).enumerated() {
                 guard !evidence.id.isEmpty, seen.insert(evidence.id).inserted else { continue }
@@ -200,8 +200,10 @@ public struct GroundedAnswerService: Sendable {
                 let quote = Self.normalized(citation.quote)
                 // Reject the whole statement if any purported source or verbatim support
                 // is invented. This verifies source membership and quotes, not entailment.
-                guard let source = byNumber[citation.number], quote.count >= 8, quote.count <= 240,
-                    Self.fragments(source.excerpt).contains(where: { $0.contains(quote) })
+                guard let source = byNumber[citation.number], !quote.isEmpty, quote.count <= 240,
+                    Self.fragments(source.excerpt).contains(where: {
+                        $0.contains(quote) && (quote.count >= 8 || quote == $0)
+                    })
                 else { return nil }
                 if seenSources.insert(citation.number).inserted {
                     citations.append(.init(number: citation.number, quote: quote))
@@ -222,22 +224,18 @@ public struct GroundedAnswerService: Sendable {
             "a", "an", "and", "are", "as", "at", "be", "by", "can", "did", "do",
             "does", "for", "from", "has", "have", "how", "i", "in", "is", "it", "me", "my", "of",
             "on", "or", "saved", "source", "sources", "that", "the", "these", "this", "to", "was",
-            "were", "what", "when", "where", "which", "who", "why", "with", "about",
+            "were", "what", "when", "where", "which", "who", "why", "with", "about", "tell",
         ]
         var seen = Set<String>()
-        let text = question.lowercased()
+        let text = question.lowercased().replacingOccurrences(
+            of: #"['’]s\b"#, with: "", options: .regularExpression)
         let tokenizer = NLTokenizer(unit: .word)
         tokenizer.string = text
         var terms: [String] = []
         tokenizer.enumerateTokens(in: text.startIndex..<text.endIndex) { range, _ in
             for part in text[range].split(whereSeparator: { !$0.isLetter && !$0.isNumber }) {
                 let term = String(part)
-                let hasNonASCIIletter = term.unicodeScalars.contains {
-                    $0.value > 127 && $0.properties.isAlphabetic
-                }
-                if (term.count > 1 || hasNonASCIIletter) && !stop.contains(term)
-                    && seen.insert(term).inserted
-                {
+                if !stop.contains(term) && seen.insert(term).inserted {
                     terms.append(term)
                 }
             }
@@ -255,15 +253,19 @@ public struct GroundedAnswerService: Sendable {
 
     private static func mergedExcerpts(_ fragments: [String], limit: Int) -> String {
         let separator = "\n\n"
-        let fragments = Array(fragments.prefix((limit + separator.count) / (separator.count + 1)))
-        guard !fragments.isEmpty else { return "" }
-        var remaining = limit - separator.count * (fragments.count - 1)
-        let parts = fragments.enumerated().map { index, fragment in
-            let part = String(fragment.prefix(remaining / (fragments.count - index)))
-            remaining -= part.count
-            return part
+        var remaining = limit
+        var selected: [(offset: Int, element: String)] = []
+        let shortestFirst = fragments.enumerated().sorted {
+            if $0.element.count != $1.element.count { return $0.element.count < $1.element.count }
+            return $0.offset < $1.offset
         }
-        return parts.joined(separator: separator)
+        for fragment in shortestFirst {
+            let cost = fragment.element.count + (selected.isEmpty ? 0 : separator.count)
+            guard cost <= remaining else { continue }
+            selected.append(fragment)
+            remaining -= cost
+        }
+        return selected.sorted { $0.offset < $1.offset }.map(\.element).joined(separator: separator)
     }
 
     static func normalized(_ text: String) -> String {
