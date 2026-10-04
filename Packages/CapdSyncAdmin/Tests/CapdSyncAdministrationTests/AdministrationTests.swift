@@ -24,6 +24,9 @@ struct AdministrationTests {
                         arguments: [try Fixture.encode(other)])
                 }
             }
+            try db.writeWithoutTransaction {
+                try $0.execute(sql: "PRAGMA wal_checkpoint(TRUNCATE)")
+            }
             let before = try Data(contentsOf: f.database)
             #expect(throws: AdministrationError.invalidAuthority) { try f.admin() }
             #expect(try Data(contentsOf: f.database) == before)
@@ -53,6 +56,7 @@ struct AdministrationTests {
                     DROP TABLE sync_records_current;
                     """)
         }
+        try db.writeWithoutTransaction { try $0.execute(sql: "PRAGMA wal_checkpoint(TRUNCATE)") }
         let legacyColumns = try db.read { try $0.columns(in: "sync_records").map(\.name) }
         let legacyIDs = try db.read {
             try String.fetchAll($0, sql: "SELECT id FROM sync_records ORDER BY id")
@@ -314,6 +318,7 @@ struct AdministrationTests {
                     "CREATE TRIGGER reject_import BEFORE INSERT ON sync_records BEGIN SELECT RAISE(ABORT, 'synthetic'); END;"
             )
         }
+        try db.writeWithoutTransaction { try $0.execute(sql: "PRAGMA wal_checkpoint(TRUNCATE)") }
         let before = try f.history()
         let admin = try f.admin()
         #expect(throws: (any Error).self) {

@@ -10,6 +10,7 @@ import GRDB
 
 public enum AdministrationError: Error, Equatable, Sendable {
     case invalidArguments, unsafePath, invalidAuthority, authorityBusy
+    case authorityNeedsRecovery
     case invalidAsset, invalidReview, changedInputs, staleReview
 }
 
@@ -26,7 +27,8 @@ public final class SnapshotAdministration {
     private let root: URL
     private let binding: SyncLibraryBinding
     private let lockDescriptor: Int32
-    private let server: SyncServer
+    private let databaseURL: URL
+    private let blobDirectory: URL
 
     public init(dataDirectory: URL, binding: SyncLibraryBinding) throws {
         try SafeFiles.directory(dataDirectory)
@@ -57,7 +59,13 @@ public final class SnapshotAdministration {
             try SafeFiles.regular(database)
             for suffix in ["-wal", "-shm", "-journal"] {
                 let sidecar = URL(fileURLWithPath: database.path + suffix)
-                if SafeFiles.exists(sidecar) { try SafeFiles.regular(sidecar) }
+                if SafeFiles.exists(sidecar) {
+                    try SafeFiles.regular(sidecar)
+                    if suffix == "-journal" || suffix == "-wal" {
+                        guard try sidecar.resourceValues(forKeys: [.fileSizeKey]).fileSize == 0
+                        else { throw AdministrationError.authorityNeedsRecovery }
+                    }
+                }
             }
             let blobs = library.appendingPathComponent("blobs")
             try SafeFiles.directory(blobs)
@@ -67,7 +75,15 @@ public final class SnapshotAdministration {
             guard owner == binding else { throw AdministrationError.invalidAuthority }
             var config = Configuration()
             config.readonly = true
-            let reader = try DatabaseQueue(path: database.path, configuration: config)
+            guard var uri = URLComponents(url: database, resolvingAgainstBaseURL: true) else {
+                throw AdministrationError.invalidAuthority
+            }
+            uri.queryItems = [
+                URLQueryItem(name: "mode", value: "ro"),
+                URLQueryItem(name: "immutable", value: "1"),
+            ]
+            guard let path = uri.string else { throw AdministrationError.invalidAuthority }
+            let reader = try DatabaseQueue(path: path, configuration: config)
             try reader.read { db in
                 for table in [
                     "sync_meta", "sync_records", "sync_aliases", "sync_receipts", "sync_devices",
@@ -104,9 +120,8 @@ public final class SnapshotAdministration {
                     (row["role"] as String) == "server", (row["device"] as String?) == nil
                 else { throw AdministrationError.invalidAuthority }
             }
-            server = try SyncServer(
-                databaseURL: database, blobDirectory: blobs,
-                libraryID: binding.libraryID, serviceID: binding.serviceID)
+            databaseURL = database
+            blobDirectory = blobs
             lockDescriptor = descriptor
         } catch {
             close(descriptor)
@@ -121,7 +136,8 @@ public final class SnapshotAdministration {
         return SnapshotReview(
             version: 1, authorityDirectory: root.path,
             snapshotSHA256: BlobReference(data: input.bytes).digest, assets: input.assets,
-            preview: try server.previewContentSnapshotImport(input.snapshot))
+            preview: try SyncServer.previewContentSnapshotImport(
+                input.snapshot, databaseURL: databaseURL, binding: binding))
     }
 
     /// Requires the exact independently reviewed artifact hash and revalidates before publishing assets.
@@ -141,9 +157,18 @@ public final class SnapshotAdministration {
         guard BlobReference(data: input.bytes).digest == review.snapshotSHA256,
             input.assets == review.assets
         else { throw AdministrationError.changedInputs }
-        guard try server.previewContentSnapshotImport(input.snapshot) == review.preview else {
+        guard
+            try SyncServer.previewContentSnapshotImport(
+                input.snapshot, databaseURL: databaseURL, binding: binding) == review.preview
+        else {
             throw AdministrationError.staleReview
         }
+        // Approved WAL imports may need sidecars before the server's readonly enrollment check.
+        let preparation = try DatabaseQueue(path: databaseURL.path)
+        defer { try? preparation.close() }
+        let server = try SyncServer(
+            databaseURL: databaseURL, blobDirectory: blobDirectory,
+            libraryID: binding.libraryID, serviceID: binding.serviceID)
         var published: [URL] = []
         do {
             for blob in input.assets {
@@ -202,7 +227,7 @@ public final class SnapshotAdministration {
         else { throw AdministrationError.invalidAsset }
         for blob in ordered {
             _ = try verifiedAsset(assetDirectory.appendingPathComponent(blob.digest), blob: blob)
-            let destination = server.blobs.directory.appendingPathComponent(blob.digest)
+            let destination = blobDirectory.appendingPathComponent(blob.digest)
             if SafeFiles.exists(destination) { _ = try verifiedAsset(destination, blob: blob) }
         }
         return (bytes, snapshot, ordered)

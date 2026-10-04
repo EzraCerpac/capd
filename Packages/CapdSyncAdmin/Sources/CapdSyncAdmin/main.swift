@@ -58,6 +58,14 @@ struct SnapshotCommand {
                 FileHandle.standardOutput.write(
                     try SnapshotAdministration.encode(receipt) + Data("\n".utf8))
             }
+        } catch AdministrationError.authorityNeedsRecovery,
+            SyncServer.SnapshotPreviewError.authorityNeedsRecovery
+        {
+            FileHandle.standardError.write(
+                Data(
+                    "capd-sync-admin: refused; stop the host and checkpoint or recover the authority before preview or import\n"
+                        .utf8))
+            exit(1)
         } catch {
             FileHandle.standardError.write(
                 Data(

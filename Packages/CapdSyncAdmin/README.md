@@ -13,8 +13,13 @@ required even for a manifest without images.
 The host must be stopped: both commands acquire its exclusive `.server.lock` for
 the entire operation. Explicit service and library UUIDs must match `service.json`,
 the existing authority's SQLite server role and binding, and its blob ownership
-marker. Missing, incomplete or differently scoped storage is refused before opening
-the write-capable server API. Only the UUID-derived library directory is opened.
+marker. Missing, incomplete or differently scoped storage is refused. Preview opens
+SQLite through an immutable, read-only connection without changing journal mode or
+creating WAL sidecars. A nonempty WAL or rollback journal is refused before reading
+authority state. Stop the host and checkpoint or recover the authority with the
+normal trusted SQLite workflow first; administration never performs this step.
+The write-capable server API opens only after import review checks pass. Only the
+UUID-derived library directory is opened.
 
 ```sh
 swift build --package-path Packages/CapdSyncAdmin -c release
