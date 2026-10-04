@@ -14,6 +14,12 @@ public enum MCPUnixSocket {
         try validatePath(url, mustExist: true)
     }
 
+    /// Removes an owned socket from a trusted private directory after startup failure.
+    public static func removeBoundSocket(_ url: URL) throws {
+        try validate(url, mustExist: true, requirePrivateSocket: false)
+        guard unlink(url.path) == 0 else { throw MCPFailure.forbidden }
+    }
+
     private static func validate(_ url: URL, mustExist: Bool, requirePrivateSocket: Bool) throws {
         guard url.isFileURL, url.path.hasPrefix("/"), url.path.utf8.count < 104 else {
             throw MCPFailure.invalidArguments

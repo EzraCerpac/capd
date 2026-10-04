@@ -51,12 +51,14 @@ public struct MCPJWTPolicy: Sendable {
             _ = try P256.Signing.PublicKey(x963Representation: key)
         }
         let allowed: Set<String> = [MCPToolbox.readScope, MCPToolbox.writeScope]
+        let zeroDeviceID = UUID(uuid: (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0))
         for (p, a) in principals {
             guard !p.subject.isEmpty, p.subject.utf8.count <= 256, !p.clientID.isEmpty,
                 p.clientID.utf8.count <= 256,
                 a.scopes.isSubset(of: allowed),
                 !a.scopes.contains(MCPToolbox.writeScope)
-                    || (a.scopes.contains(MCPToolbox.readScope) && a.deviceID != nil)
+                    || (a.scopes.contains(MCPToolbox.readScope)
+                        && a.deviceID.map { $0 != zeroDeviceID } == true)
             else { throw MCPFailure.forbidden }
         }
         guard revokedTokenIDs.allSatisfy({ !$0.isEmpty && $0.utf8.count <= 256 }) else {

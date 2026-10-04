@@ -8,6 +8,19 @@ import NIOCore
 import ServiceLifecycle
 
 public enum HostHTTP {
+    static func protectMCPBoundSocket(
+        _ socketURL: URL,
+        protector: @Sendable (URL) throws -> Void = MCPUnixSocket.protectBoundSocket
+    ) -> Bool {
+        do {
+            try protector(socketURL)
+            return true
+        } catch {
+            try? MCPUnixSocket.removeBoundSocket(socketURL)
+            return false
+        }
+    }
+
     public static func mcpHeaders(_ fields: HTTPFields) -> [String: String]? {
         var result: [String: String] = [:]
         var bytes = 0
@@ -144,7 +157,7 @@ public enum HostHTTP {
             router: mcpRouter,
             configuration: .init(address: .unixDomainSocket(path: mcpSocketURL!.path)),
             onServerRunning: { channel in
-                guard (try? MCPUnixSocket.protectBoundSocket(mcpSocketURL!)) != nil else {
+                guard protectMCPBoundSocket(mcpSocketURL!) else {
                     FileHandle.standardError.write(
                         Data("capd-mcp-bridge: socket protection failed\n".utf8))
                     exit(1)

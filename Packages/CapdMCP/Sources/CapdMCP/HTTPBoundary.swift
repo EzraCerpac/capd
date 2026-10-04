@@ -109,9 +109,11 @@ public final class MCPHTTPBoundary: Sendable {
         guard request.body.count <= 65_536 else { return response(413) }
         let grant: MCPGrant
         do {
-            guard let auth = h["authorization"], auth.hasPrefix("Bearer "), auth.count <= 8192
+            guard let auth = h["authorization"], auth.utf8.count <= 8192,
+                let separator = auth.firstIndex(of: " "),
+                String(auth[..<separator]).caseInsensitiveCompare("Bearer") == .orderedSame
             else { throw MCPFailure.forbidden }
-            grant = try verifier.verify(String(auth.dropFirst(7)))
+            grant = try verifier.verify(String(auth[auth.index(after: separator)...]))
             guard grant.issuer == issuer, grant.audience == resource, grant.binding == binding,
                 grant.expiresAt > Date(), !grant.subject.isEmpty
             else { throw MCPFailure.forbidden }
