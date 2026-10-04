@@ -28,16 +28,28 @@ public actor MobileAnswerRetrieval: AnswerRetrieving {
         guard let pattern = FTS5Pattern(matchingAllPrefixesIn: query) else { return [] }
         let evidence = try await database.read { db in
             // Match and snippet use the same tokenizer, including Porter stemming.
-            // Restrict evidence to saved prose; tags alone cannot support an answer.
+            // Titles can find sources, but excerpts must come from saved prose.
             let prosePattern = "{title selection note body ocrText} : (\(pattern.rawPattern))"
             let rows = try Row.fetchAll(
                 db,
                 sql: """
                     SELECT mobile_captures.id, mobile_captures.title,
-                        snippet(mobile_captures_fts, -1, '', '', ' … ', 64) AS excerpt
+                        snippet(mobile_captures_fts,
+                            CASE
+                                WHEN highlight(mobile_captures_fts, 1, '', '|') != mobile_captures.selection THEN 1
+                                WHEN highlight(mobile_captures_fts, 2, '', '|') != mobile_captures.note THEN 2
+                                WHEN highlight(mobile_captures_fts, 5, '', '|') != coalesce(mobile_captures.body, '') THEN 5
+                                WHEN highlight(mobile_captures_fts, 6, '', '|') != coalesce(mobile_captures.ocrText, '') THEN 6
+                                WHEN length(mobile_captures.selection) > 0 THEN 1
+                                WHEN length(mobile_captures.note) > 0 THEN 2
+                                WHEN length(coalesce(mobile_captures.body, '')) > 0 THEN 5
+                                ELSE 6
+                            END, '', '', '', 64) AS excerpt
                     FROM mobile_captures_fts
                     JOIN mobile_captures ON mobile_captures.localID = mobile_captures_fts.rowid
                     WHERE mobile_captures_fts MATCH ?
+                        AND length(mobile_captures.selection || mobile_captures.note ||
+                            coalesce(mobile_captures.body, '') || coalesce(mobile_captures.ocrText, '')) > 0
                     ORDER BY bm25(mobile_captures_fts), mobile_captures.createdAt DESC,
                         mobile_captures.localID DESC LIMIT ?
                     """, arguments: [prosePattern, cap])
