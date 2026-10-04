@@ -116,6 +116,7 @@ extension Store {
                 return capture.tagsVersion > 0
             }
             let count = before.count
+            var edits: [(captureID: UUID, edit: CaptureEdit)] = []
             for capture in before {
                 var updated = capture
                 let manual = try syncTags(capture, in: db).manual
@@ -124,10 +125,18 @@ extension Store {
                     syncClient != nil || manual.isEmpty ? 0 : Capture.pinnedTagsVersion
                 updated.updatedAt = now
                 try updated.update(db)
-                try enqueueChanges(
-                    from: capture, to: updated, in: db, generatedTags: [],
-                    taggingProcessing: .pending)
+                if syncClient != nil {
+                    edits.append(
+                        (
+                            try StoreSync.identity(db, capture: capture),
+                            CaptureEdit(
+                                metadata: CaptureMetadataPatch(updatedAt: now),
+                                generatedPatch: GeneratedContentPatch(
+                                    tags: [], taggingProcessing: .pending))
+                        ))
+                }
             }
+            try syncClient?.enqueue(in: db, edits: edits)
             let queued =
                 try Int.fetchOne(
                     db,

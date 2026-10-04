@@ -290,6 +290,87 @@ struct StoreSyncTests {
         }
     }
 
+    @Test("Remote content clears requeue terminal captures while retaining active claims")
+    func clearedContentRequeues() throws {
+        try fixture { paths, binding, _ in
+            let store = try Store(paths: paths, syncBinding: binding)
+            for kind in [CaptureKind.link, .image] {
+                for initial in [EnrichmentState.ok, .thin, .fetching] {
+                    let record = SharedCapture(
+                        source: CaptureSource(kind: kind == .link ? .link : .image),
+                        createdAt: Date())
+                    let projected = try store.dbPool.write { db -> Capture in
+                        var original = Capture(
+                            kind: kind, body: kind == .link ? "Old body" : nil,
+                            ocrText: kind == .image ? "Old OCR" : nil, enrichmentState: initial,
+                            bodyStatus: .ok, bodySource: .fetch, createdAt: record.createdAt)
+                        try original.insert(db)
+                        try db.execute(
+                            sql: "INSERT INTO sync_capture_ids VALUES (?,?)",
+                            arguments: [original.id, record.id.uuidString])
+                        try StoreSync.project(db, record: record, paths: paths)
+                        return try #require(try Capture.fetchOne(db, key: original.id!))
+                    }
+                    #expect(projected.body == nil)
+                    #expect(projected.ocrText == nil)
+                    #expect(
+                        projected.enrichmentState == (initial == .fetching ? .fetching : .pending))
+                    if kind == .link && initial != .fetching {
+                        #expect(projected.bodyStatus == .none)
+                        #expect(projected.bodySource == nil)
+                        #expect(try store.claimForEnrichment(id: projected.id!) != nil)
+                    }
+                }
+            }
+        }
+    }
+
+    @Test("Bulk retagging projects every capture once after all operations are enqueued")
+    func bulkRetagProjectsOnce() throws {
+        try fixture { paths, binding, server in
+            let store = try Store(paths: paths, syncBinding: binding)
+            let client = try #require(store.syncClient)
+            let remote = UUID()
+            for index in 1...30 {
+                var record = SharedCapture(
+                    source: CaptureSource(kind: .text, contentHash: "retag-\(index)"))
+                record.manualTags = ["manual"]
+                record.generated.tags = ["generated"]
+                _ = try server.apply(
+                    SyncOperation(
+                        deviceID: remote, sequence: Int64(index),
+                        captureID: record.id, baseRevision: 0, mutation: .create(record)))
+            }
+            let transport = StoreTestTransport(
+                server: server, binding: binding, deviceID: client.deviceID)
+            try client.pull(from: transport)
+            try store.dbPool.write { db in
+                try db.execute(sql: "CREATE TABLE retag_writes (id INTEGER)")
+                try db.execute(
+                    sql:
+                        "CREATE TRIGGER audit_retag AFTER UPDATE ON captures BEGIN INSERT INTO retag_writes VALUES (NEW.id); END"
+                )
+            }
+            try store.requestRetagging()
+            #expect(try store.prepareRetagging(tags: ["new"]) == 30)
+            #expect(try client.pendingOperations().count == 30)
+            #expect(
+                try store.reader.read {
+                    try Int.fetchOne($0, sql: "SELECT COUNT(*) FROM retag_writes")
+                } == 60)
+            #expect(
+                try client.captures().allSatisfy {
+                    $0.manualTags == ["manual"] && $0.generated.tags.isEmpty
+                        && $0.generated.taggingProcessed == false
+                })
+            try client.push(to: transport)
+            #expect(
+                try server.baseline().captures.allSatisfy {
+                    $0.manualTags == ["manual"] && $0.generated.tags.isEmpty
+                })
+        }
+    }
+
     @Test("Authority aliases reuse the local integer key without duplicating FTS or pending bytes")
     func canonicalAliasProjection() throws {
         try fixture { paths, binding, server in

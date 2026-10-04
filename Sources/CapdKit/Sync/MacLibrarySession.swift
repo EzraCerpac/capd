@@ -137,7 +137,7 @@ public struct MacLibrarySession: Sendable {
         }
         let credential: @Sendable () throws -> String = { try credentials.read(for: enrollment) }
         let baseline = try await transport.importBaseline(
-            credential: credential, requiringGeneratedProcessingContract: true)
+            credential: credential, requiringGeneratedProcessingContract: true, summaryOnly: true)
         try Task.checkCancellation()
         let count = try await local.reader.read { try Capture.fetchCount($0) }
         let handoff: StoreSyncImportHandoff?

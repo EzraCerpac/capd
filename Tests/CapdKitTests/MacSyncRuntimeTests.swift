@@ -120,6 +120,71 @@ struct MacSyncRuntimeTests {
                 == "Resolved note")
     }
 
+    @Test func aSingleRuntimeSyncDrainsEveryFeedPage() async throws {
+        let f = try RuntimeFixture()
+        defer { f.clean() }
+        let remoteDevice = UUID()
+        for index in 1...205 {
+            let capture = SharedCapture(
+                source: CaptureSource(kind: .text, contentHash: "page-\(index)"))
+            _ = try f.server.apply(
+                SyncOperation(
+                    deviceID: remoteDevice, sequence: Int64(index),
+                    captureID: capture.id, baseRevision: 0, mutation: .create(capture)))
+        }
+        let session = try await f.activate()
+        let status = await session.runtime!.sync()
+        #expect(status.phase == .idle)
+        #expect(status.cursor == 205)
+        #expect(try SearchService(store: session.store).totalCaptureCount() == 205)
+    }
+
+    @Test func largePreparedAndEmptyLibrariesActivateWithoutWholeBaselineReplies() async throws {
+        let f = try RuntimeFixture()
+        defer { f.clean() }
+        let local = try Store(paths: f.paths)
+        let authority = try DatabaseQueue(
+            path: f.root.appendingPathComponent("authority.sqlite").path)
+        let records = try await local.dbPool.write { db -> [SharedCapture] in
+            var records: [SharedCapture] = []
+            try StoreSync.prepareIDs(db)
+            for index in 1...24 {
+                var capture = Capture(
+                    kind: .text, title: "Prepared \(index)", selection: "Source \(index)",
+                    body: String(repeating: "x", count: 800_000), enrichmentState: .ok,
+                    createdAt: Date(timeIntervalSince1970: 1_700_000_000))
+                try capture.insert(db)
+                let id = try StoreSync.identity(db, capture: capture)
+                let persisted = try #require(try Capture.fetchOne(db, key: capture.id))
+                var record = StoreSync.snapshot(persisted, id: id)
+                record.revision = 1
+                records.append(record)
+            }
+            return records
+        }
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        try await authority.write { db in
+            for record in records {
+                try db.execute(
+                    sql: "INSERT INTO sync_records (id,payload) VALUES (?,?)",
+                    arguments: [record.id.uuidString, try encoder.encode(record)])
+            }
+            try db.execute(sql: "UPDATE sync_meta SET cursor=1, floor=1")
+        }
+        #expect(try encoder.encode(f.server.baseline()).count > SyncHTTPHandler.maximumBodyBytes)
+        let prepared = try await f.activate()
+        #expect(try SearchService(store: prepared.store).totalCaptureCount() == 24)
+        #expect(try prepared.store.syncClient?.cursor() == 1)
+        let empty = try await MacLibrarySession.activate(
+            paths: StoragePaths(root: f.root.appendingPathComponent("empty")),
+            configuration: f.configuration, credentials: f.credentials, transport: f.wire)
+        #expect(await empty.runtime!.sync().phase == .idle)
+        #expect(try SearchService(store: empty.store).totalCaptureCount() == 24)
+        #expect(await f.wire.wholeBaselines == 0)
+        #expect(await f.wire.summaryProbes == 2)
+    }
+
     @Test func activationIsAtomicAndUnconfiguredStaysLocal() async throws {
         let f = try RuntimeFixture()
         defer { f.clean() }
@@ -596,6 +661,8 @@ private actor RuntimeWire: AsyncSyncTransport {
     var requests = 0
     var applies = 0
     var applyBodies: [Data] = []
+    var wholeBaselines = 0
+    var summaryProbes = 0
     init(binding: SyncLibraryBinding, deviceID: UUID, handler: SyncHTTPHandler) {
         self.binding = binding
         self.deviceID = deviceID
@@ -614,7 +681,9 @@ private actor RuntimeWire: AsyncSyncTransport {
         if fault == .hold { try await Task.sleep(for: .seconds(30)) }
         let reply = handler.handle(request)
         let envelope = try JSONDecoder().decode(SyncHTTPEnvelope.self, from: request.body)
-        if fault == .missingProcessing, case .baseline = envelope.action {
+        if case .baseline = envelope.action { wholeBaselines += 1 }
+        if case .baselinePage(_, 0, _) = envelope.action { summaryProbes += 1 }
+        if fault == .missingProcessing, case .baselinePage = envelope.action {
             let decoded = try JSONDecoder().decode(SyncHTTPReply.self, from: reply.body)
             return SyncHTTPResponse(
                 status: reply.status, headers: reply.headers,

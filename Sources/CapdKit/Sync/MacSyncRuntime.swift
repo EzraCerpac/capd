@@ -76,7 +76,11 @@ public actor MacSyncRuntime {
                 }
                 // Upload local creates before pull can project an as-yet-unconfirmed duplicate.
                 _ = try await client.push(to: transport, credential: credential)
-                try await client.pull(from: transport, credential: credential)
+                while true {
+                    let cursor = try client.cursor()
+                    try await client.pull(from: transport, credential: credential)
+                    if try client.cursor() == cursor { break }
+                }
                 try Task.checkCancellation()
                 return Self.snapshot(store: store, phase: .idle)
             } catch is CancellationError {

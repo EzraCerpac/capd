@@ -134,6 +134,12 @@ enum StoreSync {
                 capture.bodyStatus = record.generated.body!.isEmpty ? .thin : .ok
             case .image where record.generated.ocrText != nil:
                 capture.enrichmentState = .ok
+            case .link where original?.body != nil:
+                capture.enrichmentState = .pending
+                capture.bodyStatus = .none
+                capture.bodySource = nil
+            case .image where original?.ocrText != nil:
+                capture.enrichmentState = .pending
             default: break
             }
         }
