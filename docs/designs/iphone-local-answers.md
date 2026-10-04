@@ -47,7 +47,7 @@ uses app-owned capture UUIDs, rather than model-supplied URLs.
 
 XcodeGen includes the answer package for the phone target. `CapdMobile` links its
 retrieval protocol; `LibraryView` presents the Ask sheet. The Mac retains its
-existing local answer implementation and fresh read-only query-store wiring.
+existing local answer implementation.
 
 Synthetic unit tests cover bounds, unavailable models without reads, quote/source
 validation, cancellation, FTS stemming and BM25 ranking, unchanged outbox/content,
