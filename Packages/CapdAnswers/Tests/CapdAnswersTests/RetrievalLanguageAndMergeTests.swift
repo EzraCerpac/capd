@@ -47,6 +47,7 @@ struct RetrievalLanguageAndMergeTests {
         let excerpt = try #require(result.sources.first?.source.excerpt)
         #expect(excerpt.contains(selection))
         #expect(excerpt.contains(watering))
+        #expect(excerpt.contains("\n\n"))
         #expect(result.sources.count == 1)
         #expect(excerpt.count <= GroundedAnswerService.excerptLimit)
     }
@@ -63,6 +64,27 @@ struct RetrievalLanguageAndMergeTests {
         let excerpt = try #require(result.sources.first?.source.excerpt)
         #expect(excerpt.contains(watering))
         #expect(excerpt.count <= GroundedAnswerService.excerptLimit)
+    }
+
+    @Test(arguments: [false, true])
+    func citationsCannotBridgeDistinctFieldOrQueryPassages(separateQueries: Bool) async throws {
+        let selection = "orchid overview."
+        let watering = "water orchids weekly."
+        let passages =
+            separateQueries
+            ? ["water orchid": selection, "water": watering, "orchid": selection]
+            : ["water orchid": "\(selection)\n\n\(watering)"]
+        let reader = QueryPassageRetriever(passages: passages)
+        await #expect(throws: AnswerError.insufficientEvidence) {
+            try await GroundedAnswerService(
+                retriever: reader, model: PassageQuoteModel(quote: "overview. water orchids")
+            ).answer("water orchid")
+        }
+        let valid = try await GroundedAnswerService(
+            retriever: reader, model: PassageQuoteModel(quote: watering)
+        ).answer("water orchid")
+        #expect(valid.statements.first?.citations.first?.quote == watering)
+        #expect(valid.sources.first?.source.excerpt == "\(selection)\n\n\(watering)")
     }
 }
 
