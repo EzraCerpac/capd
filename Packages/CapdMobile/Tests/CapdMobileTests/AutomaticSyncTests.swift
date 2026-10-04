@@ -35,6 +35,7 @@ private actor ManualSyncClock: SyncSchedulerClock {
         }
     }
     func count() -> Int { sleepers.count }
+    func sleeperID() -> UUID? { sleepers.count == 1 ? sleepers.keys.first : nil }
     private func cancel(_ id: UUID) {
         sleepers.removeValue(forKey: id)?.1.resume(throwing: CancellationError())
     }
@@ -137,11 +138,20 @@ private func source(_ text: String) throws -> MobileCapture {
         let count = await clock.count()
         return state.lastSuccessfulSync != nil && count == 1
     }
+    let pollSleeper = try #require(await clock.sleeperID())
     try store.save(source("Debounced first"))
     await controller.localChange()
+    try await eventually {
+        let sleeper = await clock.sleeperID()
+        return sleeper != nil && sleeper != pollSleeper
+    }
+    let firstDebounceSleeper = try #require(await clock.sleeperID())
     try store.save(source("Debounced second"))
     await controller.localChange()
-    try await eventually { await clock.count() == 1 }
+    try await eventually {
+        let sleeper = await clock.sleeperID()
+        return sleeper != nil && sleeper != firstDebounceSleeper
+    }
     await clock.advance(0.3)
     #expect(remote.operations().isEmpty)
     await clock.advance(0.1)
