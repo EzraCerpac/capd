@@ -40,6 +40,7 @@ public struct MCPGrant: Sendable {
 
 /// The runtime owner injects the already-owned SyncServer. Never open a second write authority.
 public final class MCPToolbox: Sendable {
+    private enum Failure: Error { case noteConflictCapacity }
     public static let readScope = "capd:read"
     public static let writeScope = "capd:write"
     private let store: AcceptedStore
@@ -129,7 +130,7 @@ public final class MCPToolbox: Sendable {
                 ),
                 (
                     "edit_capture",
-                    "Edit note/manual tags/rating/capd reminder through sync authority. Supply observed base_revision. Stale notes retain conflicts; metadata follows existing sync merge rules. Retry exact request. Generated tags are preserved.",
+                    "Edit note/manual tags/rating/capd reminder through sync authority. Supply observed base_revision. Stale notes retain conflicts; resolution requires at most 20 current conflicts. Metadata follows existing sync merge rules. Retry exact request. Generated tags are preserved.",
                     Self.schema(
                         edit, required: ["operation_id", "sequence", "id", "base_revision"]), false
                 ),
@@ -259,11 +260,9 @@ public final class MCPToolbox: Sendable {
                     mutation = .create(capture)
                 } else {
                     base = try number(a, "base_revision", min: 0)
-                    guard
-                        !Set(a.keys).intersection([
-                            "note", "add_tags", "remove_tags", "rating", "reminder_at",
-                        ]).isEmpty
-                    else { throw MCPFailure.invalidArguments }
+                    if case .array(let ids) = a["resolve_note_operations"], ids.count > 20 {
+                        throw Failure.noteConflictCapacity
+                    }
                     let resolving = try strings(a, "resolve_note_operations", maxLength: 36).map {
                         guard let id = UUID(uuidString: $0) else {
                             throw MCPFailure.invalidArguments
@@ -272,6 +271,14 @@ public final class MCPToolbox: Sendable {
                     }
                     guard resolving.isEmpty || a["note"] != nil else {
                         throw MCPFailure.invalidArguments
+                    }
+                    if !resolving.isEmpty, sequence == (try store.nextSequence(deviceID: device)) {
+                        guard let current = try store.capture(id: id) else {
+                            throw MCPFailure.unavailable
+                        }
+                        guard current.noteConflicts.count <= 20 else {
+                            throw Failure.noteConflictCapacity
+                        }
                     }
                     let note: NoteEdit? =
                         a["note"] == nil
@@ -291,6 +298,10 @@ public final class MCPToolbox: Sendable {
                     } else {
                         reminder = nil
                     }
+                    guard
+                        note != nil || a["rating"] != nil || reminder != nil
+                            || !add.isEmpty || !remove.isEmpty
+                    else { throw MCPFailure.invalidArguments }
                     mutation = .edit(
                         CaptureEdit(
                             note: note,
@@ -302,7 +313,10 @@ public final class MCPToolbox: Sendable {
                 let receipt = try authority.apply(
                     SyncOperation(
                         id: opID, deviceID: device, sequence: sequence, captureID: id,
-                        baseRevision: base, mutation: mutation))
+                        baseRevision: base, mutation: mutation,
+                        requestIdentity: .object([
+                            "tool": .string(name), "arguments": .object(a),
+                        ])))
                 var fields: Object = [
                     "operation_id": .string(receipt.operationID.uuidString),
                     "outcome": .string(receipt.outcome.rawValue),
@@ -333,6 +347,7 @@ public final class MCPToolbox: Sendable {
             case MCPFailure.forbidden: code = "forbidden"
             case MCPFailure.capacity: code = "bounded_library_capacity_exceeded"
             case MCPFailure.unavailable: code = "capture_unavailable"
+            case Failure.noteConflictCapacity: code = "note_conflict_resolution_capacity_exceeded"
             case SyncError.operationIDReused: code = "operation_id_reused"
             case SyncError.outOfOrder(let expected): code = "sequence_conflict_expected_\(expected)"
             default: code = "invalid_or_unavailable_request"
@@ -346,10 +361,15 @@ public final class MCPToolbox: Sendable {
         var truncated = false
         func bounded(_ s: String?) -> JSONValue {
             guard let s else { return .null }
-            let n = min(budget, s.utf8.count)
-            let value = String(decoding: s.utf8.prefix(n), as: UTF8.self)
-            budget -= n
-            truncated = truncated || n < s.utf8.count
+            let bytes = s.utf8
+            var end = bytes.index(bytes.startIndex, offsetBy: min(budget, bytes.count))
+            while end != bytes.startIndex, end != bytes.endIndex, bytes[end] & 0xC0 == 0x80 {
+                end = bytes.index(before: end)
+            }
+            let prefix = bytes[..<end]
+            let value = String(decoding: prefix, as: UTF8.self)
+            budget -= prefix.count
+            truncated = truncated || end != bytes.endIndex
             return .string(value)
         }
         var o: Object = [
@@ -366,6 +386,8 @@ public final class MCPToolbox: Sendable {
             o["reminder_at"] = .string(ISO8601DateFormatter().string(from: reminder))
         }
         if full {
+            o["note_conflict_count"] = .number(Decimal(c.noteConflicts.count))
+            o["note_conflict_resolution_available"] = .bool(c.noteConflicts.count <= 20)
             o["selection"] = bounded(c.source.selection)
             o["body"] = bounded(c.generated.body)
             o["ocr_text"] = bounded(c.generated.ocrText)
