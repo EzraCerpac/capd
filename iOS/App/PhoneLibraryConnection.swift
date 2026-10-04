@@ -171,6 +171,7 @@ final class PhoneLibraryConnection {
                     to: root.appendingPathComponent("Library/synthetic-sync-result.json"),
                     options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
             }
+            await afterTransition()
         }
 
         private func runRequestedActivation(_ args: [String]) async {
