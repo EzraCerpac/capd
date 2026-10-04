@@ -16,6 +16,7 @@ final class ReminderScheduler {
 
     private let environment: Environment
     private var task: Task<Void, Never>?
+    private var nextWakeDate: Date?
 
     init(environment: Environment) {
         self.environment = environment
@@ -32,6 +33,14 @@ final class ReminderScheduler {
         }
     }
 
+    func refresh() {
+        do {
+            if try environment.nextDate() != nextWakeDate { reload() }
+        } catch {
+            reload()
+        }
+    }
+
     func settle() async {
         await task?.value
     }
@@ -44,7 +53,8 @@ final class ReminderScheduler {
                     try await environment.sleep(.seconds(7))
                     continue
                 }
-                guard let date = try environment.nextDate() else { return }
+                nextWakeDate = try environment.nextDate()
+                guard let date = nextWakeDate else { return }
                 let delay = max(0, date.timeIntervalSince(environment.now()))
                 try await environment.sleep(.seconds(delay))
             } catch is CancellationError {

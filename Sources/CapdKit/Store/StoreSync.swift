@@ -125,7 +125,7 @@ enum StoreSync {
         capture.seenCount = record.seenCount
         capture.body = record.generated.body
         capture.ocrText = record.generated.ocrText
-        if original == nil || capture.enrichmentState == .pending {
+        if capture.enrichmentState != .fetching {
             switch capture.kind {
             case .text:
                 capture.enrichmentState = .ok
@@ -173,6 +173,21 @@ enum StoreSync {
 }
 
 extension Store {
+    public func noteConflicts() throws -> [MacNoteConflict] {
+        guard syncClient != nil else { return [] }
+        return try reader.read { db in
+            try Data.fetchAll(db, sql: "SELECT payload FROM sync_visible ORDER BY id")
+                .compactMap { payload in
+                    let record = try JSONDecoder().decode(SharedCapture.self, from: payload)
+                    guard !record.deleted, !record.noteConflicts.isEmpty else { return nil }
+                    return MacNoteConflict(
+                        id: record.id,
+                        title: record.source.title ?? record.source.url ?? "Untitled capture",
+                        variants: record.noteConflicts)
+                }
+        }
+    }
+
     func syncTags(_ capture: Capture, in db: Database) throws -> (
         manual: [String], generated: [String]
     ) {

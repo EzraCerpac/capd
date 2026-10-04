@@ -19,6 +19,7 @@ final class AppState {
     private(set) var failedEnrichmentCount = 0
     private(set) var startupFailure: String?
     private(set) var syncIssue: String?
+    private(set) var noteConflicts: [MacNoteConflict] = []
     private(set) var isDropTargeted = false
 
     @ObservationIgnored private var coordinator: CaptureCoordinator?
@@ -144,6 +145,19 @@ final class AppState {
         }
     }
 
+    func showNoteConflicts() {
+        let alert = NSAlert()
+        alert.messageText = "Conflicting notes"
+        alert.informativeText = noteConflicts.map { conflict in
+            let variants = conflict.variants.enumerated().map { index, variant in
+                "Version \(index + 1):\n\(variant.value ?? "(Note removed)")"
+            }.joined(separator: "\n\n")
+            return "\(conflict.title)\n\n\(variants)"
+        }.joined(separator: "\n\n────────\n\n")
+        NSApp.activate()
+        alert.runModal()
+    }
+
     private func start() throws {
         let session = try MacLibrarySession.open(paths: .live)
         librarySession = session
@@ -153,6 +167,8 @@ final class AppState {
                 while !Task.isCancelled {
                     let status = await runtime.sync()
                     self?.syncIssue = status.issue
+                    self?.noteConflicts = status.noteConflicts
+                    self?.reminderScheduler?.refresh()
                     do {
                         try await Task.sleep(for: status.issue == nil ? .seconds(5) : .seconds(30))
                     } catch { return }

@@ -73,11 +73,12 @@ extension Store {
                 db,
                 sql: """
                     SELECT id FROM \(Schema.captures)
-                    WHERE tags_version != :pinned
+                    WHERE (:shared OR tags_version != :pinned)
                         AND enrichment_state IN (:ok, :thin, :failed)
                     ORDER BY id
                     """,
                 arguments: [
+                    "shared": syncClient != nil,
                     "pinned": Capture.pinnedTagsVersion,
                     "ok": EnrichmentState.ok.rawValue,
                     "thin": EnrichmentState.thin.rawValue,

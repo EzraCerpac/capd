@@ -68,6 +68,14 @@ struct CapdApp: App {
                 if let failure = state.startupFailure {
                     Label(failure, systemImage: "exclamationmark.octagon")
                 }
+                if let issue = state.syncIssue {
+                    Label(issue, systemImage: "exclamationmark.triangle")
+                }
+                if !state.noteConflicts.isEmpty {
+                    Button("Review conflicting notes…", systemImage: "text.bubble") {
+                        state.showNoteConflicts()
+                    }
+                }
                 if state.failedEnrichmentCount > 0 {
                     Label(
                         "Failed enrichments: \(state.failedEnrichmentCount)",

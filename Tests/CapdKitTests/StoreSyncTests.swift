@@ -241,6 +241,8 @@ struct StoreSyncTests {
             #expect(mixed.generated.body == "Pangolin body")
             #expect(mixed.generated.ocrText == "Axolotl OCR")
             #expect(mixed.source.title == "Filled title")
+            let samples = try store.retaggingSamples(limit: 10)
+            #expect(Set(samples.compactMap(\.id)) == Set([link.id!, second.id!]))
             try store.requestRetagging(now: now.addingTimeInterval(5))
             #expect(try store.prepareRetagging(tags: ["new"], now: now.addingTimeInterval(6)) == 2)
             try client.push(to: transport)
@@ -251,6 +253,40 @@ struct StoreSyncTests {
                 baseline.captures.allSatisfy { $0.metadata?.updatedAt == now.addingTimeInterval(6) }
             )
             #expect(try SearchService(store: store).search("manual").first?.capture.id == link.id)
+        }
+    }
+
+    @Test("Remote content refreshes terminal enrichment while retaining active claims")
+    func terminalEnrichmentRefreshes() throws {
+        try fixture { paths, binding, _ in
+            let store = try Store(paths: paths, syncBinding: binding)
+            for kind in [CaptureKind.link, .image] {
+                for initial in [EnrichmentState.failed, .thin, .fetching] {
+                    var record = SharedCapture(
+                        source: CaptureSource(kind: kind == .link ? .link : .image),
+                        createdAt: Date())
+                    record.generated = GeneratedContent(
+                        body: kind == .link ? "Remote usable body" : nil,
+                        ocrText: kind == .image ? "Remote usable OCR" : nil)
+                    let projected = try store.dbPool.write { db -> Capture in
+                        var original = Capture(
+                            kind: kind, enrichmentState: initial, bodyStatus: .failed,
+                            createdAt: record.createdAt)
+                        try original.insert(db)
+                        try db.execute(
+                            sql: "INSERT INTO sync_capture_ids VALUES (?,?)",
+                            arguments: [original.id, record.id.uuidString])
+                        try StoreSync.project(db, record: record, paths: paths)
+                        return try #require(try Capture.fetchOne(db, key: original.id!))
+                    }
+                    #expect(projected.body == record.generated.body)
+                    #expect(projected.ocrText == record.generated.ocrText)
+                    #expect(projected.enrichmentState == (initial == .fetching ? .fetching : .ok))
+                    if kind == .link {
+                        #expect(projected.bodyStatus == (initial == .fetching ? .failed : .ok))
+                    }
+                }
+            }
         }
     }
 

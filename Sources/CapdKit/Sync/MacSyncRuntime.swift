@@ -1,6 +1,12 @@
 import CapdSync
 import Foundation
 
+public struct MacNoteConflict: Codable, Equatable, Sendable, Identifiable {
+    public let id: UUID
+    public let title: String
+    public let variants: [NoteVariant]
+}
+
 public struct MacSyncStatus: Codable, Equatable, Sendable {
     public enum Phase: String, Codable, Sendable {
         case unconfigured, paused, idle, syncing, busy, offline, attention
@@ -9,6 +15,7 @@ public struct MacSyncStatus: Codable, Equatable, Sendable {
     public var pending: Int
     public var rejected: Int
     public var cursor: Int64
+    public var noteConflicts: [MacNoteConflict] = []
     public var issue: String?
     public static let localOnly = MacSyncStatus(
         phase: .unconfigured, pending: 0, rejected: 0, cursor: 0)
@@ -60,7 +67,8 @@ public actor MacSyncRuntime {
                 guard let current = try MacSyncConfiguration.load(paths: store.paths),
                     current.endpoint == configuration.endpoint,
                     current.binding == configuration.binding,
-                    current.deviceID == configuration.deviceID
+                    current.deviceID == configuration.deviceID,
+                    current.loopbackSOCKSPort == configuration.loopbackSOCKSPort
                 else { throw MacSyncError.configurationChanged }
                 guard current.enabled else { return Self.snapshot(store: store, phase: .paused) }
                 guard let client = store.syncClient else {
@@ -149,10 +157,13 @@ public actor MacSyncRuntime {
         do {
             let pending = try client.pendingOperations().count
             let rejected = try client.rejectedWork().count
+            let conflicts = try store.noteConflicts()
             return MacSyncStatus(
-                phase: phase == .idle && rejected > 0 ? .attention : phase,
+                phase: !conflicts.isEmpty || (phase == .idle && rejected > 0) ? .attention : phase,
                 pending: pending, rejected: rejected, cursor: try client.cursor(),
+                noteConflicts: conflicts,
                 issue: issue
+                    ?? (!conflicts.isEmpty ? "Conflicting notes need review." : nil)
                     ?? (rejected > 0 ? "Some saved changes were rejected and need attention." : nil)
             )
         } catch {

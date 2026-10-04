@@ -40,6 +40,86 @@ struct MacSyncRuntimeTests {
         }
     }
 
+    @Test func activeRuntimeRejectsProxyRouteChanges() async throws {
+        let ports: [(Int?, Int?)] = [(nil, 11080), (11080, nil), (11080, 11081)]
+        for (originalPort, changedPort) in ports {
+            let f = try RuntimeFixture()
+            defer { f.clean() }
+            let session = try await MacLibrarySession.activate(
+                paths: f.paths,
+                configuration: MacSyncConfiguration(
+                    enrollment: f.enrollment, loopbackSOCKSPort: originalPort),
+                credentials: f.credentials, transport: f.wire)
+            _ = try CaptureService(store: session.store).ingest(
+                CaptureRequest(text: "Queued capture"))
+            let pending = try await outbox(session.store)
+            let requests = await f.wire.requests
+            try MacSyncConfiguration(enrollment: f.enrollment, loopbackSOCKSPort: changedPort)
+                .install(paths: f.paths)
+            let status = await session.runtime!.sync()
+            #expect(status.phase == .attention)
+            #expect(status.issue?.contains("Reopen") == true)
+            #expect(await f.wire.requests == requests)
+            #expect(try await outbox(session.store) == pending)
+        }
+    }
+
+    @Test func conflictingNotesStayVisibleAndNeedAttentionUntilResolved() async throws {
+        let f = try RuntimeFixture()
+        defer { f.clean() }
+        let remoteDevice = UUID()
+        let remote = SharedCapture(
+            source: CaptureSource(
+                kind: .text, contentHash: "conflicting-note", title: "Note conflict"),
+            createdAt: Date(), note: "Original note")
+        _ = try f.server.apply(
+            SyncOperation(
+                deviceID: remoteDevice, sequence: 1, captureID: remote.id,
+                baseRevision: 0, mutation: .create(remote)))
+        let session = try await f.activate()
+        #expect(await session.runtime!.sync().phase == .idle)
+        let local = try #require(try await session.store.reader.read { try Capture.fetchOne($0) })
+        _ = try session.store.updateNote(id: local.id!, note: "Mac variant")
+        _ = try f.server.apply(
+            SyncOperation(
+                deviceID: remoteDevice, sequence: 2, captureID: remote.id,
+                baseRevision: 1, mutation: .edit(CaptureEdit(note: NoteEdit("Remote variant")))))
+        let status = await session.runtime!.sync()
+        #expect(status.phase == .attention)
+        #expect(status.rejected == 0)
+        #expect(status.issue?.contains("Conflicting notes") == true)
+        let conflict = try #require(status.noteConflicts.first)
+        #expect(conflict.title == "Note conflict")
+        #expect(Set(conflict.variants.compactMap(\.value)) == ["Mac variant", "Remote variant"])
+        let encoded = try JSONEncoder().encode(status)
+        #expect(try JSONDecoder().decode(MacSyncStatus.self, from: encoded) == status)
+        #expect(await session.runtime!.sync().noteConflicts == status.noteConflicts)
+        let reopened = try f.open()
+        #expect(await reopened.runtime!.status().phase == .attention)
+        #expect(try reopened.store.noteConflicts() == status.noteConflicts)
+        await f.wire.setFault(.offline)
+        let offline = await session.runtime!.sync()
+        #expect(offline.phase == .attention)
+        #expect(offline.noteConflicts == status.noteConflicts)
+        await f.wire.setFault(.none)
+        let current = try #require(try f.server.baseline().captures.first)
+        _ = try f.server.apply(
+            SyncOperation(
+                deviceID: remoteDevice, sequence: 3, captureID: remote.id,
+                baseRevision: current.revision,
+                mutation: .edit(
+                    CaptureEdit(
+                        note: NoteEdit(
+                            "Resolved note", resolving: conflict.variants.map(\.operationID))))))
+        let resolved = await session.runtime!.sync()
+        #expect(resolved.phase == .idle)
+        #expect(resolved.issue == nil)
+        #expect(resolved.noteConflicts.isEmpty)
+        #expect(
+            try await session.store.reader.read { try Capture.fetchOne($0)?.note }
+                == "Resolved note")
+    }
+
     @Test func activationIsAtomicAndUnconfiguredStaysLocal() async throws {
         let f = try RuntimeFixture()
         defer { f.clean() }
