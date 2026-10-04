@@ -377,6 +377,54 @@ public final class SyncServer: SyncTransport, Sendable {
         try read { try SnapshotImport.preview($0, snapshot: snapshot, binding: binding) }
     }
 
+    /// Reads a recovered, quiescent authority without creating or changing SQLite files.
+    /// The caller must exclude all writers for the duration of this operation.
+    public static func previewContentSnapshotImport(
+        _ snapshot: ContentSnapshotImport, databaseURL: URL, binding: SyncLibraryBinding
+    ) throws -> ContentSnapshotImportPreview {
+        guard databaseURL.isFileURL,
+            var uri = URLComponents(url: databaseURL, resolvingAgainstBaseURL: true)
+        else { throw SyncError.invalidOperation }
+        uri.queryItems = [
+            URLQueryItem(name: "mode", value: "ro"),
+            URLQueryItem(name: "immutable", value: "1"),
+        ]
+        guard let path = uri.string else { throw SyncError.invalidOperation }
+        var configuration = Configuration()
+        configuration.readonly = true
+        let reader = try DatabaseQueue(path: path, configuration: configuration)
+        return try reader.read { db in
+            for table in [
+                "sync_meta", "sync_records", "sync_aliases", "sync_receipts", "sync_devices",
+                "sync_feed", "sync_outbox", "sync_visible", "sync_rejections", "sync_observed",
+                "sync_binding",
+            ] {
+                guard try db.tableExists(table) else { throw SyncError.invalidOperation }
+            }
+            let columns = Set(try db.columns(in: "sync_records").map(\.name))
+            guard
+                Set([
+                    "id", "payload", "source_kind", "content_hash", "blob_digest",
+                    "blob_byte_count",
+                ]).isSubset(of: columns),
+                try String.fetchOne(
+                    db,
+                    sql: "SELECT tbl_name FROM sqlite_master WHERE type='index' AND name=?",
+                    arguments: ["sync_records_identity"]) == "sync_records",
+                try String.fetchAll(
+                    db,
+                    sql:
+                        "SELECT name FROM pragma_index_info('sync_records_identity') ORDER BY seqno"
+                ) == ["source_kind", "content_hash", "blob_digest", "blob_byte_count", "id"],
+                let row = try Row.fetchOne(
+                    db, sql: "SELECT role, device FROM sync_meta WHERE id=1"),
+                (row["role"] as String) == "server", (row["device"] as String?) == nil
+            else { throw SyncError.invalidOperation }
+            try SyncDatabase.checkBinding(db, binding)
+            return try SnapshotImport.preview(db, snapshot: snapshot, binding: binding)
+        }
+    }
+
     /// Administrative content import. No source-device operation is acknowledged or renumbered.
     public func importContentSnapshot(
         _ snapshot: ContentSnapshotImport, preview: ContentSnapshotImportPreview
