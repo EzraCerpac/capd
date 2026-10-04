@@ -206,11 +206,18 @@ public struct SyncHTTPHandler: Sendable {
                                 principal: principal)
                         ).count
                     })
-            case .baseline: result = .baseline(try authority.baseline())
+            case .baseline:
+                result = .baseline(
+                    try authority.boundedBaseline { baselineCursor in
+                        try baselineOverhead(cursor: baselineCursor, principal: principal)
+                    })
             case .baselinePage(let after, let limit, let expectedCursor):
                 result = .baseline(
-                    try authority.baselinePage(
-                        after: after, limit: limit, expectedCursor: expectedCursor))
+                    try authority.boundedBaseline(
+                        after: after, limit: limit, expectedCursor: expectedCursor
+                    ) { baselineCursor in
+                        try baselineOverhead(cursor: baselineCursor, principal: principal)
+                    })
             case .upload(let blob, let offset, let chunk, let final):
                 try authority.upload(blob, offset: offset, chunk: chunk, final: final)
                 result = .okay
@@ -239,6 +246,14 @@ public struct SyncHTTPHandler: Sendable {
 
     private func failure(_ error: SyncHTTPError, status: Int) -> SyncHTTPResponse {
         reply(.failure(error), status: status)
+    }
+
+    private func baselineOverhead(cursor: Int64, principal: SyncPrincipal) throws -> Int {
+        try SyncDatabase.encode(
+            replyPayload(
+                .baseline(Baseline(cursor: cursor, captures: [], deviceSequences: [:])),
+                principal: principal)
+        ).count
     }
 
     private func replyPayload(_ result: SyncHTTPResult, principal: SyncPrincipal?) -> SyncHTTPReply

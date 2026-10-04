@@ -86,6 +86,11 @@ budget. The HTTP budget includes the principal and capability envelope. Paging
 checks stored payload lengths before reading each change and stops at the last
 included cursor. A single oversized change returns a resource-limit error without
 advancing past it; clients retain their existing adaptive page retry behavior.
+HTTP baseline reads count device-sequence and capture bytes incrementally under
+the same envelope budget. An oversized whole baseline or requested baseline page
+returns a resource-limit error; a partial page could falsely signal end of data.
+Paged clients reduce the requested count and retry at the same position. The
+in-process baseline APIs retain their full-library and count-bounded behavior.
 
 A stale note edit creates explicit variants, including a cleared note. Resolving
 variants requires their IDs and the revision the resolver observed. A resolution

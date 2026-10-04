@@ -315,6 +315,56 @@ public final class SyncServer: SyncTransport, Sendable {
         }
     }
 
+    func boundedBaseline(
+        after: UUID? = nil, limit: Int? = nil, expectedCursor: Int64? = nil,
+        baselineOverhead: (Int64) throws -> Int
+    ) throws -> Baseline {
+        if let limit, !(0...1000).contains(limit) { throw SyncError.invalidCursor }
+        return try read { db in
+            let cursor = try Int64.fetchOne(db, sql: "SELECT cursor FROM sync_meta")!
+            guard expectedCursor == nil || expectedCursor == cursor else {
+                throw SyncError.invalidCursor
+            }
+            var remaining = SyncHTTPHandler.maximumBodyBytes - (try baselineOverhead(cursor))
+            guard remaining >= 0 else { throw SyncHTTPError.resourceLimit }
+            var sequences: [UUID: Int64] = [:]
+            let devices = try Row.fetchCursor(
+                db, sql: "SELECT id, sequence FROM sync_devices ORDER BY id")
+            while let row = try devices.next() {
+                let id = UUID(uuidString: row["id"] as String)!
+                let sequence: Int64 = row["sequence"]
+                let bytes =
+                    try SyncDatabase.encode([id: sequence]).count - 2
+                    + (sequences.isEmpty ? 0 : 1)
+                guard bytes <= remaining else { throw SyncHTTPError.resourceLimit }
+                remaining -= bytes
+                sequences[id] = sequence
+            }
+            var captures: [SharedCapture] = []
+            let records = try Row.fetchCursor(
+                db,
+                sql: """
+                    SELECT id, length(payload) AS bytes FROM sync_records
+                    WHERE id > ? ORDER BY id LIMIT ?
+                    """, arguments: [after?.uuidString ?? "", limit ?? -1])
+            while let row = try records.next() {
+                let separator = captures.isEmpty ? 0 : 1
+                guard (row["bytes"] as Int) + separator <= remaining else {
+                    throw SyncHTTPError.resourceLimit
+                }
+                let data = try Data.fetchOne(
+                    db, sql: "SELECT payload FROM sync_records WHERE id=?",
+                    arguments: [row["id"] as String])!
+                let record = try SyncDatabase.decode(SharedCapture.self, data)
+                let bytes = try SyncDatabase.encode(record).count + separator
+                guard bytes <= remaining else { throw SyncHTTPError.resourceLimit }
+                remaining -= bytes
+                captures.append(record)
+            }
+            return Baseline(cursor: cursor, captures: captures, deviceSequences: sequences)
+        }
+    }
+
     public func previewContentSnapshotImport(_ snapshot: ContentSnapshotImport) throws
         -> ContentSnapshotImportPreview
     {

@@ -767,6 +767,114 @@ struct HTTPBoundaryTests {
         #expect(empty.changes.isEmpty)
     }
 
+    @Test func baselineRequestsRefuseOversizedRowsBeforeDecodingAndPreservePageCompleteness() throws
+    {
+        let f = try HTTPFixture()
+        defer { f.clean() }
+        let first = SharedCapture(
+            id: UUID(uuidString: "00000000-0000-0000-0000-000000000001")!,
+            source: CaptureSource(kind: .text, selection: "small first record"))
+        let second = UUID(uuidString: "00000000-0000-0000-0000-000000000002")!
+        let writer = try SyncDatabase.open(at: f.root.appendingPathComponent("a.sqlite"))
+        try writer.write { db in
+            try SyncDatabase.save(db, first)
+            try db.execute(
+                sql: "INSERT INTO sync_records (id, payload) VALUES (?, zeroblob(?))",
+                arguments: [second.uuidString, SyncHTTPHandler.maximumBodyBytes + 1])
+            try db.execute(sql: "UPDATE sync_meta SET cursor=2")
+        }
+        for action in [
+            SyncHTTPAction.baseline, .baselinePage(after: nil, limit: 1000, expectedCursor: 2),
+        ] {
+            let refused = f.handler.handle(try f.request(action))
+            #expect(refused.status == 503)
+            #expect(try f.failure(refused) == .resourceLimit)
+        }
+        let response = f.handler.handle(
+            try f.request(.baselinePage(after: nil, limit: 1, expectedCursor: 2)))
+        let reply = try SyncDatabase.decode(SyncHTTPReply.self, response.body)
+        guard case .baseline(let page) = reply.result else {
+            Issue.record("Expected a complete requested baseline page")
+            return
+        }
+        #expect(page.captures == [first])
+        #expect(page.cursor == 2)
+        for _ in 0..<2 {
+            let refused = f.handler.handle(
+                try f.request(.baselinePage(after: first.id, limit: 1, expectedCursor: 2)))
+            #expect(try f.failure(refused) == .resourceLimit)
+        }
+        let summary = f.handler.handle(
+            try f.request(.baselinePage(after: nil, limit: 0, expectedCursor: 2)))
+        #expect(summary.status == 200)
+    }
+
+    @Test func baselineBudgetIncludesDeviceSequencesAndTheExactHTTPEnvelope() throws {
+        let f = try HTTPFixture()
+        defer { f.clean() }
+        var capture = SharedCapture(source: CaptureSource(kind: .text, selection: ""))
+        let sequences = [UUID(): Int64(9), UUID(): Int64(10)]
+        let principal = SyncPrincipal(
+            serviceID: f.service, libraryID: f.libraryA, deviceID: f.device)
+        let overhead = try SyncDatabase.encode(
+            SyncHTTPReply(
+                version: 1, principal: principal,
+                result: .baseline(
+                    Baseline(cursor: 10, captures: [capture], deviceSequences: sequences)),
+                metadataContractVersion: 1, generatedProcessingContractVersion: 1,
+                extractionQualityContractVersion: 1)
+        ).count
+        capture.source.selection = String(
+            repeating: "x", count: SyncHTTPHandler.maximumBodyBytes - overhead)
+        let writer = try SyncDatabase.open(at: f.root.appendingPathComponent("a.sqlite"))
+        try writer.write { db in
+            try SyncDatabase.save(db, capture)
+            for (id, sequence) in sequences {
+                try db.execute(
+                    sql: "INSERT INTO sync_devices (id, sequence) VALUES (?, ?)",
+                    arguments: [id.uuidString, sequence])
+            }
+            try db.execute(sql: "UPDATE sync_meta SET cursor=10")
+        }
+        for action in [
+            SyncHTTPAction.baseline, .baselinePage(after: nil, limit: 1000, expectedCursor: 10),
+        ] {
+            let response = f.handler.handle(try f.request(action))
+            #expect(response.status == 200)
+            #expect(response.body.count == SyncHTTPHandler.maximumBodyBytes)
+        }
+        capture.source.selection?.append("x")
+        try writer.write { try SyncDatabase.save($0, capture) }
+        let refused = f.handler.handle(
+            try f.request(.baselinePage(after: nil, limit: 1, expectedCursor: 10)))
+        #expect(try f.failure(refused) == .resourceLimit)
+    }
+
+    @Test func baselineDeviceSummaryStopsAtItsByteBudget() throws {
+        let f = try HTTPFixture()
+        defer { f.clean() }
+        let writer = try SyncDatabase.open(at: f.root.appendingPathComponent("a.sqlite"))
+        let sequence = Int64(1)
+        let pairBytes = try SyncDatabase.encode([UUID(): sequence]).count - 2
+        try writer.write { db in
+            for _ in 0..<1000 {
+                try db.execute(
+                    sql: "INSERT INTO sync_devices (id, sequence) VALUES (?, ?)",
+                    arguments: [UUID().uuidString, sequence])
+            }
+        }
+        #expect(throws: SyncHTTPError.resourceLimit) {
+            try f.a.boundedBaseline(limit: 0) { _ in
+                SyncHTTPHandler.maximumBodyBytes - pairBytes
+            }
+        }
+        let summary = try f.a.boundedBaseline(limit: 0) { _ in
+            SyncHTTPHandler.maximumBodyBytes - (1000 * pairBytes + 999)
+        }
+        #expect(summary.deviceSequences.count == 1000)
+        #expect(summary.captures.isEmpty)
+    }
+
     @Test("Oversized baseline and unexpected storage errors produce bounded generic JSON")
     func responseLimitsAndHygiene() throws {
         let f = try HTTPFixture()
