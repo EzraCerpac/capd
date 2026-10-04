@@ -71,7 +71,7 @@ extension Store {
     /// Rebuilds the FTS index from the captures table, returning how many rows it now
     /// covers.
     public func rebuildSearchIndex() throws -> Int {
-        try dbPool.write { db in
+        try write { db in
             try db.execute(
                 sql: "INSERT INTO \(Schema.capturesFTS)(\(Schema.capturesFTS)) VALUES('rebuild')")
             return try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM \(Schema.captures)") ?? 0
@@ -86,7 +86,8 @@ extension Store {
         now: Date = Date()
     ) throws -> AssetSweep {
         let references = try reader.read { db in
-            try Row.fetchAll(
+            try StoreSync.checkBinding(db, expected: syncClient?.binding)
+            return try Row.fetchAll(
                 db,
                 sql: """
                     SELECT id, asset_path FROM \(Schema.captures)
@@ -107,6 +108,7 @@ extension Store {
                 values.isRegularFile == true
             else { continue }
             let relative = String(url.path.dropFirst(root.path.count + 1))
+            if relative.hasPrefix("sync/") { continue }
             guard !referenced.contains(relative) else { continue }
             if let modified = values.contentModificationDate,
                 now.timeIntervalSince(modified) < grace

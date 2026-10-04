@@ -18,6 +18,7 @@ final class AppState {
 
     private(set) var failedEnrichmentCount = 0
     private(set) var startupFailure: String?
+    private(set) var syncIssue: String?
     private(set) var isDropTargeted = false
 
     @ObservationIgnored private var coordinator: CaptureCoordinator?
@@ -35,6 +36,8 @@ final class AppState {
     @ObservationIgnored private var badgeTask: Task<Void, Never>?
     @ObservationIgnored private var updateTask: Task<Void, Never>?
     @ObservationIgnored private var permissionTask: Task<Void, Never>?
+    @ObservationIgnored private var librarySession: MacLibrarySession?
+    @ObservationIgnored private var syncTask: Task<Void, Never>?
 
     enum MenuBarGlyph {
         case dropTarget
@@ -46,7 +49,9 @@ final class AppState {
         if isDropTargeted {
             return .dropTarget
         }
-        if failedEnrichmentCount > 0 || startupFailure != nil || permissions.axLost {
+        if failedEnrichmentCount > 0 || startupFailure != nil || syncIssue != nil
+            || permissions.axLost
+        {
             return .degraded
         }
         return .normal
@@ -140,7 +145,20 @@ final class AppState {
     }
 
     private func start() throws {
-        let store = try Store(paths: .live)
+        let session = try MacLibrarySession.open(paths: .live)
+        librarySession = session
+        let store = session.store
+        if let runtime = session.runtime {
+            syncTask = Task { [weak self] in
+                while !Task.isCancelled {
+                    let status = await runtime.sync()
+                    self?.syncIssue = status.issue
+                    do {
+                        try await Task.sleep(for: status.issue == nil ? .seconds(5) : .seconds(30))
+                    } catch { return }
+                }
+            }
+        }
         let captureService = CaptureService(
             store: store,
             guards: [SecureInputGuard(probes: [SystemSecureInputProbe(), AXReader()])])

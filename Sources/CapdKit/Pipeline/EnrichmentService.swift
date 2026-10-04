@@ -67,13 +67,14 @@ public struct EnrichmentService: Sendable {
             }
         } catch {
             // The failure is recorded before rethrowing so the row never sticks in fetching.
-            _ = try store.completeEnrichment(id: id, result: StepResult(), state: .failed)
+            _ = try store.completeEnrichment(
+                id: id, result: StepResult(), state: .failed, expectedClaim: claimed)
             Log.pipeline.error("capture \(id) enrichment failed: \(String(describing: error))")
             throw error
         }
 
         let completed = try store.completeEnrichment(
-            id: id, result: merged, state: merged.enrichmentState)
+            id: id, result: merged, state: merged.enrichmentState, expectedClaim: claimed)
         Log.pipeline.info(
             "capture \(id) enriched: \(completed.enrichmentState.rawValue, privacy: .public)")
         return completed

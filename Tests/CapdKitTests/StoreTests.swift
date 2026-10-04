@@ -311,7 +311,11 @@ struct StoreTests {
             paths.assetURL(forRelativePath: "ab/cd.png").path == "/tmp/somewhere/assets/ab/cd.png")
 
         let live = try StoragePaths.live
-        #expect(live.root.pathComponents.suffix(2) == ["Application Support", "capd"])
+        if let override = ProcessInfo.processInfo.environment["CAPD_DIR"], !override.isEmpty {
+            #expect(live.root == URL(fileURLWithPath: override, isDirectory: true))
+        } else {
+            #expect(live.root.pathComponents.suffix(2) == ["Application Support", "capd"])
+        }
     }
 
     @Test("A database from a newer build is refused rather than opened")

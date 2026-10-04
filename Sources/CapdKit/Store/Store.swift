@@ -1,3 +1,4 @@
+import CapdSync
 import Foundation
 import GRDB
 import SQLite3
@@ -42,25 +43,96 @@ public final class Store: Sendable {
     public let paths: StoragePaths
 
     let dbPool: DatabasePool
+    public let syncClient: SyncClient?
 
     /// Reads are public; writes stay internal so every capture goes through the one service
     /// that applies the capture guards.
     public var reader: any DatabaseReader { dbPool }
 
-    public init(paths: StoragePaths) throws {
+    public convenience init(
+        paths: StoragePaths, syncBinding: SyncLibraryBinding? = nil,
+        imported: StoreSyncImportHandoff? = nil, deviceID: UUID? = nil
+    ) throws {
+        try self.init(
+            paths: paths, syncBinding: syncBinding, imported: imported,
+            deviceID: deviceID, commitConfiguration: { _ in })
+    }
+
+    init(readOnlyPaths paths: StoragePaths) throws {
+        self.paths = paths
+        var configuration = Configuration()
+        configuration.readonly = true
+        configuration.busyMode = .timeout(5)
+        dbPool = try DatabasePool(path: paths.databaseURL.path, configuration: configuration)
+        syncClient = nil
+        if try dbPool.read(Migrations.migrator.hasBeenSuperseded) {
+            throw StoreError.databaseIsNewerThanApp
+        }
+    }
+
+    init(
+        paths: StoragePaths, syncBinding: SyncLibraryBinding?,
+        imported: StoreSyncImportHandoff?, deviceID: UUID?,
+        commitConfiguration: @escaping @Sendable (Database) throws -> Void
+    ) throws {
         self.paths = paths
         try paths.createDirectories()
         dbPool = try Self.openCoordinated(at: paths.databaseURL)
+        guard let syncBinding else {
+            guard imported == nil, deviceID == nil else { throw SyncError.invalidOperation }
+            syncClient = nil
+            return
+        }
+        if let imported, let deviceID, deviceID != imported.deviceID { throw SyncError.wrongDevice }
+        try dbPool.read { db in
+            if try StoreSync.binding(in: db) == nil, try Capture.fetchCount(db) > 0 {
+                guard let imported else { throw SyncBindingError.enrollmentRequiresEmptyLibrary }
+                guard imported.binding == syncBinding else { throw SyncBindingError.mismatch }
+                try imported.validate(db, paths: paths)
+            } else if imported != nil {
+                throw SyncError.invalidOperation
+            }
+        }
+        let blobs = try BlobStore(
+            directory: paths.assetsDirectory.appendingPathComponent("sync"), binding: syncBinding)
+        let originalBlobFiles = Set(
+            try FileManager.default.contentsOfDirectory(atPath: blobs.directory.path))
+        do {
+            syncClient = try SyncClient(
+                writer: dbPool, blobs: blobs,
+                deviceID: deviceID ?? imported?.deviceID, binding: syncBinding,
+                prepareProjection: { db in
+                    try StoreSync.prepareIDs(db)
+                    if let imported {
+                        try imported.validate(db, paths: paths)
+                        try imported.seed(db, paths: paths, blobs: blobs)
+                    }
+                    try commitConfiguration(db)
+                },
+                project: { db, record in try StoreSync.project(db, record: record, paths: paths) })
+        } catch {
+            if imported != nil, try dbPool.read({ try StoreSync.binding(in: $0) }) == nil {
+                let added = Set(
+                    try FileManager.default.contentsOfDirectory(atPath: blobs.directory.path)
+                ).subtracting(originalBlobFiles)
+                for name in added {
+                    try FileManager.default.removeItem(
+                        at: blobs.directory.appendingPathComponent(name))
+                }
+            }
+            throw error
+        }
     }
 
     /// The hash check shares the write transaction rather than relying on the unique index,
     /// so the choice between inserting and merging is atomic across the three processes.
     func upsertCapture(_ capture: Capture) throws -> CaptureOutcome {
-        try dbPool.write { db in
+        try write { db in
             if let hash = capture.contentHash,
                 var existing = try Capture.filter(Capture.CodingKeys.contentHash == hash)
                     .fetchOne(db)
             {
+                let before = existing
                 let previousSeenAt = existing.lastSeenAt
                 existing.seenCount += 1
                 existing.lastSeenAt = capture.createdAt
@@ -84,17 +156,19 @@ public final class Store: Sendable {
                 }
 
                 try existing.update(db)
+                try enqueueChanges(from: before, to: existing, in: db, recapture: true)
                 return .alreadyCaptured(existing, previousSeenAt: previousSeenAt)
             }
 
             var inserted = capture
             try inserted.insert(db)
+            try enqueueCreated(inserted, in: db)
             return .captured(inserted)
         }
     }
 
     func updateNote(id: Int64, note: String?, now: Date = Date()) throws -> Capture {
-        try dbPool.write { db in
+        try write { db in
             guard let current = try Capture.fetchOne(db, key: id) else {
                 throw CaptureError.notFound(id)
             }
@@ -102,6 +176,7 @@ public final class Store: Sendable {
             updated.note = note
             updated.updatedAt = now
             try updated.updateChanges(db, from: current)
+            try enqueueChanges(from: current, to: updated, in: db)
             return updated
         }
     }
@@ -111,7 +186,7 @@ public final class Store: Sendable {
         guard Capture.ratingRange.contains(rating) else {
             throw RatingError.outOfRange(rating)
         }
-        return try dbPool.write { db in
+        return try write { db in
             guard let current = try Capture.fetchOne(db, key: id) else {
                 throw CaptureError.notFound(id)
             }
@@ -119,12 +194,13 @@ public final class Store: Sendable {
             updated.rating = rating
             updated.updatedAt = now
             try updated.updateChanges(db, from: current)
+            try enqueueChanges(from: current, to: updated, in: db)
             return updated
         }
     }
 
     public func scheduleReminder(id: Int64, at date: Date, now: Date = Date()) throws -> Capture {
-        try dbPool.write { db in
+        try write { db in
             guard let current = try Capture.fetchOne(db, key: id) else {
                 throw CaptureError.notFound(id)
             }
@@ -132,12 +208,13 @@ public final class Store: Sendable {
             updated.reminderAt = date
             updated.updatedAt = now
             try updated.updateChanges(db, from: current)
+            try enqueueChanges(from: current, to: updated, in: db)
             return updated
         }
     }
 
     public func claimNextDueReminder(now: Date = Date()) throws -> Capture? {
-        try dbPool.write { db in
+        try write { db in
             guard
                 let due =
                     try Capture
@@ -150,6 +227,10 @@ public final class Store: Sendable {
                 db,
                 Capture.CodingKeys.reminderAt.set(to: nil),
                 Capture.CodingKeys.updatedAt.set(to: now))
+            if var updated = try Capture.fetchOne(db, key: id) {
+                updated.updatedAt = now
+                try enqueueChanges(from: due, to: updated, in: db)
+            }
             return due
         }
     }
@@ -180,13 +261,15 @@ public final class Store: Sendable {
     /// Asset removal is best-effort: the rows are already gone, and a missing file must not
     /// resurrect them as an error.
     public func deleteCaptures(ids: [Int64]) throws -> [Capture] {
-        let deleted = try dbPool.write { db in
+        let deleted = try write { db in
             let doomed = try Capture.filter(ids.contains(Capture.CodingKeys.id)).fetchAll(db)
+            for capture in doomed { try enqueueDeleted(capture, in: db) }
             try Capture.filter(ids.contains(Capture.CodingKeys.id)).deleteAll(db)
             return doomed
         }
         for capture in deleted {
             guard let assetPath = capture.assetPath else { continue }
+            if syncClient != nil, assetPath.hasPrefix("sync/") { continue }
             try? FileManager.default.removeItem(at: paths.assetURL(forRelativePath: assetPath))
         }
         Log.store.info("deleted \(deleted.count) capture(s)")
@@ -213,7 +296,7 @@ public final class Store: Sendable {
         _ scope: QueryInterfaceRequest<Capture>,
         from states: [EnrichmentState]
     ) throws -> Int {
-        let count = try dbPool.write { db in
+        let count = try write { db in
             try scope
                 .filter(states.map(\.rawValue).contains(Capture.CodingKeys.enrichmentState))
                 .updateAll(

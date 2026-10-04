@@ -54,6 +54,7 @@ public struct TagService: Sendable {
         var processed = 0
         for capture in candidates {
             guard let id = capture.id else { continue }
+            let priorTaxonomy = taxonomy
             let mayInvent =
                 !taxonomy.retagInProgress && taxonomy.tags.count < Taxonomy.maxTags
 
@@ -74,8 +75,14 @@ public struct TagService: Sendable {
                 taxonomy.taggedSinceConsolidation += 1
             }
             taxonomy.updatedAt = now
-            try store.completeTagging(id: id, tags: accepted, taxonomy: taxonomy, now: now)
-            processed += 1
+            if try store.completeTagging(
+                id: id, tags: accepted, taxonomy: taxonomy, now: now,
+                inputFingerprint: TaggingFingerprint.of(capture))
+            {
+                processed += 1
+            } else {
+                taxonomy = priorTaxonomy
+            }
         }
         return processed
     }

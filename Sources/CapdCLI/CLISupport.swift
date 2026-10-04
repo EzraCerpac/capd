@@ -2,6 +2,7 @@ import ArgumentParser
 import CapdKit
 import Darwin
 import Foundation
+import Synchronization
 
 /// A failure carrying one of the CLI's documented exit codes:
 /// 0 ok, 1 no results, 2 bad usage, 3 store unavailable, 4 agent not running.
@@ -29,12 +30,48 @@ func printToStderr(_ line: String) {
     FileHandle.standardError.write(Data((line + "\n").utf8))
 }
 
-func openStore() throws -> Store {
+func openStore(readOnly: Bool = false) throws -> Store {
     do {
-        return try Store(paths: .live)
+        if readOnly { return try MacLibrarySession.readOnlyStore(paths: .live) }
+        let session = try MacLibrarySession.open(paths: .live)
+        CLISyncSessions.remember(session)
+        return session.store
     } catch {
         throw CLIError(message: "The capture store is unavailable: \(describe(error))", code: 3)
     }
+}
+
+enum CLISyncSessions {
+    private static let sessions = Mutex<[String: MacLibrarySession]>([:])
+
+    static func remember(_ session: MacLibrarySession) {
+        sessions.withLock { $0[session.store.paths.root.path] = session }
+    }
+
+    static func flush() {
+        let values = sessions.withLock { values in
+            let result = Array(values.values)
+            values.removeAll()
+            return result
+        }
+        for session in values {
+            guard let runtime = session.runtime else { continue }
+            let status = blocking { await runtime.sync(within: .seconds(5)) }
+            if let issue = status.issue { printToStderr(issue) }
+        }
+    }
+}
+
+func blocking<T: Sendable>(_ operation: @escaping @Sendable () async -> T) -> T {
+    let result = Mutex<T?>(nil)
+    let finished = DispatchSemaphore(value: 0)
+    Task.detached {
+        let value = await operation()
+        result.withLock { $0 = value }
+        finished.signal()
+    }
+    finished.wait()
+    return result.withLock { $0! }
 }
 
 func describe(_ error: any Error) -> String {

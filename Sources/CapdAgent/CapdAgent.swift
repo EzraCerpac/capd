@@ -43,7 +43,8 @@ struct CapdAgent {
     private static func runAgent() -> Never {
         do {
             let paths = try StoragePaths.live
-            let store = try Store(paths: paths)
+            let session = try MacLibrarySession.open(paths: paths)
+            let store = session.store
 
             guard AgentLock.acquire(at: paths.agentLockURL) != nil else {
                 logger.notice("another capd-agent holds the lock; exiting")
@@ -66,11 +67,11 @@ struct CapdAgent {
 
             Task {
                 var taggingRetry = TagRetryPolicy()
-                // At startup every `fetching` row was abandoned by a crash, except a
-                // capture the app is enriching this instant; stealing that one wastes a
-                // fetch but the state machine keeps both writers safe.
-                await sweep(enrichment: enrichment, olderThan: nil)
+                await sweep(
+                    enrichment: enrichment,
+                    olderThan: session.runtime == nil ? nil : EnrichmentService.staleClaimAge)
                 while true {
+                    _ = await session.runtime?.sync()
                     await sweep(enrichment: enrichment, olderThan: EnrichmentService.staleClaimAge)
                     if ((try? enrichment.pendingCount()) ?? 0) > 0 {
                         await queue.drain()
@@ -87,6 +88,7 @@ struct CapdAgent {
                             )
                         }
                     }
+                    _ = await session.runtime?.sync()
                     try? await Task.sleep(for: pollInterval)
                 }
             }

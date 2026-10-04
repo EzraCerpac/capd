@@ -1,3 +1,4 @@
+import CapdSync
 import Foundation
 import GRDB
 
@@ -23,13 +24,13 @@ extension Store {
     /// Only `capd-agent` calls this; the app's writes go through ``setTaggingEnabled(_:now:)``
     /// so two processes never race on the tag list itself.
     func saveTaxonomy(_ taxonomy: Taxonomy) throws {
-        try dbPool.write { db in
+        try write { db in
             try Self.persistTaxonomy(taxonomy, in: db)
         }
     }
 
     public func setTaggingEnabled(_ enabled: Bool, now: Date = Date()) throws {
-        try dbPool.write { db in
+        try write { db in
             try db.execute(
                 sql: """
                     UPDATE \(Schema.taxonomy)
@@ -44,7 +45,7 @@ extension Store {
     /// next polling pass. The request lives in the shared store so the app never races
     /// the agent, which remains the only process that writes tag assignments.
     public func requestRetagging(now: Date = Date()) throws {
-        try dbPool.write { db in
+        try write { db in
             try db.execute(
                 sql: """
                     UPDATE \(Schema.taxonomy)
@@ -97,21 +98,35 @@ extension Store {
     /// starts the full-library pass. A concurrent request is consumed only by this write.
     @discardableResult
     func prepareRetagging(tags: [String], now: Date = Date()) throws -> Int {
-        try dbPool.write { db in
+        try write { db in
             let requested =
                 try Bool.fetchOne(
                     db,
                     sql: "SELECT retag_requested FROM \(Schema.taxonomy) WHERE id = 1") ?? false
             guard requested else { return 0 }
 
-            let count =
-                try Capture
-                .filter(Capture.CodingKeys.tagsVersion > 0)
-                .updateAll(
-                    db,
-                    Capture.CodingKeys.tags.set(to: nil),
-                    Capture.CodingKeys.tagsVersion.set(to: 0),
-                    Capture.CodingKeys.updatedAt.set(to: now))
+            let before = try Capture.fetchAll(db).filter { capture in
+                if syncClient != nil {
+                    let id = try StoreSync.identity(db, capture: capture)
+                    return try !syncTags(capture, in: db).generated.isEmpty
+                        || capture.tagsVersion > 0
+                        || StoreSync.visible(db, id: id)?.generated.taggingProcessed == true
+                }
+                return capture.tagsVersion > 0
+            }
+            let count = before.count
+            for capture in before {
+                var updated = capture
+                let manual = try syncTags(capture, in: db).manual
+                updated.tags = manual.isEmpty ? nil : manual.joined(separator: " ")
+                updated.tagsVersion =
+                    syncClient != nil || manual.isEmpty ? 0 : Capture.pinnedTagsVersion
+                updated.updatedAt = now
+                try updated.update(db)
+                try enqueueChanges(
+                    from: capture, to: updated, in: db, generatedTags: [],
+                    taggingProcessing: .pending)
+            }
             let queued =
                 try Int.fetchOne(
                     db,
@@ -162,13 +177,21 @@ extension Store {
 
     /// One transaction for one tagging outcome: the capture's tags and the taxonomy the
     /// caller may have grown or advanced while assigning them.
+    @discardableResult
     func completeTagging(
         id: Int64,
         tags: [String],
         taxonomy: Taxonomy,
-        now: Date = Date()
-    ) throws {
-        try dbPool.write { db in
+        now: Date = Date(), inputFingerprint: String? = nil
+    ) throws -> Bool {
+        try write { db in
+            let before = try Capture.fetchOne(db, key: id)
+            if syncClient != nil {
+                guard let before else { return false }
+                if let inputFingerprint, inputFingerprint != TaggingFingerprint.of(before) {
+                    return false
+                }
+            }
             try db.execute(
                 sql: """
                     UPDATE \(Schema.captures)
@@ -181,6 +204,12 @@ extension Store {
                     "now": now,
                     "id": id,
                 ])
+            if let before, var updated = try Capture.fetchOne(db, key: id) {
+                updated.updatedAt = now
+                try enqueueChanges(
+                    from: before, to: updated, in: db, generatedTags: tags,
+                    taggingProcessing: .processed(inputFingerprint: TaggingFingerprint.of(updated)))
+            }
             try Self.persistTaxonomy(taxonomy, in: db)
             if taxonomy.retagInProgress {
                 let queued =
@@ -198,6 +227,7 @@ extension Store {
                         arguments: ["now": now])
                 }
             }
+            return true
         }
     }
 
@@ -207,24 +237,37 @@ extension Store {
     /// Consolidation passes `includePinned: false`: pinned tags are outside the taxonomy,
     /// and counting them would trip the over-cap trigger on every pass after a large import.
     public func tagUsage(sampleLimit: Int = 5, includePinned: Bool = true) throws -> [TagUsage] {
-        let rows = try reader.read { db in
-            try Row.fetchAll(
+        let entries = try reader.read { db in
+            let rows = try Row.fetchAll(
                 db,
                 sql: """
-                    SELECT tags, title FROM \(Schema.captures)
+                    SELECT id, tags, title FROM \(Schema.captures)
                     WHERE tags IS NOT NULL AND tags != ''
-                    \(includePinned ? "" : "AND tags_version != \(Capture.pinnedTagsVersion)")
+                    \(includePinned || syncClient != nil ? "" : "AND tags_version != \(Capture.pinnedTagsVersion)")
                     ORDER BY created_at DESC
                     """)
+            return try rows.map { row -> ([String], String?) in
+                let title: String? = row["title"]
+                if !includePinned, syncClient != nil {
+                    let localID: Int64 = row["id"]
+                    guard
+                        let raw = try String.fetchOne(
+                            db, sql: "SELECT global_id FROM sync_capture_ids WHERE local_id=?",
+                            arguments: [localID]), let id = UUID(uuidString: raw),
+                        let record = try StoreSync.visible(db, id: id)
+                    else { throw SyncError.invalidOperation }
+                    return (record.generated.tags, title)
+                }
+                let joined: String = row["tags"]
+                return (joined.split(separator: " ").map(String.init), title)
+            }
         }
 
         var counts: [String: Int] = [:]
         var samples: [String: [String]] = [:]
         var order: [String] = []
-        for row in rows {
-            let joined: String = row["tags"]
-            let title: String? = row["title"]
-            for tag in joined.split(separator: " ").map(String.init) {
+        for (tags, title) in entries {
+            for tag in Set(tags).sorted() {
                 if counts[tag] == nil { order.append(tag) }
                 counts[tag, default: 0] += 1
                 if let title, !title.isEmpty, samples[tag, default: []].count < sampleLimit {
@@ -261,7 +304,7 @@ extension Store {
                     sql: """
                         SELECT id, tags FROM \(Schema.captures)
                         WHERE id > :last
-                            AND tags_version != \(Capture.pinnedTagsVersion)
+                            \(syncClient == nil ? "AND tags_version != \(Capture.pinnedTagsVersion)" : "")
                             AND (tags IS NOT NULL OR tags_version > 0)
                         ORDER BY id
                         LIMIT :limit
@@ -270,15 +313,23 @@ extension Store {
             }
             guard !rows.isEmpty else { break }
 
-            try dbPool.write { db in
+            try write { db in
                 for row in rows {
                     let id: Int64 = row["id"]
-                    let joined: String? = row["tags"]
+                    guard let before = try Capture.fetchOne(db, key: id) else { continue }
+                    let categories = try syncTags(before, in: db)
+                    guard
+                        before.tagsVersion != Capture.pinnedTagsVersion
+                            || !categories.generated.isEmpty
+                    else { continue }
+                    let joined = categories.generated.joined(separator: " ")
                     var mapped: [String] = []
-                    for tag in (joined ?? "").split(separator: " ") {
+                    for tag in joined.split(separator: " ") {
                         guard let survivor = mapping[String(tag)] else { continue }
                         if !mapped.contains(survivor) { mapped.append(survivor) }
                     }
+                    let projectedTags =
+                        categories.manual + mapped.filter { !categories.manual.contains($0) }
                     try db.execute(
                         sql: """
                             UPDATE \(Schema.captures)
@@ -286,11 +337,22 @@ extension Store {
                             WHERE id = :id
                             """,
                         arguments: [
-                            "tags": mapped.isEmpty ? nil : mapped.joined(separator: " "),
-                            "version": mapped.isEmpty ? 0 : taxonomy.version,
+                            "tags": projectedTags.isEmpty
+                                ? nil : projectedTags.joined(separator: " "),
+                            "version": !categories.manual.isEmpty
+                                ? Capture.pinnedTagsVersion
+                                : (mapped.isEmpty ? 0 : taxonomy.version),
                             "now": now,
                             "id": id,
                         ])
+                    if var updated = try Capture.fetchOne(db, key: id) {
+                        updated.updatedAt = now
+                        try enqueueChanges(
+                            from: before, to: updated, in: db, generatedTags: mapped,
+                            taggingProcessing: mapped.isEmpty || before.tagsVersion == 0
+                                ? .pending
+                                : .processed(inputFingerprint: TaggingFingerprint.of(updated)))
+                    }
                 }
             }
             lastID = rows.last!["id"]

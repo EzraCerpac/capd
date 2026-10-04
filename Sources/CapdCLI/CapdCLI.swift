@@ -11,7 +11,7 @@ struct Capd: ParsableCommand {
         version: CapdKit.version,
         subcommands: [
             Add.self, Search.self, List.self, Rm.self, Import.self, Export.self,
-            Refetch.self, Status.self, Doctor.self, Mcp.self,
+            Refetch.self, Status.self, Doctor.self, Mcp.self, Sync.self,
         ]
     )
 
@@ -29,6 +29,7 @@ enum CapdMain {
         do {
             var command = try Capd.parseAsRoot()
             try command.run()
+            if !(command is Mcp) { CLISyncSessions.flush() }
         } catch let error as CLIError {
             error.terminate()
         } catch {

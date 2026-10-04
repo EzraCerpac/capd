@@ -5,14 +5,14 @@ extension Store {
     /// The `WHERE` guard is the claim: of the processes sharing this file, only the one
     /// that flips `pending` to `fetching` may enrich the row.
     func claimForEnrichment(id: Int64, now: Date = Date()) throws -> Capture? {
-        try dbPool.write { db in
+        try write { db in
             try claim(db, id: id, now: now)
         }
     }
 
     /// Claims the oldest pending capture, so a draining process works in capture order.
     func claimNextForEnrichment(now: Date = Date()) throws -> Capture? {
-        try dbPool.write { db in
+        try write { db in
             let id = try Int64.fetchOne(
                 db,
                 sql: """
@@ -52,21 +52,33 @@ extension Store {
         id: Int64,
         result: StepResult,
         state: EnrichmentState,
-        now: Date = Date()
+        now: Date = Date(), expectedClaim: Capture? = nil
     ) throws -> Capture {
-        try dbPool.write { db in
+        try write { db in
             guard let current = try Capture.fetchOne(db, key: id) else {
                 throw EnrichmentError.captureNotFound(id)
+            }
+            if syncClient != nil, let expectedClaim {
+                guard current.enrichmentState == .fetching,
+                    current.lastAttemptAt == expectedClaim.lastAttemptAt,
+                    current.attemptCount == expectedClaim.attemptCount
+                else { return current }
             }
             guard current.enrichmentState.canTransition(to: state) else {
                 throw EnrichmentError.illegalTransition(from: current.enrichmentState, to: state)
             }
 
             var updated = current
-            if let ocrText = result.ocrText {
+            let preserveBody =
+                syncClient != nil && expectedClaim != nil
+                && current.body != expectedClaim!.body
+            let preserveOCR =
+                syncClient != nil && expectedClaim != nil
+                && current.ocrText != expectedClaim!.ocrText
+            if let ocrText = result.ocrText, !preserveOCR {
                 updated.ocrText = ocrText
             }
-            if let extraction = result.bodyExtraction {
+            if let extraction = result.bodyExtraction, !preserveBody {
                 updated.body = extraction.body
                 updated.bodyStatus = extraction.status
                 updated.bodySource = extraction.source
@@ -77,8 +89,21 @@ extension Store {
                 }
             }
             updated.enrichmentState = state
+            if preserveBody && updated.kind == .link {
+                updated.enrichmentState =
+                    updated.body == nil ? .pending : updated.body!.isEmpty ? .thin : .ok
+                updated.bodyStatus =
+                    updated.body == nil ? .none : updated.body!.isEmpty ? .thin : .ok
+            } else if preserveOCR && updated.kind == .image {
+                updated.enrichmentState = updated.ocrText == nil ? .pending : .ok
+            }
             updated.updatedAt = now
             try updated.updateChanges(db, from: current)
+            if current.title != updated.title || current.body != updated.body
+                || current.ocrText != updated.ocrText
+            {
+                try enqueueChanges(from: current, to: updated, in: db)
+            }
             return updated
         }
     }
@@ -105,7 +130,7 @@ extension Store {
         }
         guard stale > 0 else { return 0 }
 
-        return try dbPool.write { db in
+        return try write { db in
             try db.execute(
                 sql: """
                     UPDATE \(Schema.captures)
