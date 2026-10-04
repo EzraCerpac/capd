@@ -10,6 +10,9 @@ struct FetchChildStep: ProcessingStep {
     /// The fetch timeout plus grace for child startup and JSON teardown.
     static let defaultDeadline: Duration = FetchPolicy.timeout + .seconds(10)
 
+    // The shared global queue can be occupied by blocked cooperative executor workers.
+    private static let watchdogQueue = DispatchQueue(label: "dev.jxd.capd.fetch-watchdog")
+
     func applies(to capture: Capture) -> Bool {
         capture.kind == .link && capture.url != nil
     }
@@ -33,7 +36,7 @@ struct FetchChildStep: ProcessingStep {
         }
     }
 
-    private static func runChild(
+    static func runChild(
         executable: URL, url: String, deadline: Duration
     ) -> BodyExtractionResult {
         let failed = BodyExtractionResult(body: nil, status: .failed, source: .fetch)
@@ -67,7 +70,7 @@ struct FetchChildStep: ProcessingStep {
         }
 
         let watchdog = DispatchWorkItem { child.forceTerminate() }
-        DispatchQueue.global().asyncAfter(deadline: .now() + seconds(deadline), execute: watchdog)
+        watchdogQueue.asyncAfter(deadline: .now() + seconds(deadline), execute: watchdog)
 
         child.process.waitUntilExit()
         watchdog.cancel()
