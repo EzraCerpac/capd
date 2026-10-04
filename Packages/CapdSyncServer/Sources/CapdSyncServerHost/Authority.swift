@@ -34,23 +34,14 @@ public final class Authority: @unchecked Sendable {
                     if let existing = servers[id] { return existing }
                     let root = dataDirectory.appendingPathComponent(
                         id.uuidString.lowercased(), isDirectory: true)
-                    // UUID-derived paths are trusted; existing symlink roots are refused.
-                    if FileManager.default.fileExists(atPath: root.path),
-                        try root.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink
-                            == true
-                    {
-                        throw HostError.invalidDataDirectory
-                    }
-                    for path in [
-                        root.appendingPathComponent("authority.sqlite"),
-                        root.appendingPathComponent("blobs"),
+                    try Self.validateStoragePath(root, directory: true)
+                    try Self.validateStoragePath(
+                        root.appendingPathComponent("blobs"), directory: true)
+                    for name in [
+                        "authority.sqlite", "authority.sqlite-wal", "authority.sqlite-shm",
+                        "authority.sqlite-journal",
                     ] {
-                        if FileManager.default.fileExists(atPath: path.path),
-                            try path.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink
-                                == true
-                        {
-                            throw HostError.invalidDataDirectory
-                        }
+                        try Self.validateStoragePath(root.appendingPathComponent(name))
                     }
                     let server = try SyncServer(
                         databaseURL: root.appendingPathComponent("authority.sqlite"),
@@ -61,6 +52,17 @@ public final class Authority: @unchecked Sendable {
                 }
                 continuation.resume(returning: handler.handle(request))
             }
+        }
+    }
+
+    private static func validateStoragePath(_ path: URL, directory: Bool = false) throws {
+        var status = stat()
+        if lstat(path.path, &status) != 0 {
+            guard errno == ENOENT else { throw HostError.invalidDataDirectory }
+            return
+        }
+        guard status.st_mode & S_IFMT == (directory ? S_IFDIR : S_IFREG) else {
+            throw HostError.invalidDataDirectory
         }
     }
 
@@ -118,11 +120,17 @@ public final class Authority: @unchecked Sendable {
         }
         let binding = directory.appendingPathComponent("service.json")
         if fm.fileExists(atPath: binding.path) {
-            guard try binding.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink != true
-            else {
-                throw HostError.invalidDataDirectory
-            }
-            guard try JSONDecoder().decode(UUID.self, from: Data(contentsOf: binding)) == serviceID
+            let fd = open(binding.path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK)
+            guard fd >= 0 else { throw HostError.invalidDataDirectory }
+            let file = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
+            defer { try? file.close() }
+            var status = stat()
+            guard fstat(fd, &status) == 0, status.st_mode & S_IFMT == S_IFREG,
+                (1...1_024).contains(status.st_size)
+            else { throw HostError.invalidDataDirectory }
+            let bytes = try file.read(upToCount: 1_025) ?? Data()
+            guard bytes.count <= 1_024 else { throw HostError.invalidDataDirectory }
+            guard try JSONDecoder().decode(UUID.self, from: bytes) == serviceID
             else {
                 throw HostError.serviceChanged
             }
