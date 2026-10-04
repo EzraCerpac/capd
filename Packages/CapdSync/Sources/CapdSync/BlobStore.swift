@@ -49,15 +49,7 @@ public final class BlobStore: Sendable {
 
     private static func checkOwnership(_ directory: URL, binding: SyncLibraryBinding?) throws {
         let marker = directory.appendingPathComponent("library-owner")
-        func verify() throws {
-            guard let binding,
-                try SyncDatabase.decode(SyncLibraryBinding.self, Data(contentsOf: marker))
-                    == binding
-            else {
-                throw SyncBindingError.mismatch
-            }
-        }
-        if FileManager.default.fileExists(atPath: marker.path) { return try verify() }
+        if try Self.validateExistingOwnership(directory, binding: binding) { return }
         guard let binding else { return }
         guard try FileManager.default.contentsOfDirectory(atPath: directory.path).isEmpty else {
             throw SyncBindingError.enrollmentRequiresEmptyLibrary
@@ -66,12 +58,51 @@ public final class BlobStore: Sendable {
         let fd = open(marker.path, O_WRONLY | O_CREAT | O_EXCL, S_IRUSR | S_IWUSR)
         if fd < 0 {
             guard errno == EEXIST else { throw SyncBindingError.mismatch }
-            return try verify()
+            guard try Self.validateExistingOwnership(directory, binding: binding) else {
+                throw SyncBindingError.mismatch
+            }
+            return
         }
         defer { _ = close(fd) }
         let bytes = try SyncDatabase.encode(binding)
         let count = bytes.withUnsafeBytes { write(fd, $0.baseAddress, $0.count) }
         guard count == bytes.count, fsync(fd) == 0 else { throw SyncBindingError.mismatch }
+    }
+
+    @discardableResult
+    static func validateExistingOwnership(_ directory: URL, binding: SyncLibraryBinding?) throws
+        -> Bool
+    {
+        guard
+            let data = try readExistingFile(
+                directory.appendingPathComponent("library-owner"), maximumBytes: 1_024)
+        else {
+            return false
+        }
+        guard let binding, (try? SyncDatabase.decode(SyncLibraryBinding.self, data)) == binding
+        else {
+            throw SyncBindingError.mismatch
+        }
+        return true
+    }
+
+    private static func readExistingFile(_ url: URL, maximumBytes: Int) throws -> Data? {
+        let fd = open(url.path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK)
+        guard fd >= 0 else {
+            if errno == ENOENT { return nil }
+            throw SyncError.invalidBlob
+        }
+        let file = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
+        defer { try? file.close() }
+        var status = stat()
+        guard fstat(fd, &status) == 0, status.st_mode & S_IFMT == S_IFREG,
+            status.st_nlink == 1, status.st_size >= 0, status.st_size <= maximumBytes
+        else {
+            throw SyncError.invalidBlob
+        }
+        let data = try file.read(upToCount: maximumBytes + 1) ?? Data()
+        guard data.count <= maximumBytes else { throw SyncError.invalidBlob }
+        return data
     }
 
     public func read(_ blob: BlobReference) throws -> Data {
@@ -81,8 +112,9 @@ public final class BlobStore: Sendable {
     private func verifiedRead(_ blob: BlobReference) throws -> Data {
         try blob.validate()
         let url = directory.appendingPathComponent(blob.digest)
-        guard FileManager.default.fileExists(atPath: url.path) else { throw SyncError.blobMissing }
-        let data = try Data(contentsOf: url)
+        guard let data = try Self.readExistingFile(url, maximumBytes: blob.byteCount) else {
+            throw SyncError.blobMissing
+        }
         guard data.count == blob.byteCount, BlobReference.digest(data) == blob.digest else {
             throw SyncError.invalidBlob
         }
@@ -102,9 +134,7 @@ public final class BlobStore: Sendable {
                 }
             }
             let partial = directory.appendingPathComponent(blob.digest + ".partial")
-            var data =
-                FileManager.default.fileExists(atPath: partial.path)
-                ? try Data(contentsOf: partial) : Data()
+            var data = try Self.readExistingFile(partial, maximumBytes: blob.byteCount) ?? Data()
             guard offset >= 0, offset <= data.count, chunk.count <= blob.byteCount,
                 offset <= blob.byteCount - chunk.count
             else { throw SyncError.invalidOffset }

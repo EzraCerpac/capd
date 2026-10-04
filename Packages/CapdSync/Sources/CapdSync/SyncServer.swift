@@ -24,6 +24,7 @@ public final class SyncServer: SyncTransport, Sendable {
         binding = libraryID.flatMap { library in
             serviceID.map { SyncLibraryBinding(libraryID: library, serviceID: $0) }
         }
+        try BlobStore.validateExistingOwnership(blobDirectory, binding: binding)
         writer = try SyncDatabase.open(at: databaseURL)
         let files = (try? FileManager.default.contentsOfDirectory(atPath: blobDirectory.path)) ?? []
         _ = try SyncDatabase.prepare(
