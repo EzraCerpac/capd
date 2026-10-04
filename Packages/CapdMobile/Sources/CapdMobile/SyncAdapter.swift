@@ -65,7 +65,7 @@ public enum SyncResult: Equatable, Sendable {
 public actor MobileSyncCoordinator {
     private let store: MobileStore
     private let adapter: any MobileSyncAdapter
-    private var flight: (id: UUID, task: Task<SyncResult, any Error>)?
+    private var flight: (id: UUID, pullOnly: Bool, task: Task<SyncResult, any Error>)?
 
     public init(store: MobileStore, adapter: any MobileSyncAdapter = LocalOnlySyncAdapter()) {
         self.store = store
@@ -77,7 +77,14 @@ public actor MobileSyncCoordinator {
     public func cancel() { flight?.task.cancel() }
 
     private func run(pullOnly: Bool) async throws -> SyncResult {
-        if let flight { return try await wait(for: flight.task) }
+        try Task.checkCancellation()
+        while let current = flight {
+            if current.pullOnly == pullOnly { return try await wait(for: current.task) }
+            // Opposite modes share exclusive access, not the earlier operation's result.
+            do { _ = try await wait(for: current.task) } catch {}
+            try Task.checkCancellation()
+            if flight?.id == current.id { flight = nil }
+        }
         let id = UUID()
         let store = store
         let adapter = adapter
@@ -111,7 +118,7 @@ public actor MobileSyncCoordinator {
                 .count
             return SyncResult.sent(sent, rejected: receipts.count - sent)
         }
-        flight = (id, task)
+        flight = (id, pullOnly, task)
         defer { if flight?.id == id { flight = nil } }
         return try await wait(for: task)
     }
