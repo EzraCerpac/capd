@@ -363,10 +363,7 @@ public struct SyncHTTPTransport: BoundSyncTransport {
             }
             throw error
         default:
-            guard
-                !action.requiresExtractionQualityContract
-                    || reply.extractionQualityContractVersion == 1
-            else { throw SyncHTTPError.unsupportedVersion }
+            try reply.checkRequiredCapabilities(for: action)
             guard response.status == 200,
                 reply.principal
                     == SyncPrincipal(

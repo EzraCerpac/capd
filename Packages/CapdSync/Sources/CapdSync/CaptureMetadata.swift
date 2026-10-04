@@ -305,7 +305,11 @@ extension SyncHTTPAction {
 extension SyncHTTPReply {
     func checkCapabilities(for action: SyncHTTPAction) throws {
         guard case .baseline = result else { throw SyncHTTPError.invalidResponse }
-        guard metadataContractVersion == 1,
+        try checkRequiredCapabilities(for: action)
+    }
+
+    func checkRequiredCapabilities(for action: SyncHTTPAction) throws {
+        guard action.requiredEnvelopeVersion == 1 || metadataContractVersion == 1,
             !action.requiresGeneratedProcessingContract || generatedProcessingContractVersion == 1,
             !action.requiresExtractionQualityContract || extractionQualityContractVersion == 1
         else { throw SyncHTTPError.unsupportedVersion }

@@ -5,6 +5,81 @@ import Testing
 
 @Suite("Prepared authenticated sync boundary")
 struct HTTPBoundaryTests {
+    @Test(arguments: [false, true])
+    func syncOnceRetriesExpiredAcknowledgementsButPreservesAmbiguousOutbox(
+        ambiguousHistory: Bool
+    ) async throws {
+        let f = try HTTPFixture()
+        defer { f.clean() }
+        let client = try f.client("expired-acknowledgement")
+        let capture = SharedCapture(source: CaptureSource(kind: .text, selection: "Lost receipt"))
+        let operation = try client.enqueue(captureID: capture.id, mutation: .create(capture))
+        _ = try f.a.apply(ambiguousHistory ? f.operation("Different accepted history") : operation)
+        try f.a.expireFeed(through: f.a.baseline().cursor)
+        let reopened = try f.client("expired-acknowledgement")
+        let wire = RetainedImageWire(binding: f.binding, deviceID: f.device, handler: f.handler)
+        if ambiguousHistory {
+            await #expect(throws: SyncError.outOfOrder(expected: 2)) {
+                try await reopened.syncOnce(using: wire, credential: { "A" })
+            }
+            #expect(try reopened.pendingOperations() == [operation])
+            #expect(try reopened.cursor() == 0)
+        } else {
+            let receipts = try await reopened.syncOnce(using: wire, credential: { "A" })
+            #expect(receipts.map(\.operationID) == [operation.id])
+            #expect(try reopened.pendingOperations().isEmpty)
+            #expect(try reopened.cursor() == f.a.baseline().cursor)
+            #expect(try reopened.captures().first?.seenCount == 1)
+            #expect(try reopened.enqueue(captureID: capture.id, mutation: .recapture).sequence == 2)
+        }
+    }
+
+    @Test(arguments: [false, true], [Int?.none, 9])
+    func requiredReceiptCapabilitiesRetainOperationAcrossBothExecutors(
+        processing: Bool, marker: Int?
+    ) async throws {
+        let f = try HTTPFixture()
+        defer { f.clean() }
+        let client = try f.client("capability-receipt")
+        var capture = SharedCapture(
+            source: CaptureSource(kind: .text, selection: "Receipt capability"),
+            metadata: CaptureMetadata(sourceAppBundleID: "test.synthetic"))
+        if processing {
+            capture.generated = GeneratedContent(
+                taggingProcessed: true, taggingInputFingerprint: "synthetic-fingerprint")
+        }
+        let operation = try client.enqueue(captureID: capture.id, mutation: .create(capture))
+        let alterReceipt: @Sendable (SyncHTTPRequest) throws -> SyncHTTPResponse = { request in
+            let actual = f.handler.handle(request)
+            let reply = try SyncDatabase.decode(SyncHTTPReply.self, actual.body)
+            guard case .receipt = reply.result else { return actual }
+            return SyncHTTPResponse(
+                status: actual.status, headers: actual.headers,
+                body: try SyncDatabase.encode(
+                    SyncHTTPReply(
+                        version: reply.version, principal: reply.principal, result: reply.result,
+                        metadataContractVersion: processing
+                            ? reply.metadataContractVersion : marker,
+                        generatedProcessingContractVersion: processing
+                            ? marker : reply.generatedProcessingContractVersion,
+                        extractionQualityContractVersion: reply.extractionQualityContractVersion)))
+        }
+        #expect(throws: SyncHTTPError.unsupportedVersion) {
+            try client.push(to: f.transport("A", executor: alterReceipt))
+        }
+        #expect(try client.pendingOperations() == [operation])
+        let reopened = try f.client("capability-receipt")
+        await #expect(throws: SyncHTTPError.unsupportedVersion) {
+            try await reopened.push(
+                to: QualityWire(execute: alterReceipt, binding: f.binding, deviceID: f.device),
+                credential: { "A" })
+        }
+        #expect(try reopened.pendingOperations() == [operation])
+        try reopened.push(to: f.transport("A"))
+        #expect(try reopened.pendingOperations().isEmpty)
+        #expect(try f.a.baseline().captures.first?.seenCount == 1)
+    }
+
     @Test func extractionQualityRequiresVersionFourAndCapabilityBeforeApply() async throws {
         let f = try HTTPFixture()
         defer { f.clean() }

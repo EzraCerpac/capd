@@ -283,7 +283,9 @@ public final class SyncClient: Sendable {
         using transport: any AsyncSyncTransport,
         credential: @escaping @Sendable () throws -> String
     ) async throws -> [SyncReceipt] {
-        try await pull(from: transport, credential: credential)
+        do {
+            try await pull(from: transport, credential: credential)
+        } catch SyncError.recoverySequenceCollision {}
         let receipts = try await push(to: transport, credential: credential)
         try await pull(from: transport, credential: credential)
         return receipts
