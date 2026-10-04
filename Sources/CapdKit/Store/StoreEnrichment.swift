@@ -1,3 +1,4 @@
+import CapdSync
 import Foundation
 import GRDB
 
@@ -43,7 +44,13 @@ extension Store {
                 "id": id,
             ])
         guard db.changesCount == 1 else { return nil }
-        return try Capture.fetchOne(db, key: id)
+        guard var capture = try Capture.fetchOne(db, key: id) else { return nil }
+        if syncClient != nil, capture.kind == .link,
+            let shared = try StoreSync.visible(db, id: StoreSync.identity(db, capture: capture))
+        {
+            capture.claimedSyncBodyQuality = .init(isThin: shared.generated.bodyIsThin)
+        }
+        return capture
     }
 
     /// A nil field in `result` leaves its columns alone; the body columns move together
@@ -69,9 +76,17 @@ extension Store {
             }
 
             var updated = current
+            let shared: SharedCapture? =
+                if syncClient != nil, expectedClaim != nil, current.kind == .link {
+                    try StoreSync.visible(db, id: StoreSync.identity(db, capture: current))
+                } else { nil }
+            let changedSyncQuality =
+                expectedClaim?.claimedSyncBodyQuality.map {
+                    $0.isThin != shared?.generated.bodyIsThin
+                } ?? false
             let preserveBody =
                 syncClient != nil && expectedClaim != nil
-                && current.body != expectedClaim!.body
+                && (current.body != expectedClaim!.body || changedSyncQuality)
             let preserveOCR =
                 syncClient != nil && expectedClaim != nil
                 && current.ocrText != expectedClaim!.ocrText
@@ -90,8 +105,6 @@ extension Store {
             }
             updated.enrichmentState = state
             if preserveBody && updated.kind == .link {
-                let id = try StoreSync.identity(db, capture: current)
-                let shared = try StoreSync.visible(db, id: id)
                 let isThin = updated.body?.isEmpty == true || shared?.generated.bodyIsThin == true
                 updated.enrichmentState =
                     updated.body == nil ? .pending : isThin ? .thin : .ok

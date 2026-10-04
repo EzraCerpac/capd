@@ -7,6 +7,138 @@ import Testing
 
 @Suite("Opt-in Mac Store sync")
 struct StoreSyncTests {
+    @Test("Conflict status uses compact projections and upgrades existing visible conflicts")
+    func compactConflictProjection() throws {
+        try fixture { paths, binding, server in
+            let store = try Store(paths: paths, syncBinding: binding)
+            let client = try #require(store.syncClient)
+            let transport = StoreTestTransport(
+                server: server, binding: binding, deviceID: client.deviceID)
+            let remoteDevice = UUID()
+            var remote = SharedCapture(
+                source: CaptureSource(kind: .text, title: "Indexed conflict"), note: "Original")
+            remote.generated.body = String(repeating: "Large unrelated body ", count: 10_000)
+            _ = try server.apply(
+                SyncOperation(
+                    deviceID: remoteDevice, sequence: 1, captureID: remote.id,
+                    baseRevision: 0, mutation: .create(remote)))
+            try client.pull(from: transport)
+            #expect(try store.noteConflicts().isEmpty)
+            let local = try #require(try store.reader.read { try Capture.fetchOne($0) })
+            _ = try store.updateNote(id: local.id!, note: "Local")
+            _ = try server.apply(
+                SyncOperation(
+                    deviceID: remoteDevice, sequence: 2, captureID: remote.id,
+                    baseRevision: 1, mutation: .edit(CaptureEdit(note: NoteEdit("Remote")))))
+            try client.push(to: transport)
+            try client.pull(from: transport)
+            let conflicts = try store.noteConflicts()
+            #expect(conflicts.count == 1)
+            let payload = try #require(
+                try store.reader.read {
+                    try Data.fetchOne($0, sql: "SELECT payload FROM sync_note_conflicts")
+                })
+            let fields = try #require(
+                try JSONSerialization.jsonObject(with: payload) as? [String: Any])
+            #expect(Set(fields.keys) == ["id", "title", "revision", "variants"])
+            #expect(payload.count < 1_000)
+            try store.dbPool.write { try $0.execute(sql: "DROP TABLE sync_note_conflicts") }
+            let reopened = try Store(paths: paths, syncBinding: binding)
+            #expect(try reopened.noteConflicts() == conflicts)
+            let current = try #require(try server.baseline().captures.first)
+            _ = try server.apply(
+                SyncOperation(
+                    deviceID: remoteDevice, sequence: 3, captureID: remote.id,
+                    baseRevision: current.revision, mutation: .delete))
+            try client.pull(from: transport)
+            #expect(try store.noteConflicts().isEmpty)
+            #expect(try reopened.noteConflicts().isEmpty)
+            let tombstone = try #require(try server.baseline().captures.first)
+            _ = try server.apply(
+                SyncOperation(
+                    deviceID: remoteDevice, sequence: 4, captureID: remote.id,
+                    baseRevision: tombstone.revision, mutation: .restore))
+            try client.pull(from: transport)
+            #expect(try store.noteConflicts().count == 1)
+            let restored = try #require(try server.baseline().captures.first)
+            _ = try server.apply(
+                SyncOperation(
+                    deviceID: remoteDevice, sequence: 5, captureID: remote.id,
+                    baseRevision: restored.revision, mutation: .recapture))
+            let authority = try DatabaseQueue(
+                path: paths.root.deletingLastPathComponent().appendingPathComponent(
+                    "authority.sqlite"
+                ).path)
+            try authority.write { db in
+                try db.execute(
+                    sql: "DELETE FROM sync_records WHERE id=?", arguments: [remote.id.uuidString])
+            }
+            try server.expireFeed(through: server.baseline().cursor)
+            try client.pull(from: transport)
+            #expect(try client.captures().isEmpty)
+            #expect(try store.noteConflicts().isEmpty)
+            #expect(try reopened.noteConflicts().isEmpty)
+        }
+    }
+
+    @Test("Same-body remote quality corrections win over active enrichment claims")
+    func sameBodyQualityWinsOverStaleCompletion() throws {
+        let corrections: [(Bool?, Bool)] = [
+            (true, false), (false, true), (nil, true), (nil, false),
+        ]
+        for (initialQuality, correctedQuality) in corrections {
+            try fixture { paths, binding, server in
+                let store = try Store(paths: paths, syncBinding: binding)
+                let client = try #require(store.syncClient)
+                let transport = StoreTestTransport(
+                    server: server, binding: binding, deviceID: client.deviceID)
+                let remoteDevice = UUID()
+                let body = "Same synchronized body"
+                var remote = SharedCapture(
+                    source: CaptureSource(kind: .link, url: "https://example.invalid/quality"))
+                remote.generated = GeneratedContent(body: body, bodyIsThin: initialQuality)
+                _ = try server.apply(
+                    SyncOperation(
+                        deviceID: remoteDevice, sequence: 1, captureID: remote.id,
+                        baseRevision: 0, mutation: .create(remote)))
+                try client.pull(from: transport)
+                let local = try #require(try store.reader.read { try Capture.fetchOne($0) })
+                try store.dbPool.write { db in
+                    try db.execute(
+                        sql: "UPDATE captures SET enrichment_state='pending' WHERE id=?",
+                        arguments: [local.id])
+                }
+                let claim = try #require(try store.claimForEnrichment(id: local.id!))
+                #expect(claim.claimedSyncBodyQuality != nil)
+                #expect(claim.claimedSyncBodyQuality?.isThin == initialQuality)
+                _ = try server.apply(
+                    SyncOperation(
+                        deviceID: remoteDevice, sequence: 2, captureID: remote.id,
+                        baseRevision: 1,
+                        mutation: .edit(
+                            CaptureEdit(
+                                generatedPatch: GeneratedContentPatch(bodyIsThin: correctedQuality))
+                        )))
+                try client.pull(from: transport)
+                #expect(
+                    try SearchService(store: store).capture(id: local.id!)?.enrichmentState
+                        == .fetching)
+                let staleStatus: BodyStatus = initialQuality == true ? .thin : .ok
+                let completed = try store.completeEnrichment(
+                    id: local.id!,
+                    result: StepResult(
+                        bodyExtraction: BodyExtractionResult(
+                            body: body, status: staleStatus, source: .fetch)),
+                    state: staleStatus == .thin ? .thin : .ok, expectedClaim: claim)
+                #expect(completed.body == body)
+                #expect(completed.bodyStatus == (correctedQuality ? .thin : .ok))
+                #expect(completed.enrichmentState == (correctedQuality ? .thin : .ok))
+                #expect(try client.pendingOperations().isEmpty)
+                #expect(try client.captures().first?.generated.bodyIsThin == correctedQuality)
+            }
+        }
+    }
+
     @Test("Conflict resolution freezes displayed IDs and revision while retaining unseen variants")
     func noteResolutionRetainsNewerVariants() throws {
         for pullNewVariant in [false, true] {

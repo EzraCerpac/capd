@@ -67,11 +67,11 @@ struct CapdAgent {
 
             Task {
                 var taggingRetry = TagRetryPolicy()
+                await session.runtime?.start(interval: pollInterval)
                 await sweep(
                     enrichment: enrichment,
                     olderThan: session.runtime == nil ? nil : EnrichmentService.staleClaimAge)
                 while true {
-                    _ = await session.runtime?.sync()
                     await sweep(enrichment: enrichment, olderThan: EnrichmentService.staleClaimAge)
                     if ((try? enrichment.pendingCount()) ?? 0) > 0 {
                         await queue.drain()
@@ -88,7 +88,6 @@ struct CapdAgent {
                             )
                         }
                     }
-                    _ = await session.runtime?.sync()
                     try? await Task.sleep(for: pollInterval)
                 }
             }

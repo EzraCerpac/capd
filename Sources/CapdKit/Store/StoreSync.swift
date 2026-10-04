@@ -20,6 +20,18 @@ enum StoreSync {
                 CREATE TABLE IF NOT EXISTS sync_capture_ids (
                     local_id INTEGER PRIMARY KEY, global_id TEXT NOT NULL UNIQUE)
                 """)
+        if try !db.tableExists("sync_note_conflicts") {
+            try db.execute(
+                sql: "CREATE TABLE sync_note_conflicts (id TEXT PRIMARY KEY, payload BLOB NOT NULL)"
+            )
+            if try db.tableExists("sync_visible") {
+                let rows = try Data.fetchCursor(db, sql: "SELECT payload FROM sync_visible")
+                while let payload = try rows.next() {
+                    try projectNoteConflict(
+                        db, record: JSONDecoder().decode(SharedCapture.self, from: payload))
+                }
+            }
+        }
     }
 
     static func identity(_ db: Database, capture: Capture) throws -> UUID {
@@ -79,6 +91,7 @@ enum StoreSync {
     }
 
     static func project(_ db: Database, record: SharedCapture, paths: StoragePaths) throws {
+        try projectNoteConflict(db, record: record)
         var localID = try Int64.fetchOne(
             db, sql: "SELECT local_id FROM sync_capture_ids WHERE global_id=? COLLATE NOCASE",
             arguments: [record.id.uuidString])
@@ -181,22 +194,31 @@ enum StoreSync {
                 "INSERT INTO sync_capture_ids VALUES (?,?) ON CONFLICT(global_id) DO UPDATE SET local_id=excluded.local_id",
             arguments: [capture.id, record.id.uuidString])
     }
+
+    private static func projectNoteConflict(_ db: Database, record: SharedCapture) throws {
+        guard !record.deleted, !record.noteConflicts.isEmpty else {
+            try db.execute(
+                sql: "DELETE FROM sync_note_conflicts WHERE id=?", arguments: [record.id.uuidString]
+            )
+            return
+        }
+        let conflict = MacNoteConflict(
+            id: record.id, title: record.source.title ?? record.source.url ?? "Untitled capture",
+            revision: record.revision, variants: record.noteConflicts)
+        try db.execute(
+            sql: """
+                INSERT INTO sync_note_conflicts (id,payload) VALUES (?,?)
+                ON CONFLICT(id) DO UPDATE SET payload=excluded.payload
+                """, arguments: [record.id.uuidString, try JSONEncoder().encode(conflict)])
+    }
 }
 
 extension Store {
     public func noteConflicts() throws -> [MacNoteConflict] {
         guard syncClient != nil else { return [] }
         return try reader.read { db in
-            try Data.fetchAll(db, sql: "SELECT payload FROM sync_visible ORDER BY id")
-                .compactMap { payload in
-                    let record = try JSONDecoder().decode(SharedCapture.self, from: payload)
-                    guard !record.deleted, !record.noteConflicts.isEmpty else { return nil }
-                    return MacNoteConflict(
-                        id: record.id,
-                        title: record.source.title ?? record.source.url ?? "Untitled capture",
-                        revision: record.revision,
-                        variants: record.noteConflicts)
-                }
+            try Data.fetchAll(db, sql: "SELECT payload FROM sync_note_conflicts ORDER BY id")
+                .map { try JSONDecoder().decode(MacNoteConflict.self, from: $0) }
         }
     }
 
