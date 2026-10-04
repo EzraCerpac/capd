@@ -15,6 +15,7 @@ struct LibraryView: View {
     @State private var showingSyncSettings = false
     @State private var openedCapture: UUID?
     @State private var stagedText = ""
+    @State private var draftID = UUID()
     @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
@@ -81,7 +82,7 @@ struct LibraryView: View {
                 consumeSystemAction()
             }
             .onChange(of: systemBridge.pendingAction) { _, _ in consumeSystemAction() }
-            .onChange(of: systemBridge.routingError) { _, message in
+            .onChange(of: systemBridge.routingError, initial: true) { _, message in
                 if let message { model.error = message }
             }
             .navigationDestination(item: $openedCapture) { id in
@@ -95,12 +96,15 @@ struct LibraryView: View {
                 ToolbarItem(placement: .topBarTrailing) {
                     Button("Capture", systemImage: "plus") {
                         stagedText = ""
+                        draftID = UUID()
                         capturing = true
                     }
                     .accessibilityIdentifier("captureButton")
                 }
             }
-            .sheet(isPresented: $capturing) { CaptureForm(model: model, initialText: stagedText) }
+            .sheet(isPresented: $capturing) {
+                CaptureForm(model: model, initialText: stagedText).id(draftID)
+            }
             .sheet(isPresented: $showingSyncSettings) {
                 SyncSettingsView(
                     state: model.syncState, retry: { model.retrySync() },
@@ -131,6 +135,7 @@ struct LibraryView: View {
             openedCapture = reference.captureID
         case .stageText(let text):
             stagedText = text
+            draftID = UUID()
             capturing = true
         }
     }

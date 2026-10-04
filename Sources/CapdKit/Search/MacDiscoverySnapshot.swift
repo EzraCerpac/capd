@@ -54,11 +54,14 @@ public struct MacDiscoverySnapshot: Sendable {
                     record?.manualTags
                     ?? (capture.tagsVersion == Capture.pinnedTagsVersion ? capture.tagList : [])
                 return MacDiscoveryCapture(
-                    localID: localID, id: id,
+                    localID: localID, id: record?.id ?? id,
                     title: capture.title ?? capture.url ?? "Saved capture", manualTags: manual,
                     revision: record?.revision ?? 0)
             }
-            return Self(libraryID: libraryID, captures: entries)
+            var seen = Set<UUID>()
+            return Self(
+                libraryID: libraryID,
+                captures: entries.filter { seen.insert($0.id).inserted })
         }
     }
 }

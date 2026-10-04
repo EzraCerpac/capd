@@ -71,6 +71,9 @@ final class AppState {
             try start()
         } catch {
             startupFailure = error.localizedDescription
+            systemSearchTask = Task {
+                try? await MacSystemSearch.removePersistedIndex(paths: .live)
+            }
         }
 
         if !settings.hasCompletedOnboarding {

@@ -102,7 +102,6 @@ public struct CaptureTextIntent: AppIntent {
 
     @MainActor
     public func perform() async throws -> some IntentResult {
-        try await CaptureIntentRuntime.shared.prepareForIntent()
         try CaptureIntentRuntime.shared.perform(.stageText(text))
         return .result()
     }

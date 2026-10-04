@@ -46,6 +46,20 @@ final class MacSystemSearch: CaptureActionHost {
 
     func install() { CaptureIntentRuntime.shared.host = self }
 
+    static func removePersistedIndex(
+        paths: StoragePaths, defaults: UserDefaults = .standard,
+        backend: (any SpotlightBackend)? = nil
+    ) async throws {
+        let key = "capd.system-search.indexed-id." + paths.databaseURL.path
+        guard let libraryID = defaults.string(forKey: key).flatMap(UUID.init(uuidString:)) else {
+            return
+        }
+        let backend = backend ?? CoreSpotlightBackend(name: "dev.jxd.capd.mac.captures")
+        try await SpotlightCoordinator(libraryID: libraryID, backend: backend)
+            .reconcile([], enabled: false)
+        defaults.removeObject(forKey: key)
+    }
+
     func setEnabled(_ enabled: Bool) {
         systemSearchEnabled = enabled
         indexedRevision = nil
