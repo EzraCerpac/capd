@@ -7,11 +7,14 @@ import Testing
 @Suite("Synthetic mobile pull, capture budget and adapter recovery")
 struct OfflineReviewRegressionTests {
     @Test(arguments: [100, 101])
-    func pullsPastFormerPageLimitUntilEmpty(pages: Int) throws {
+    func continuedPullProgressResumesInLaterBoundedCycle(pages: Int) throws {
         let fixture = OfflineReviewFixture()
         defer { fixture.clean() }
         let store = try MobileStore(url: fixture.url)
         let transport = ReviewPagingTransport(pages: pages)
+        try store.pull(from: transport)
+        #expect(transport.calls == MobileStore.pullPageBudget)
+        #expect(try store.capture(id: transport.captureID)?.revision == Int64(100 * 100))
         try store.pull(from: transport)
         #expect(transport.calls == pages + 1)
         #expect(try store.capture(id: transport.captureID)?.revision == Int64(pages * 100))

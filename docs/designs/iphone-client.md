@@ -28,6 +28,10 @@ Source details read an observable model cache so projected changes are rendered.
 Delivery is automatic after local changes, foreground/reopen and connectivity return,
 with a bounded active pull cadence for remote changes. See `automatic-sync.md` for
 scheduler policy, cancellation and presentation boundaries.
+Each pull cycle processes at most 100 pages and returns normally with its durable
+cursor; later foreground polls continue the feed so queued pushes get a turn.
+The coordinator coalesces matching request modes. Pull-only refreshes and
+push-capable syncs run separately in sequence, with their own results.
 
 The replaceable adapter provides a `SyncTransport`. The default is unconfigured.
 Only a DEBUG simulator launch flag activates `ReferenceTransport`, a bounded framed

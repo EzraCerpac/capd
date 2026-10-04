@@ -3,6 +3,7 @@ import Foundation
 import GRDB
 
 public final class MobileStore: Sendable {
+    static let pullPageBudget = 100
     private let database: DatabasePool
     private let client: SyncClient
     public var deviceID: UUID { client.deviceID }
@@ -208,8 +209,9 @@ public final class MobileStore: Sendable {
         try client.push(to: transport)
     }
 
+    /// Pulls one bounded cycle. Further calls resume from the durable cursor.
     public func pull(from transport: any SyncTransport) throws {
-        while true {
+        for _ in 0..<Self.pullPageBudget {
             let before = try client.cursor()
             try client.pull(from: transport)
             if try client.cursor() == before { return }
@@ -224,11 +226,12 @@ public final class MobileStore: Sendable {
         try await client.push(to: transport, credential: credential)
     }
 
+    /// Pulls one bounded cycle. Further calls resume from the durable cursor.
     public func pull(
         from transport: any AsyncSyncTransport,
         credential: @escaping @Sendable () throws -> String
     ) async throws {
-        while true {
+        for _ in 0..<Self.pullPageBudget {
             try Task.checkCancellation()
             let before = try client.cursor()
             try await client.pull(from: transport, credential: credential)
