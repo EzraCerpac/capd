@@ -113,6 +113,8 @@ enum SnapshotImport {
         }
         var records = Dictionary(
             uniqueKeysWithValues: try SyncDatabase.records(db).map { ($0.id, $0) })
+        let authorityCursor = try Int64.fetchOne(
+            db, sql: "SELECT cursor FROM sync_meta WHERE id=1")!
         var items: [ContentSnapshotItemPreview] = []
         for incoming in snapshot.captures {
             let requested = try SyncDatabase.canonical(db, incoming.id)
@@ -145,7 +147,13 @@ enum SnapshotImport {
                     differingFields: existing.map { differences($0, incoming) } ?? [],
                     proposedSeenCount: count, countIsExact: false))
             if var current = existing {
-                if !tombstone {
+                if tombstone && !current.deleted {
+                    guard authorityCursor < Int64.max else {
+                        throw ContentSnapshotImportError.stalePreview
+                    }
+                    current.deleted = true
+                    current.revision = authorityCursor + 1
+                } else if !tombstone {
                     current.seenCount = count
                     current.manualTags = Array(Set(current.manualTags).union(incoming.manualTags))
                         .sorted()
@@ -171,8 +179,7 @@ enum SnapshotImport {
         return ContentSnapshotImportPreview(
             snapshotID: snapshot.snapshotID, digest: BlobReference(data: bytes).digest,
             targetBinding: snapshot.targetBinding, sourceDeviceID: snapshot.sourceDeviceID,
-            authorityCursor: try Int64.fetchOne(
-                db, sql: "SELECT cursor FROM sync_meta WHERE id=1")!,
+            authorityCursor: authorityCursor,
             authorityFloor: try Int64.fetchOne(db, sql: "SELECT floor FROM sync_meta WHERE id=1")!,
             feedRowsToExpire: try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM sync_feed")!,
             countPolicy: snapshot.countPolicy, items: items)
@@ -232,6 +239,10 @@ enum SnapshotImport {
                                 value: variant.value))
                     }
                     if !importedNotes.isEmpty { current.noteRevision = cursor }
+                    current.revision = cursor
+                    try SyncDatabase.save(db, current)
+                } else if item.disposition == .preserveTombstone && !current.deleted {
+                    current.deleted = true
                     current.revision = cursor
                     try SyncDatabase.save(db, current)
                 }
