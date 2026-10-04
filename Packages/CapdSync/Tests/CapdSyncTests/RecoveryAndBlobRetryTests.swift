@@ -24,7 +24,7 @@ struct RecoveryAndBlobRetryTests {
         #expect(try fixture.server.baseline().deviceSequences[fixture.deviceID] == 3)
     }
 
-    @Test func baselinePreservesHigherDurableSequenceAndPendingOperations() throws {
+    @Test func baselineRefusesAmbiguousSequencesWithoutSuppressingPendingOperations() throws {
         let fixture = try RecoveryFixture()
         defer { fixture.clean() }
         let original = try fixture.client("original")
@@ -40,11 +40,40 @@ struct RecoveryAndBlobRetryTests {
             try recovered.enqueue(captureID: record.id, mutation: .create(record))
         }
         let pending = try recovered.pendingOperations()
-        try recovered.pull(from: fixture.server)
+        let visible = try recovered.captures()
+        #expect(throws: SyncError.recoverySequenceCollision) {
+            try recovered.pull(from: fixture.server)
+        }
         #expect(try recovered.pendingOperations() == pending)
+        #expect(try recovered.captures() == visible)
+        #expect(try recovered.cursor() == 0)
         let reopened = try fixture.client("recovered")
+        #expect(try reopened.pendingOperations() == pending)
+        #expect(try reopened.captures() == visible)
+        #expect(throws: SyncError.recoverySequenceCollision) {
+            try reopened.pull(from: fixture.server)
+        }
         let next = SharedCapture(source: CaptureSource(kind: .text, selection: "next"))
         #expect(try reopened.enqueue(captureID: next.id, mutation: .create(next)).sequence == 4)
+    }
+
+    @Test func lostAcknowledgementCanRetryUnchangedBeforeBaselineRecovery() throws {
+        let fixture = try RecoveryFixture()
+        defer { fixture.clean() }
+        let client = try fixture.client("original")
+        let record = SharedCapture(source: CaptureSource(kind: .text, selection: "lost ack"))
+        let operation = try client.enqueue(captureID: record.id, mutation: .create(record))
+        try fixture.server.apply(operation)
+        try fixture.server.expireFeed(through: fixture.server.baseline().cursor)
+        #expect(throws: SyncError.recoverySequenceCollision) {
+            try client.pull(from: fixture.server)
+        }
+        #expect(try client.pendingOperations() == [operation])
+        #expect(try client.push(to: fixture.server).first?.operationID == operation.id)
+        try client.pull(from: fixture.server)
+        #expect(try client.pendingOperations().isEmpty)
+        #expect(try client.captures().first?.seenCount == 1)
+        #expect(try client.enqueue(captureID: record.id, mutation: .recapture).sequence == 2)
     }
 
     @Test(arguments: [0, 3])

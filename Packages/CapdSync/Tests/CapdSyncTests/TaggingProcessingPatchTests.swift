@@ -155,7 +155,7 @@ struct TaggingProcessingPatchTests {
         }
     }
 
-    @Test func oldPayloadBytesAndLegacyDescriptiveMarkersRemainReadableAndPreserved() throws {
+    @Test func oldPayloadBytesRemainReadableButIncompleteProcessingCannotBeImported() throws {
         let f = try ProcessingFixture()
         defer { f.clean() }
         let old = Data(#"{"body":"Original","tags":[]}"#.utf8)
@@ -177,11 +177,11 @@ struct TaggingProcessingPatchTests {
             libraryID: binding.libraryID, serviceID: binding.serviceID)
         let snapshot = ContentSnapshotImport(
             snapshotID: UUID(), targetBinding: binding, sourceDeviceID: UUID(), captures: [capture])
-        try authority.importContentSnapshot(
-            snapshot, preview: authority.previewContentSnapshotImport(snapshot))
-        #expect(try authority.baseline().captures.first?.generated == descriptive)
-        #expect(
-            try authority.retainedContentSnapshotImport(snapshot.snapshotID)?.snapshot == snapshot)
+        #expect(throws: SyncError.invalidOperation) {
+            try authority.previewContentSnapshotImport(snapshot)
+        }
+        #expect(try authority.baseline().captures.isEmpty)
+        #expect(try authority.retainedContentSnapshotImport(snapshot.snapshotID) == nil)
     }
 }
 

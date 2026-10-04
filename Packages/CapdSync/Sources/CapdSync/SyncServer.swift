@@ -47,6 +47,13 @@ public final class SyncServer: SyncTransport, Sendable {
     }
 
     public func apply(_ operation: SyncOperation) throws -> SyncReceipt {
+        try apply(operation, validating: { _, _ in })
+    }
+
+    func apply(
+        _ operation: SyncOperation,
+        validating validate: (SyncReceipt, FeedChange?) throws -> Void
+    ) throws -> SyncReceipt {
         try write { db in
             if let row = try Row.fetchOne(
                 db, sql: "SELECT operation, receipt FROM sync_receipts WHERE id = ?",
@@ -56,7 +63,9 @@ public final class SyncServer: SyncTransport, Sendable {
                 guard try SyncDatabase.decode(SyncOperation.self, data) == operation else {
                     throw SyncError.operationIDReused
                 }
-                return try SyncDatabase.decode(SyncReceipt.self, row["receipt"])
+                let receipt = try SyncDatabase.decode(SyncReceipt.self, row["receipt"])
+                try validate(receipt, nil)
+                return receipt
             }
             try SyncDatabase.validate(operation)
             let previous =
@@ -168,18 +177,23 @@ public final class SyncServer: SyncTransport, Sendable {
                     outcome = .missing
                 }
             }
-            if changed, let record {
+            let receipt = SyncReceipt(operationID: operation.id, outcome: outcome, capture: record)
+            let change =
+                changed
+                ? record.map {
+                    FeedChange(
+                        cursor: cursor, operationID: operation.id,
+                        deviceID: operation.deviceID, sequence: operation.sequence,
+                        requestedCaptureID: operation.captureID, capture: $0)
+                } : nil
+            try validate(receipt, change)
+            if let change, let record {
                 try SyncDatabase.save(db, record)
-                let change = FeedChange(
-                    cursor: cursor, operationID: operation.id,
-                    deviceID: operation.deviceID, sequence: operation.sequence,
-                    requestedCaptureID: operation.captureID, capture: record)
                 try db.execute(
                     sql: "INSERT INTO sync_feed (cursor, payload) VALUES (?, ?)",
                     arguments: [cursor, try SyncDatabase.encode(change)])
                 try db.execute(sql: "UPDATE sync_meta SET cursor = ?", arguments: [cursor])
             }
-            let receipt = SyncReceipt(operationID: operation.id, outcome: outcome, capture: record)
             try db.execute(
                 sql: "INSERT INTO sync_receipts (id, operation, receipt) VALUES (?, ?, ?)",
                 arguments: [

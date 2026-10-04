@@ -284,6 +284,30 @@ struct ContentSnapshotImportTests {
             try f.server.retainedContentSnapshotImport(snapshot.snapshotID)?.snapshot == snapshot)
     }
 
+    @Test func malformedTaggingStateFailsWithoutImportingButValidStateSurvives() throws {
+        let f = try SnapshotFixture()
+        defer { f.clean() }
+        let capture = f.capture(id: f.uniqueID, hash: "processing")
+        for generated in [
+            GeneratedContent(taggingProcessed: true),
+            GeneratedContent(taggingInputFingerprint: "input"),
+            GeneratedContent(taggingProcessed: false, taggingInputFingerprint: "input"),
+        ] {
+            var malformed = capture
+            malformed.generated = generated
+            #expect(throws: SyncError.invalidOperation) {
+                try f.server.previewContentSnapshotImport(f.snapshot([malformed]))
+            }
+            #expect(try f.server.baseline().captures.isEmpty)
+        }
+        var valid = capture
+        valid.generated = GeneratedContent(taggingProcessed: true, taggingInputFingerprint: "input")
+        let snapshot = f.snapshot([valid])
+        try f.server.importContentSnapshot(
+            snapshot, preview: f.server.previewContentSnapshotImport(snapshot))
+        #expect(try f.server.baseline().captures.first?.generated == valid.generated)
+    }
+
     @Test func malformedBindingInvalidCountsAndMissingAssetsFailBeforeImport() throws {
         let f = try SnapshotFixture()
         defer { f.clean() }

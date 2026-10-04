@@ -5,6 +5,124 @@ import Testing
 
 @Suite("Prepared authenticated sync boundary")
 struct HTTPBoundaryTests {
+    @Test func representableReceiptCannotPublishAnOversizedSingleFeedChange() throws {
+        let f = try HTTPFixture()
+        defer { f.clean() }
+        var capture = SharedCapture(source: CaptureSource(kind: .text, selection: "feed bound"))
+        capture.generated.body = ""
+        let createID = UUID()
+        let edit = SyncOperation(
+            deviceID: f.device, sequence: 2, captureID: capture.id, baseRevision: 1,
+            mutation: .edit(CaptureEdit(rating: 4)))
+        var projected = capture
+        projected.revision = 2
+        projected.noteOperationID = createID
+        projected.rating = 4
+        let principal = SyncPrincipal(
+            serviceID: f.service, libraryID: f.libraryA, deviceID: f.device)
+        func encoded(_ result: SyncHTTPResult) throws -> Data {
+            try SyncDatabase.encode(
+                SyncHTTPReply(
+                    version: 1, principal: principal, result: result,
+                    metadataContractVersion: 1, generatedProcessingContractVersion: 1))
+        }
+        let overhead = try encoded(
+            .receipt(SyncReceipt(operationID: edit.id, outcome: .accepted, capture: projected))
+        ).count
+        let body = String(repeating: "b", count: SyncHTTPHandler.maximumBodyBytes - overhead)
+        capture.generated.body = body
+        projected.generated.body = body
+        #expect(
+            try encoded(
+                .receipt(SyncReceipt(operationID: edit.id, outcome: .accepted, capture: projected))
+            ).count == SyncHTTPHandler.maximumBodyBytes)
+        #expect(
+            try encoded(
+                .page(
+                    FeedPage(
+                        cursor: 2,
+                        changes: [
+                            FeedChange(
+                                cursor: 2, operationID: edit.id, deviceID: f.device, sequence: 2,
+                                requestedCaptureID: capture.id, capture: projected)
+                        ]))
+            ).count > SyncHTTPHandler.maximumBodyBytes)
+        try f.a.apply(
+            SyncOperation(
+                id: createID, deviceID: f.device, sequence: 1, captureID: capture.id,
+                baseRevision: 0, mutation: .create(capture)))
+        let before = try f.a.baseline()
+        #expect(throws: SyncHTTPError.resourceLimit) { try f.transport("A").apply(edit) }
+        #expect(try f.a.baseline() == before)
+        #expect(try f.a.changes(after: 1).changes.isEmpty)
+    }
+
+    @Test func oversizedReceiptRollsBackAndDoesNotConsumeOperationSequence() throws {
+        let f = try HTTPFixture()
+        defer { f.clean() }
+        let client = try f.client("size")
+        var capture = SharedCapture(source: CaptureSource(kind: .text, selection: "bounded edit"))
+        capture.generated.body = String(repeating: "b", count: 9_000_000)
+        try client.enqueue(captureID: capture.id, mutation: .create(capture))
+        try client.push(to: f.transport("A"))
+        let baseline = try f.a.baseline()
+        let operation = try client.enqueue(
+            captureID: capture.id,
+            mutation: .edit(
+                CaptureEdit(
+                    generatedPatch: GeneratedContentPatch(
+                        ocrText: .set(String(repeating: "o", count: 9_000_000))))))
+        for _ in 0..<2 {
+            #expect(throws: SyncHTTPError.resourceLimit) { try client.push(to: f.transport("A")) }
+            #expect(try client.pendingOperations() == [operation])
+            #expect(try f.a.baseline() == baseline)
+            #expect(try f.a.changes(after: baseline.cursor).changes.isEmpty)
+        }
+        let smaller = SyncOperation(
+            id: operation.id, deviceID: f.device, sequence: operation.sequence,
+            captureID: capture.id, baseRevision: 1,
+            mutation: .edit(CaptureEdit(rating: 4)))
+        #expect(try f.transport("A").apply(smaller).outcome == .accepted)
+        #expect(try f.a.baseline().deviceSequences[f.device] == 2)
+    }
+
+    @Test(arguments: [false, true])
+    func deletedImageBaselineCachesAssetBeforeOptimisticRestore(asynchronously: Bool) async throws {
+        let f = try HTTPFixture()
+        defer { f.clean() }
+        let bytes = Data("retained deleted image".utf8)
+        let blob = BlobReference(data: bytes)
+        try f.a.upload(blob, offset: 0, chunk: bytes, final: true)
+        let remote = UUID()
+        let capture = SharedCapture(
+            source: CaptureSource(kind: .image, contentHash: blob.digest, blob: blob))
+        try f.a.apply(
+            SyncOperation(
+                deviceID: remote, sequence: 1, captureID: capture.id, baseRevision: 0,
+                mutation: .create(capture)))
+        try f.a.apply(
+            SyncOperation(
+                deviceID: remote, sequence: 2, captureID: capture.id, baseRevision: 1,
+                mutation: .delete))
+        try f.a.expireFeed(through: f.a.baseline().cursor)
+        let client = try f.client("restore")
+        if asynchronously {
+            let wire = RetainedImageWire(binding: f.binding, deviceID: f.device, handler: f.handler)
+            try await client.pull(from: wire, credential: { "A" })
+            #expect(try client.blobs.read(blob) == bytes)
+            try client.enqueue(captureID: capture.id, mutation: .restore)
+            #expect(try client.captures().first?.deleted == false)
+            try await client.push(to: wire, credential: { "A" })
+        } else {
+            try client.pull(from: f.transport("A"))
+            #expect(try client.blobs.read(blob) == bytes)
+            try client.enqueue(captureID: capture.id, mutation: .restore)
+            #expect(try client.captures().first?.deleted == false)
+            try client.push(to: f.transport("A"))
+        }
+        #expect(try f.a.baseline().captures.first?.deleted == false)
+    }
+
     @Test func processingRequiresVersionThreeBeforeStorageAndSynchronousProbeKeepsV2Compatible()
         throws
     {
@@ -505,6 +623,15 @@ struct HTTPBoundaryTests {
         #expect(try client.pendingOperations().count == 1)
         try client.push(to: f.transport("A"))
         #expect(try f.a.baseline().captures.first?.seenCount == 1)
+    }
+}
+
+private struct RetainedImageWire: AsyncSyncTransport {
+    let binding: SyncLibraryBinding
+    let deviceID: UUID
+    let handler: SyncHTTPHandler
+    func send(_ request: SyncHTTPRequest) async throws -> SyncHTTPResponse {
+        handler.handle(request)
     }
 }
 

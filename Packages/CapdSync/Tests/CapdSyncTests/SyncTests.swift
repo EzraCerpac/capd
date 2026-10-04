@@ -49,7 +49,7 @@ struct SyncTests {
     }
 
     @Test(
-        "Own feed echo and expired baseline suppress committed overlays while retaining retry receipts"
+        "Own feed echo proves acceptance; ambiguous expired recovery preserves work for receipt retry"
     )
     func lostAcknowledgementPull() throws {
         let f = try Fixture()
@@ -67,10 +67,15 @@ struct SyncTests {
         lost.dropNext()
         #expect(throws: SyncError.acknowledgementLost) { try a.push(to: lost) }
         try f.server.expireFeed(through: f.server.baseline().cursor)
-        try a.pull(from: f.server)
+        let pending = try a.pendingOperations()
+        let visible = try a.captures()
+        #expect(throws: SyncError.recoverySequenceCollision) { try a.pull(from: f.server) }
+        #expect(try a.pendingOperations() == pending)
+        #expect(try a.captures() == visible)
         #expect(try a.captures().first?.seenCount == 2)
         #expect(try a.pendingOperations().count == 1)
         try a.push(to: lost)
+        try a.pull(from: f.server)
         #expect(try a.captures().first?.seenCount == 2)
         #expect(try a.pendingOperations().isEmpty)
     }

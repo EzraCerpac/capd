@@ -347,7 +347,7 @@ public final class SyncClient: Sendable {
     }
 
     private func cacheBlob(_ record: SharedCapture?, from actions: AsyncHTTPActions) async throws {
-        guard let record, !record.deleted, let blob = record.source.blob else { return }
+        guard let record, let blob = record.source.blob else { return }
         do { _ = try blobs.read(blob) } catch SyncError.blobMissing, SyncError.invalidBlob {
             let data = try await actions.download(blob)
             try Task.checkCancellation()
@@ -389,11 +389,17 @@ public final class SyncClient: Sendable {
             guard try Int64.fetchOne(db, sql: "SELECT cursor FROM sync_meta") == oldCursor,
                 baseline.cursor >= oldCursor
             else { throw SyncError.invalidCursor }
+            let acceptedSequence = baseline.deviceSequences[deviceID] ?? 0
+            let observed = try String.fetchSet(db, sql: "SELECT id FROM sync_observed")
+            guard
+                try !operations(db).contains(where: {
+                    $0.sequence <= acceptedSequence && !observed.contains($0.id.uuidString)
+                })
+            else { throw SyncError.recoverySequenceCollision }
             // A push acknowledgement can already be ahead of this baseline snapshot.
             let ahead = try SyncDatabase.records(db).filter { $0.revision > baseline.cursor }
             try db.execute(sql: "DELETE FROM sync_records")
             for record in baseline.captures + ahead { try accept(db, record) }
-            let acceptedSequence = baseline.deviceSequences[deviceID] ?? 0
             try db.execute(
                 sql: """
                     UPDATE sync_meta SET observed_sequence = MAX(observed_sequence, ?),
@@ -416,7 +422,7 @@ public final class SyncClient: Sendable {
     }
 
     private func cacheBlob(_ record: SharedCapture?, from transport: any SyncTransport) throws {
-        guard let record, !record.deleted, let blob = record.source.blob else { return }
+        guard let record, let blob = record.source.blob else { return }
         do { _ = try blobs.read(blob) } catch SyncError.blobMissing, SyncError.invalidBlob {
             let data = try transport.download(blob)
             try blobs.receive(blob, offset: 0, chunk: data, final: true)

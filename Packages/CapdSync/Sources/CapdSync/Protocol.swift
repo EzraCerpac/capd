@@ -346,6 +346,7 @@ public enum SyncError: Error, Equatable, Codable, Sendable {
     case invalidOperation
     case operationIDReused
     case outOfOrder(expected: Int64)
+    case recoverySequenceCollision
     case wrongDevice
     case cursorExpired
     case invalidCursor
@@ -363,6 +364,8 @@ extension SyncError: LocalizedError {
             "The connection closed. Try sync again when it is available."
         case .invalidBlob, .blobMissing:
             "An attachment could not be verified. Your changes remain saved locally."
+        case .recoverySequenceCollision:
+            "Queued changes overlap this device's server history. Your changes remain saved locally; recover with a new device enrollment."
         default:
             "The sync request could not be completed."
         }

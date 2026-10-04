@@ -184,7 +184,16 @@ public struct SyncHTTPHandler: Sendable {
             }
             let result: SyncHTTPResult
             switch envelope.action {
-            case .apply(let operation): result = .receipt(try authority.apply(operation))
+            case .apply(let operation):
+                result = .receipt(
+                    try authority.apply(operation) { receipt, change in
+                        try checkResponseSize(.receipt(receipt), principal: principal)
+                        if let change {
+                            try checkResponseSize(
+                                .page(FeedPage(cursor: change.cursor, changes: [change])),
+                                principal: principal)
+                        }
+                    })
             case .changes(let cursor, let limit):
                 result = .page(try authority.changes(after: cursor, limit: limit))
             case .baseline: result = .baseline(try authority.baseline())
@@ -198,7 +207,11 @@ public struct SyncHTTPHandler: Sendable {
             case .download(let blob): result = .data(try authority.download(blob))
             }
             return reply(result, principal: principal, status: 200)
-        } catch let error as SyncError { return domainFailure(error) } catch {
+        } catch let error as SyncError { return domainFailure(error) } catch let error
+            as SyncHTTPError
+        {
+            return failure(error, status: 503)
+        } catch {
             return failure(.unavailable, status: 503)
         }
     }
@@ -216,6 +229,15 @@ public struct SyncHTTPHandler: Sendable {
 
     private func failure(_ error: SyncHTTPError, status: Int) -> SyncHTTPResponse {
         reply(.failure(error), status: status)
+    }
+
+    private func checkResponseSize(_ result: SyncHTTPResult, principal: SyncPrincipal) throws {
+        let payload = SyncHTTPReply(
+            version: 1, principal: principal, result: result,
+            metadataContractVersion: 1, generatedProcessingContractVersion: 1)
+        guard try SyncDatabase.encode(payload).count <= Self.maximumBodyBytes else {
+            throw SyncHTTPError.resourceLimit
+        }
     }
 
     private func reply(_ result: SyncHTTPResult, principal: SyncPrincipal? = nil, status: Int)

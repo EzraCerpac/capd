@@ -311,8 +311,6 @@ enum SnapshotImport {
             shape.noteConflicts = []
             shape.deleted = false
             shape.seenCount = 1
-            shape.generated.taggingProcessed = nil
-            shape.generated.taggingInputFingerprint = nil
             try SyncDatabase.validate(
                 SyncOperation(
                     deviceID: snapshot.sourceDeviceID, sequence: 1, captureID: shape.id,
