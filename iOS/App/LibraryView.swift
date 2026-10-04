@@ -243,6 +243,11 @@ struct CaptureDetailView: View {
                 if let body = capture.body {
                     Section("Saved page text") { Text(body).textSelection(.enabled) }
                 }
+                if let text = capture.ocrText, !text.isEmpty {
+                    Section("Recognized image text") {
+                        Text(text).textSelection(.enabled)
+                    }.accessibilityIdentifier("captureOCRText")
+                }
                 if !capture.generatedTags.isEmpty {
                     Section("Generated tags") {
                         Text(capture.generatedTags.joined(separator: ", "))

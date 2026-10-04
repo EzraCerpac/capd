@@ -1,4 +1,5 @@
 import Foundation
+import NaturalLanguage
 
 public enum AnswerAvailability: Sendable, Equatable {
     case available
@@ -132,6 +133,7 @@ public struct GroundedAnswerService: Sendable {
 
         struct Candidate {
             let evidence: AnswerEvidence
+            var excerpts: [String]
             var matches: Int
             var score: Double
         }
@@ -147,10 +149,16 @@ public struct GroundedAnswerService: Sendable {
                 if var previous = candidates[evidence.id] {
                     previous.matches += 1
                     previous.score += score
+                    for fragment in Self.fragments(evidence.excerpt) {
+                        if previous.excerpts.contains(where: { $0.contains(fragment) }) { continue }
+                        previous.excerpts.removeAll { fragment.contains($0) }
+                        previous.excerpts.append(fragment)
+                    }
                     candidates[evidence.id] = previous
                 } else {
                     candidates[evidence.id] = Candidate(
-                        evidence: evidence, matches: 1, score: score)
+                        evidence: evidence, excerpts: Self.fragments(evidence.excerpt),
+                        matches: 1, score: score)
                 }
             }
         }
@@ -163,9 +171,8 @@ public struct GroundedAnswerService: Sendable {
         var sources: [NumberedEvidence] = []
         for candidate in ranked {
             guard sources.count < Self.sourceLimit, remaining > 0 else { break }
-            let excerpt = String(
-                Self.normalized(candidate.evidence.excerpt)
-                    .prefix(min(Self.excerptLimit, remaining)))
+            let excerpt = Self.mergedExcerpts(
+                candidate.excerpts, limit: min(Self.excerptLimit, remaining))
             guard !excerpt.isEmpty else { continue }
             remaining -= excerpt.count
             sources.append(
@@ -218,12 +225,44 @@ public struct GroundedAnswerService: Sendable {
             "were", "what", "when", "where", "which", "who", "why", "with", "about",
         ]
         var seen = Set<String>()
-        return Array(
-            question.lowercased().split { !$0.isLetter && !$0.isNumber }.compactMap {
-                let term = String($0)
-                return term.count > 1 && !stop.contains(term) && seen.insert(term).inserted
-                    ? term : nil
-            }.prefix(8))
+        let text = question.lowercased()
+        let tokenizer = NLTokenizer(unit: .word)
+        tokenizer.string = text
+        var terms: [String] = []
+        tokenizer.enumerateTokens(in: text.startIndex..<text.endIndex) { range, _ in
+            for part in text[range].split(whereSeparator: { !$0.isLetter && !$0.isNumber }) {
+                let term = String(part)
+                let hasNonASCIIletter = term.unicodeScalars.contains {
+                    $0.value > 127 && $0.properties.isAlphabetic
+                }
+                if (term.count > 1 || hasNonASCIIletter) && !stop.contains(term)
+                    && seen.insert(term).inserted
+                {
+                    terms.append(term)
+                }
+            }
+            return terms.count < 8
+        }
+        return Array(terms.prefix(8))
+    }
+
+    private static func fragments(_ excerpt: String) -> [String] {
+        excerpt.components(separatedBy: "\n\n").compactMap {
+            let fragment = String(normalized($0).prefix(excerptLimit))
+            return fragment.isEmpty ? nil : fragment
+        }
+    }
+
+    private static func mergedExcerpts(_ fragments: [String], limit: Int) -> String {
+        let fragments = Array(fragments.prefix(limit))
+        guard !fragments.isEmpty else { return "" }
+        var remaining = limit - (fragments.count - 1)
+        let parts = fragments.enumerated().map { index, fragment in
+            let part = String(fragment.prefix(remaining / (fragments.count - index)))
+            remaining -= part.count
+            return part
+        }
+        return parts.joined(separator: " ")
     }
 
     static func normalized(_ text: String) -> String {
