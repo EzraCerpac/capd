@@ -11,14 +11,15 @@ final class MCPSocketProtectionFailureTests: XCTestCase {
     }
 
     func testBoundSocketIsRemovedWhenProtectionFails() throws {
-        let directory = FileManager.default.temporaryDirectory
-            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let directoryName = "c\(UUID().uuidString.prefix(12))"
+        let directory = try canonicalSocketTestDirectory()
+            .appendingPathComponent(directoryName, isDirectory: true)
         try FileManager.default.createDirectory(
             at: directory, withIntermediateDirectories: false,
             attributes: [.posixPermissions: 0o700])
         defer { try? FileManager.default.removeItem(at: directory) }
 
-        let socketURL = directory.appendingPathComponent("bridge.sock")
+        let socketURL = directory.appendingPathComponent("s.sock")
         let descriptor = Darwin.socket(AF_UNIX, SOCK_STREAM, 0)
         guard descriptor >= 0 else { throw POSIXError(.init(rawValue: errno) ?? .EIO) }
         defer { Darwin.close(descriptor) }
@@ -45,4 +46,12 @@ final class MCPSocketProtectionFailureTests: XCTestCase {
         XCTAssertFalse(protected)
         XCTAssertFalse(FileManager.default.fileExists(atPath: socketURL.path))
     }
+}
+
+private func canonicalSocketTestDirectory() throws -> URL {
+    guard let resolved = realpath("/tmp", nil) else {
+        throw POSIXError(.init(rawValue: errno) ?? .EIO)
+    }
+    defer { free(resolved) }
+    return URL(fileURLWithPath: String(cString: resolved))
 }
