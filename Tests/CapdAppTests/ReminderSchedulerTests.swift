@@ -53,10 +53,17 @@ struct ReminderSchedulerTests {
                     try await Task.sleep(for: .seconds(30))
                 }))
         scheduler.start()
-        let deadline = ContinuousClock.now.advanced(by: .seconds(2))
-        while await sleeper.count == 0 && ContinuousClock.now < deadline {
-            await Task.yield()
+        let started = await withTaskGroup(of: Bool.self) { group in
+            group.addTask { await sleeper.waitForStart() }
+            group.addTask {
+                try? await Task.sleep(for: .seconds(10))
+                return false
+            }
+            let result = await group.next()!
+            group.cancelAll()
+            return result
         }
+        try #require(started)
         try #require(await sleeper.count == 1)
         scheduler.refresh()
         await Task.yield()
@@ -98,5 +105,21 @@ struct ReminderSchedulerTests {
 
 private actor ReminderSleepProbe {
     var count = 0
-    func started() { count += 1 }
+    private let starts: AsyncStream<Void>
+    private let continuation: AsyncStream<Void>.Continuation
+
+    init() {
+        (starts, continuation) = AsyncStream.makeStream()
+    }
+
+    func started() {
+        count += 1
+        continuation.yield(())
+    }
+
+    func waitForStart() async -> Bool {
+        var iterator = starts.makeAsyncIterator()
+        if case .some = await iterator.next() { return true }
+        return false
+    }
 }
