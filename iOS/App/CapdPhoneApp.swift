@@ -17,6 +17,7 @@ final class LibraryModel {
     var syncState = AutomaticSyncState()
     var showSetupHint = !UserDefaults.standard.bool(forKey: "capd.sync-setup-explanation-seen")
     private var capturesByID: [UUID: MobileCapture] = [:]
+    private var loadedLibraryRevision: MobileLibraryRevision?
     private var store: MobileStore?
     private var storeOpenError: Error?
     private var scheduler: AutomaticSyncController?
@@ -36,7 +37,7 @@ final class LibraryModel {
                     for await state in stream {
                         guard let self, !Task.isCancelled else { break }
                         self.syncState = state
-                        self.reload()
+                        if state.libraryRevision != self.loadedLibraryRevision { self.reload() }
                     }
                 }
                 connectivity = SyncConnectivity { [scheduler] available in
@@ -52,9 +53,11 @@ final class LibraryModel {
 
     func reload() {
         do {
+            let revision = try store?.libraryRevision()
             let library = try store?.search() ?? []
             capturesByID = Dictionary(uniqueKeysWithValues: library.map { ($0.id, $0) })
             captures = query.isEmpty ? library : try store?.search(query) ?? []
+            loadedLibraryRevision = revision
         } catch {
             self.error = "Could not refresh the saved library. \(error.localizedDescription)"
         }

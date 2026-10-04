@@ -32,6 +32,10 @@ Each pull cycle processes at most 100 pages and returns normally with its durabl
 cursor; later foreground polls continue the feed so queued pushes get a turn.
 The coordinator coalesces matching request modes. Pull-only refreshes and
 push-capable syncs run separately in sequence, with their own results.
+Cancelling a joined caller ends only its wait; the caller that starts the shared
+flight owns its cancellation. Scheduler updates carry a lightweight committed
+library revision, so status-only updates do not reload capture text. Conflict
+counts are cached until that revision changes.
 
 The replaceable adapter provides a `SyncTransport`. The default is unconfigured.
 Only a DEBUG simulator launch flag activates `ReferenceTransport`, a bounded framed

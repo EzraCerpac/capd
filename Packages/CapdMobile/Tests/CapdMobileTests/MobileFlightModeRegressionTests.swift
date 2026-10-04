@@ -127,6 +127,141 @@ func coordinatorCoalescesOverlappingCallsWithTheSameMode(pullOnly: Bool) async t
     #expect(fixture.remote.maximumConcurrent() == 1)
 }
 
+@Test(arguments: [true, false], [true, false])
+func coordinatorCancelsOnlyTheJoinedSameModeCaller(
+    pullOnly: Bool, cancelBeforeStart: Bool
+) async throws {
+    let fixture = try FlightModeFixture(pause: .availability)
+    defer { fixture.clean() }
+    try fixture.store.save(
+        MobileCapture(
+            kind: .text, title: "Owner observation", selection: "Synthetic joined cancellation"))
+    let queued = try fixture.store.pending()
+    let owner = Task { try await fixture.run(pullOnly: pullOnly) }
+    await fixture.adapter.waitUntilPaused()
+    let started = FlightCallerStart()
+    let registration = FlightCallerStart()
+    let observation = FlightCancellationObservation()
+    let joined = Task {
+        if cancelBeforeStart { await registration.wait() }
+        await started.signal()
+        do {
+            return try await fixture.run(pullOnly: pullOnly)
+        } catch {
+            await observation.record(error)
+            throw error
+        }
+    }
+    if cancelBeforeStart {
+        joined.cancel()
+        await registration.signal()
+    }
+    await started.wait()
+    if !cancelBeforeStart {
+        for _ in 0..<20 { await Task.yield() }
+        joined.cancel()
+    }
+    let promptlyCancelled = await observedCancellationWhilePaused(observation)
+    #expect(promptlyCancelled)
+    #expect(await fixture.adapter.count() == 1)
+    #expect(fixture.remote.operations().isEmpty)
+    #expect(fixture.remote.cursors().isEmpty)
+    await fixture.adapter.release()
+    await #expect(throws: CancellationError.self) { try await joined.value }
+    #expect(try await owner.value == .sent(pullOnly ? 0 : 1, rejected: 0))
+    #expect(fixture.remote.operations() == (pullOnly ? [] : queued))
+    #expect(fixture.remote.cursors() == (pullOnly ? [0, 0] : [0, 0, 1]))
+    #expect(try fixture.store.pending() == (pullOnly ? queued : []))
+    #expect(fixture.remote.maximumConcurrent() == 1)
+}
+
+@Test(arguments: [true, false])
+func coordinatorOwnerCancellationStopsTheJoinedSameModeCaller(pullOnly: Bool) async throws {
+    let fixture = try FlightModeFixture(pause: .availability)
+    defer { fixture.clean() }
+    try fixture.store.save(
+        MobileCapture(
+            kind: .text, title: "Cancelled owner", selection: "Synthetic owner cancellation"))
+    let queued = try fixture.store.pending()
+    let owner = Task { try await fixture.run(pullOnly: pullOnly) }
+    await fixture.adapter.waitUntilPaused()
+    let started = FlightCallerStart()
+    let joined = Task {
+        await started.signal()
+        return try await fixture.run(pullOnly: pullOnly)
+    }
+    await started.wait()
+    for _ in 0..<20 { await Task.yield() }
+    owner.cancel()
+    await fixture.adapter.release()
+    await #expect(throws: CancellationError.self) { try await owner.value }
+    await #expect(throws: CancellationError.self) { try await joined.value }
+    #expect(fixture.remote.operations().isEmpty)
+    #expect(fixture.remote.cursors().isEmpty)
+    #expect(try fixture.store.pending() == queued)
+    #expect(try await fixture.coordinator.sync() == .sent(1, rejected: 0))
+    #expect(await fixture.adapter.count() == 2)
+    #expect(fixture.remote.operations() == queued)
+    #expect(fixture.remote.cursors() == [0, 0, 1])
+    #expect(try fixture.store.pending().isEmpty)
+    #expect(fixture.remote.maximumConcurrent() == 1)
+}
+
+@Test(arguments: [true, false])
+func coordinatorCancelsOnlyTheWaitingOppositeModeCaller(ownerPullOnly: Bool) async throws {
+    let fixture = try FlightModeFixture(pause: .availability)
+    defer { fixture.clean() }
+    try fixture.store.save(
+        MobileCapture(
+            kind: .text, title: "Serialized owner", selection: "Synthetic opposite cancellation"))
+    let queued = try fixture.store.pending()
+    let owner = Task { try await fixture.run(pullOnly: ownerPullOnly) }
+    await fixture.adapter.waitUntilPaused()
+    let started = FlightCallerStart()
+    let observation = FlightCancellationObservation()
+    let waiting = Task {
+        await started.signal()
+        do {
+            return try await fixture.run(pullOnly: !ownerPullOnly)
+        } catch {
+            await observation.record(error)
+            throw error
+        }
+    }
+    await started.wait()
+    for _ in 0..<20 { await Task.yield() }
+    waiting.cancel()
+    let promptlyCancelled = await observedCancellationWhilePaused(observation)
+    #expect(promptlyCancelled)
+    #expect(fixture.remote.operations().isEmpty)
+    #expect(fixture.remote.cursors().isEmpty)
+    await fixture.adapter.release()
+    await #expect(throws: CancellationError.self) { try await waiting.value }
+    #expect(try await owner.value == .sent(ownerPullOnly ? 0 : 1, rejected: 0))
+    #expect(await fixture.adapter.count() == 1)
+    #expect(fixture.remote.operations() == (ownerPullOnly ? [] : queued))
+    #expect(fixture.remote.cursors() == (ownerPullOnly ? [0, 0] : [0, 0, 1]))
+    #expect(try fixture.store.pending() == (ownerPullOnly ? queued : []))
+    #expect(fixture.remote.maximumConcurrent() == 1)
+}
+
+private actor FlightCancellationObservation {
+    private var cancelled = false
+    func record(_ error: any Error) { cancelled = error is CancellationError }
+    func wasCancelled() -> Bool { cancelled }
+}
+
+private func observedCancellationWhilePaused(_ observation: FlightCancellationObservation) async
+    -> Bool
+{
+    let deadline = ContinuousClock.now.advanced(by: .seconds(1))
+    while ContinuousClock.now < deadline {
+        if await observation.wasCancelled() { return true }
+        try? await Task.sleep(for: .milliseconds(10))
+    }
+    return await observation.wasCancelled()
+}
+
 private enum FlightPause { case availability, postPushPull, failedApply }
 
 private struct FlightModeFixture: Sendable {
