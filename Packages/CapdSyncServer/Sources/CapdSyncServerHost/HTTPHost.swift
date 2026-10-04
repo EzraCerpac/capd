@@ -1,10 +1,35 @@
+import CapdMCP
 import CapdSync
+import Darwin
 import Foundation
 import HTTPTypes
 import Hummingbird
 import NIOCore
+import ServiceLifecycle
 
 public enum HostHTTP {
+    public static func mcpHeaders(_ fields: HTTPFields) -> [String: String]? {
+        var result: [String: String] = [:]
+        var bytes = 0
+        let sensitive: Set<String> = [
+            "authorization", "content-type", "accept", "origin", "mcp-protocol-version",
+            "mcp-method", "mcp-name",
+        ]
+        for field in fields {
+            let name = field.name.rawName.lowercased()
+            bytes += name.utf8.count + field.value.utf8.count
+            guard bytes <= 16_384 else { return nil }
+            if sensitive.contains(name) {
+                guard result[name] == nil else { return nil }
+                result[name] = field.value
+            }
+        }
+        return result
+    }
+
+    public static func mcpResponse(_ reply: MCPHTTPResponse) -> Response {
+        response(SyncHTTPResponse(status: reply.status, headers: reply.headers, body: reply.body))
+    }
     /// Preserve multiplicity until sensitive headers have been checked.
     public static func headers(_ fields: HTTPFields) -> [String: String]? {
         var result: [String: String] = [:]
@@ -41,9 +66,17 @@ public enum HostHTTP {
         return failure(.unavailable, status: 503)
     }
 
-    public static func run(configurationURL: URL, dataDirectory: URL, port: Int) async throws {
+    public static func run(
+        configurationURL: URL, dataDirectory: URL, port: Int,
+        mcpConfigurationURL: URL? = nil, mcpSocketURL: URL? = nil
+    ) async throws {
+        guard (0...65_535).contains(port),
+            (mcpConfigurationURL == nil) == (mcpSocketURL == nil)
+        else { throw HostError.invalidArguments }
+        if let mcpSocketURL { try MCPUnixSocket.validatePath(mcpSocketURL, mustExist: false) }
         let authority = try Authority(
-            configurationURL: configurationURL, dataDirectory: dataDirectory)
+            configurationURL: configurationURL, dataDirectory: dataDirectory,
+            mcpConfigurationURL: mcpConfigurationURL)
         let admission = Admission()
         let router = Router()
         router.post("/v1/sync") { request, _ -> Response in
@@ -74,6 +107,54 @@ public enum HostHTTP {
                     fflush(stdout)
                 }
             })
-        try await application.runService()
+        guard mcpConfigurationURL != nil else {
+            try await application.runService()
+            return
+        }
+        // Preserve fail-closed startup for existing paths, but allow graceful restarts.
+        defer {
+            if let mcpSocketURL,
+                (try? MCPUnixSocket.validatePath(mcpSocketURL, mustExist: true)) != nil
+            {
+                _ = unlink(mcpSocketURL.path)
+            }
+        }
+        let mcpRouter = Router()
+        mcpRouter.post("/mcp") { request, _ -> Response in
+            let deadline = DispatchTime.now() + .seconds(5)
+            guard let headers = mcpHeaders(request.headers) else {
+                return mcpResponse(MCPWork.failure(400))
+            }
+            guard await admission.acquire() else { return mcpResponse(MCPWork.failure(503)) }
+            let reply: Response
+            do {
+                let buffer = try await request.body.collect(upTo: 65_536)
+                reply = mcpResponse(
+                    await authority.handleMCP(
+                        MCPHTTPRequest(
+                            method: "POST", path: "/mcp", headers: headers,
+                            body: Data(buffer.readableBytesView)), deadline: deadline))
+            } catch {
+                reply = mcpResponse(MCPWork.failure(error is NIOTooManyBytesError ? 413 : 503))
+            }
+            await admission.release()
+            return reply
+        }
+        let mcpApplication = Application(
+            router: mcpRouter,
+            configuration: .init(address: .unixDomainSocket(path: mcpSocketURL!.path)),
+            onServerRunning: { channel in
+                guard (try? MCPUnixSocket.protectBoundSocket(mcpSocketURL!)) != nil else {
+                    FileHandle.standardError.write(
+                        Data("capd-mcp-bridge: socket protection failed\n".utf8))
+                    exit(1)
+                }
+                print("capd-mcp-bridge ready private socket")
+                fflush(stdout)
+            })
+        try await ServiceGroup(
+            services: [application, mcpApplication],
+            gracefulShutdownSignals: [.sigterm, .sigint], logger: application.logger
+        ).run()
     }
 }
