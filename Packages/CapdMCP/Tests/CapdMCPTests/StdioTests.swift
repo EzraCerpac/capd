@@ -58,7 +58,8 @@ final class StdioTests: XCTestCase {
             return MCPHTTPResponse(status: 200, body: reply)
         }
         XCTAssertEqual(bridge.forward(line), reply)
-        XCTAssertEqual(bridge.forward(line), reply)  // No operation/sequence renumbering during exact retry.
+        // No operation/sequence renumbering during exact retry.
+        XCTAssertEqual(bridge.forward(line), reply)
     }
     func testInvalidFramesAndUnknownToolsNeverForward() throws {
         let f = try Fixture()
