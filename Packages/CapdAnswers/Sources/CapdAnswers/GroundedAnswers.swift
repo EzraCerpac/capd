@@ -23,7 +23,8 @@ public enum AnswerAvailability: Sendable, Equatable {
 }
 
 public enum AnswerError: Error, LocalizedError, Equatable {
-    case unavailable(AnswerAvailability.Reason), emptyQuestion, questionTooLong
+    case unavailable(AnswerAvailability.Reason)
+    case emptyQuestion, questionTooLong
     case insufficientEvidence, contextTooLarge, contentRejected, generationFailed
 
     public var errorDescription: String? {
@@ -33,7 +34,8 @@ public enum AnswerError: Error, LocalizedError, Equatable {
         case .questionTooLong: "Keep the question to 500 characters or fewer."
         case .insufficientEvidence:
             "There is not enough matching saved text to answer. Try a specific topic, title, or phrase."
-        case .contextTooLarge: "The matching text is too large for this question. Try a narrower question."
+        case .contextTooLarge:
+            "The matching text is too large for this question. Try a narrower question."
         case .contentRejected: "Apple Intelligence could not answer from this content."
         case .generationFailed: "The on-device model could not finish. Try again."
         }
@@ -61,7 +63,10 @@ public protocol AnswerRetrieving: Sendable {
 public struct NumberedEvidence: Sendable, Equatable {
     public let number: Int
     public let source: AnswerEvidence
-    public init(number: Int, source: AnswerEvidence) { self.number = number; self.source = source }
+    public init(number: Int, source: AnswerEvidence) {
+        self.number = number
+        self.source = source
+    }
 }
 
 public struct AnswerDraft: Sendable, Equatable {
@@ -71,13 +76,19 @@ public struct AnswerDraft: Sendable, Equatable {
     public struct Statement: Sendable, Equatable {
         public let text: String
         public let citations: [Citation]
-        public init(text: String, citations: [Citation]) { self.text = text; self.citations = citations }
+        public init(text: String, citations: [Citation]) {
+            self.text = text
+            self.citations = citations
+        }
     }
 
     public struct Citation: Sendable, Equatable {
         public let number: Int
         public let quote: String
-        public init(number: Int, quote: String) { self.number = number; self.quote = quote }
+        public init(number: Int, quote: String) {
+            self.number = number
+            self.quote = quote
+        }
     }
 }
 
@@ -101,7 +112,9 @@ public struct GroundedAnswerService: Sendable {
     private let retriever: any AnswerRetrieving
     private let model: any AnswerGenerating
 
-    public init(retriever: any AnswerRetrieving, model: any AnswerGenerating = OnDeviceAnswerModel()) {
+    public init(
+        retriever: any AnswerRetrieving, model: any AnswerGenerating = OnDeviceAnswerModel()
+    ) {
         self.retriever = retriever
         self.model = model
     }
@@ -136,7 +149,8 @@ public struct GroundedAnswerService: Sendable {
                     previous.score += score
                     candidates[evidence.id] = previous
                 } else {
-                    candidates[evidence.id] = Candidate(evidence: evidence, matches: 1, score: score)
+                    candidates[evidence.id] = Candidate(
+                        evidence: evidence, matches: 1, score: score)
                 }
             }
         }
@@ -149,13 +163,17 @@ public struct GroundedAnswerService: Sendable {
         var sources: [NumberedEvidence] = []
         for candidate in ranked {
             guard sources.count < Self.sourceLimit, remaining > 0 else { break }
-            let excerpt = String(Self.normalized(candidate.evidence.excerpt)
-                .prefix(min(Self.excerptLimit, remaining)))
+            let excerpt = String(
+                Self.normalized(candidate.evidence.excerpt)
+                    .prefix(min(Self.excerptLimit, remaining)))
             guard !excerpt.isEmpty else { continue }
             remaining -= excerpt.count
-            sources.append(.init(number: sources.count + 1, source: .init(
-                id: candidate.evidence.id,
-                title: String(candidate.evidence.title.prefix(160)), excerpt: excerpt)))
+            sources.append(
+                .init(
+                    number: sources.count + 1,
+                    source: .init(
+                        id: candidate.evidence.id,
+                        title: String(candidate.evidence.title.prefix(160)), excerpt: excerpt)))
         }
         guard !sources.isEmpty else { throw AnswerError.insufficientEvidence }
         try Task.checkCancellation()
@@ -163,7 +181,8 @@ public struct GroundedAnswerService: Sendable {
         try Task.checkCancellation()
         let byNumber = Dictionary(uniqueKeysWithValues: sources.map { ($0.number, $0.source) })
         var seenStatements = Set<String>()
-        let statements = draft.statements.prefix(6).compactMap { statement -> AnswerDraft.Statement? in
+        let statements = draft.statements.prefix(6).compactMap {
+            statement -> AnswerDraft.Statement? in
             let text = statement.text.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !text.isEmpty, text.count <= 800, !statement.citations.isEmpty,
                 statement.citations.count <= 6
@@ -186,20 +205,25 @@ public struct GroundedAnswerService: Sendable {
         }
         guard !statements.isEmpty else { throw AnswerError.insufficientEvidence }
         let cited = Set(statements.flatMap { $0.citations.map(\.number) })
-        return GroundedAnswer(question: question, statements: statements,
+        return GroundedAnswer(
+            question: question, statements: statements,
             sources: sources.filter { cited.contains($0.number) })
     }
 
     public static func searchTerms(_ question: String) -> [String] {
-        let stop: Set<String> = ["a", "an", "and", "are", "as", "at", "be", "by", "can", "did", "do",
+        let stop: Set<String> = [
+            "a", "an", "and", "are", "as", "at", "be", "by", "can", "did", "do",
             "does", "for", "from", "has", "have", "how", "i", "in", "is", "it", "me", "my", "of",
             "on", "or", "saved", "source", "sources", "that", "the", "these", "this", "to", "was",
-            "were", "what", "when", "where", "which", "who", "why", "with", "about"]
+            "were", "what", "when", "where", "which", "who", "why", "with", "about",
+        ]
         var seen = Set<String>()
-        return Array(question.lowercased().split { !$0.isLetter && !$0.isNumber }.compactMap {
-            let term = String($0)
-            return term.count > 1 && !stop.contains(term) && seen.insert(term).inserted ? term : nil
-        }.prefix(8))
+        return Array(
+            question.lowercased().split { !$0.isLetter && !$0.isNumber }.compactMap {
+                let term = String($0)
+                return term.count > 1 && !stop.contains(term) && seen.insert(term).inserted
+                    ? term : nil
+            }.prefix(8))
     }
 
     static func normalized(_ text: String) -> String {
