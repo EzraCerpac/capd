@@ -23,7 +23,6 @@
 		6D4EFE435E074F287D0BDD98 /* CapdAnswers in Frameworks */ = {isa = PBXBuildFile; productRef = 268DFFA386157C3FD1CCE14B /* CapdAnswers */; };
 		857B4C557D98AD42C4A571DE /* FixtureApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1FDFF150E743ED04B890284D /* FixtureApp.swift */; };
 		8DD132EE0D57E0BD15EE54DC /* MobileEnvironment.swift in Sources */ = {isa = PBXBuildFile; fileRef = 13F4FF7B0C75828DD365DEC9 /* MobileEnvironment.swift */; };
-		9FF2F17A92CF206A7F108519 /* CombinedDiscoveryUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 29D834ADC6552BB57577A894 /* CombinedDiscoveryUITests.swift */; };
 		A72820FC04EAAEC2824C1670 /* CapdPhoneApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1F0C6E75A20B69503EC36647 /* CapdPhoneApp.swift */; };
 		A8AF32E151A2E041CF58FF47 /* CapdMobile in Frameworks */ = {isa = PBXBuildFile; productRef = BF7A41DAA9F141D8653E525D /* CapdMobile */; };
 		A9C1113E9F0934DC3DE3AC9E /* CaptureUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C8859FFD24300A1B57DABA40 /* CaptureUITests.swift */; };
@@ -75,7 +74,6 @@
 		1FDFF150E743ED04B890284D /* FixtureApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FixtureApp.swift; sourceTree = "<group>"; };
 		283660568CC4584299338273 /* CapdMobile */ = {isa = PBXFileReference; lastKnownFileType = folder; name = CapdMobile; path = ../Packages/CapdMobile; sourceTree = SOURCE_ROOT; };
 		289D50F35CCEED0C7513C6CB /* CapdPhoneShare.appex */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = "wrapper.app-extension"; path = CapdPhoneShare.appex; sourceTree = BUILT_PRODUCTS_DIR; };
-		29D834ADC6552BB57577A894 /* CombinedDiscoveryUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CombinedDiscoveryUITests.swift; sourceTree = "<group>"; };
 		2EB24A1344CA7429A48C3120 /* LibraryConnectionUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LibraryConnectionUITests.swift; sourceTree = "<group>"; };
 		3117EC257394B3A35E8761D2 /* ShareViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShareViewController.swift; sourceTree = "<group>"; };
 		32762262D1FFE01581CD631F /* AskLibraryView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AskLibraryView.swift; sourceTree = "<group>"; };
@@ -206,7 +204,6 @@
 				963ED718B6457F1BAA285920 /* AnswersUITests.swift */,
 				9D8EC38C1A1EB29623CFB32C /* AutomaticSyncUITests.swift */,
 				C8859FFD24300A1B57DABA40 /* CaptureUITests.swift */,
-				29D834ADC6552BB57577A894 /* CombinedDiscoveryUITests.swift */,
 				2EB24A1344CA7429A48C3120 /* LibraryConnectionUITests.swift */,
 				5C57E4197CB2EFB87AA2E7EE /* QuietUXUITests.swift */,
 				0E857836222DA75C81B45803 /* StylingUITests.swift */,
@@ -386,7 +383,6 @@
 				D43CD3E325BA61EBF33BCC55 /* AnswersUITests.swift in Sources */,
 				AD0D2BA687DA2A92D9E71A5F /* AutomaticSyncUITests.swift in Sources */,
 				A9C1113E9F0934DC3DE3AC9E /* CaptureUITests.swift in Sources */,
-				9FF2F17A92CF206A7F108519 /* CombinedDiscoveryUITests.swift in Sources */,
 				664358DA0C16D562FEF5674F /* LibraryConnectionUITests.swift in Sources */,
 				595C6033F433E46DF5547627 /* QuietUXUITests.swift in Sources */,
 				55B5BC98FAAB1F3D0D65981D /* StylingUITests.swift in Sources */,
