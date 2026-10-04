@@ -27,17 +27,26 @@ build was tested.
 
 ## Evidence
 
-Questions are limited to 500 characters. Up to eight significant terms yield at
-most nine local searches, each capped at twelve hits. Retrieval ranks FTS matches
-with BM25 and uses tokenizer-consistent snippets from saved title, selection,
-note, body or OCR text. Tags alone are not evidence.
+Questions are limited to 500 characters. Natural Language word segmentation
+selects up to eight significant terms, yielding at most nine local searches,
+each capped at twelve hits. Retrieval keeps BM25-ranked FTS matches first. For
+terms containing non-ASCII letters, a parameterized literal search of saved text
+fills remaining candidate slots when the SQLite tokenizer cannot match inside a
+continuous sentence. This fallback scans stored text; its result count is
+bounded, but its scan cost grows with the library. It does not change the index
+or promise recall for every language.
+
+Evidence combines matching passages from saved selection, note, body and OCR
+text, retaining passages found by later queries for the same capture. Title-only
+matches retain a prose fallback. Tags alone are not evidence.
 
 The service deduplicates captures, chooses at most six sources, and limits each
 excerpt to 1,000 characters and total excerpts to 5,000. Structured answers must
 cite supplied source numbers and quote text present in the corresponding excerpt.
 Unsupported citations or insufficient evidence produce a clear failure message.
 Quote membership does not establish semantic entailment; the UI presents the
-supporting quotes and opens the saved-source detail for review.
+supporting quotes and opens the saved-source detail, including recognized image
+text, for review.
 
 The reader opens only after the user asks and resolves the current selected
 configuration. A stale generation fails through the activation fence. Navigation
@@ -50,8 +59,9 @@ retrieval protocol; `LibraryView` presents the Ask sheet. The Mac retains its
 existing local answer implementation.
 
 Synthetic unit tests cover bounds, unavailable models without reads, quote/source
-validation, cancellation, FTS stemming and BM25 ranking, unchanged outbox/content,
-and missing-database refusal. UI fixtures are included separately and require an
+validation, cancellation, FTS stemming and BM25 ranking, mid-sentence Japanese
+and Chinese matching, combined prose fields, unchanged outbox/content, and
+missing-database refusal. UI fixtures are included separately and require an
 explicit simulator run; an unsigned simulator build verifies compilation.
 
 The DEBUG simulator-only `--capd-synthetic-citation` fixture accepts only synthetic
