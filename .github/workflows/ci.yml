@@ -18,6 +18,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
 
       # swift-format's default rules drift between toolchain minors, so an
@@ -35,24 +36,39 @@ jobs:
 
   build-test:
     runs-on: macos-26
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
         with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
 
-      - name: Select Xcode 26.3
-        run: sudo xcode-select -s /Applications/Xcode_26.3.app
+      # Foundation Models token budgeting needs SDK 26.4; this stable Xcode is
+      # installed on macos-26. Lint keeps its existing formatter version.
+      - name: Select Xcode 26.4.1
+        run: sudo xcode-select -s /Applications/Xcode_26.4.1.app
 
-      - name: Report toolchain
-        run: swift --version
+      - name: Verify source and report toolchain
+        env:
+          EXPECTED_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SOURCE_SHA"
+          git rev-parse HEAD
+          xcodebuild -version
+          swift --version
+          xcrun --sdk macosx --show-sdk-version
 
       - uses: actions/cache@v6
         with:
           path: .build
-          key: spm-debug-${{ github.event.repository.name }}-${{ runner.os }}-${{ hashFiles('Package.resolved') }}
+          key: spm-debug-xcode-26.4.1-${{ github.event.repository.name }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Package.resolved', 'Packages/**/Package.resolved') }}
           restore-keys: |
-            spm-debug-${{ github.event.repository.name }}-${{ runner.os }}-
-            spm-${{ github.event.repository.name }}-${{ runner.os }}-
+            spm-debug-xcode-26.4.1-${{ github.event.repository.name }}-${{ runner.os }}-${{ runner.arch }}-
+
+      - name: Build Mac app and share extension
+        run: |
+          swift build --product CapdApp --jobs 4
+          swift build --product CapdShareExtension --jobs 4
 
       - name: Build HTTP integration fixture
         run: |
@@ -77,6 +93,46 @@ jobs:
             fi
           done
 
+  ios-simulator:
+    runs-on: macos-26
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+
+      - name: Select Xcode 26.4.1
+        if: hashFiles('iOS/project.yml') != ''
+        run: sudo xcode-select -s /Applications/Xcode_26.4.1.app
+
+      - name: Verify source and report toolchain
+        if: hashFiles('iOS/project.yml') != ''
+        env:
+          EXPECTED_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SOURCE_SHA"
+          git rev-parse HEAD
+          xcodebuild -version
+          swift --version
+          xcrun --sdk iphonesimulator --show-sdk-version
+
+      - name: Install XcodeGen
+        if: hashFiles('iOS/project.yml') != ''
+        run: brew install xcodegen
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: "1"
+
+      - name: Build unsigned iOS simulator app and share extension
+        if: hashFiles('iOS/project.yml') != ''
+        run: |
+          xcodegen generate --spec iOS/project.yml
+          xcodebuild -project iOS/CapdPhone.xcodeproj -scheme CapdPhone \
+            -configuration Debug -sdk iphonesimulator \
+            -destination 'generic/platform=iOS Simulator' \
+            -derivedDataPath "$RUNNER_TEMP/capd-ios-derived-data" \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO build
+
   raycast:
     runs-on: ubuntu-latest
     defaults:
@@ -85,6 +141,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
 
       - uses: actions/setup-node@v6
@@ -111,18 +168,18 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
 
-      - name: Select Xcode 26.3
-        run: sudo xcode-select -s /Applications/Xcode_26.3.app
+      - name: Select Xcode 26.4.1
+        run: sudo xcode-select -s /Applications/Xcode_26.4.1.app
 
       - uses: actions/cache@v6
         with:
           path: .build
-          key: spm-release-${{ github.event.repository.name }}-${{ runner.os }}-${{ hashFiles('Package.resolved') }}
+          key: spm-release-xcode-26.4.1-${{ github.event.repository.name }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Package.resolved', 'Packages/**/Package.resolved') }}
           restore-keys: |
-            spm-release-${{ github.event.repository.name }}-${{ runner.os }}-
-            spm-${{ github.event.repository.name }}-${{ runner.os }}-
+            spm-release-xcode-26.4.1-${{ github.event.repository.name }}-${{ runner.os }}-${{ runner.arch }}-
 
       # The perf gate only means something against optimized code, and its timing
       # assertions need the box to itself, so it runs serial in its own job.
