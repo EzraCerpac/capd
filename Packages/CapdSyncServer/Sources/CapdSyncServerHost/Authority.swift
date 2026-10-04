@@ -4,12 +4,14 @@ import Foundation
 
 /// Synchronous SQLite/file work runs on one dedicated queue, never on a NIO event loop.
 public final class Authority: @unchecked Sendable {
+    static let maximumCachedLibraries = 16
     private let queue = DispatchQueue(label: "capd.sync.authority")
     private let dataDirectory: URL
     private let serviceID: UUID
     private let authorizer: ConfigurationAuthorizer
     private let lockDescriptor: Int32
     private var servers: [UUID: SyncServer] = [:]
+    private var recentlyUsedLibraries: [UUID] = []
 
     public init(configurationURL: URL, dataDirectory: URL) throws {
         let configuration = try HostConfiguration.read(configurationURL)
@@ -31,7 +33,14 @@ public final class Authority: @unchecked Sendable {
             queue.async { [self] in
                 let handler = SyncHTTPHandler(serviceID: serviceID, authorizer: authorizer) {
                     [self] id in
-                    if let existing = servers[id] { return existing }
+                    if let existing = servers[id] {
+                        recentlyUsedLibraries.removeAll { $0 == id }
+                        recentlyUsedLibraries.append(id)
+                        return existing
+                    }
+                    if servers.count == Self.maximumCachedLibraries {
+                        servers.removeValue(forKey: recentlyUsedLibraries.removeFirst())
+                    }
                     let root = dataDirectory.appendingPathComponent(
                         id.uuidString.lowercased(), isDirectory: true)
                     try Self.validateStoragePath(root, directory: true)
@@ -48,9 +57,18 @@ public final class Authority: @unchecked Sendable {
                         blobDirectory: root.appendingPathComponent("blobs", isDirectory: true),
                         libraryID: id, serviceID: serviceID)
                     servers[id] = server
+                    recentlyUsedLibraries.append(id)
                     return server
                 }
                 continuation.resume(returning: handler.handle(request))
+            }
+        }
+    }
+
+    func cachedLibraryIDs() async -> [UUID] {
+        await withCheckedContinuation { continuation in
+            queue.async { [self] in
+                continuation.resume(returning: recentlyUsedLibraries)
             }
         }
     }
@@ -99,9 +117,17 @@ public final class Authority: @unchecked Sendable {
             }
         }
         let fd = open(
-            directory.appendingPathComponent(".server.lock").path, O_CREAT | O_RDWR | O_NOFOLLOW,
+            directory.appendingPathComponent(".server.lock").path,
+            O_CREAT | O_RDWR | O_NOFOLLOW | O_NONBLOCK,
             0o600)
         guard fd >= 0 else { throw HostError.invalidDataDirectory }
+        var status = stat()
+        guard fstat(fd, &status) == 0, status.st_mode & S_IFMT == S_IFREG,
+            status.st_size == 0, status.st_nlink == 1
+        else {
+            close(fd)
+            throw HostError.invalidDataDirectory
+        }
         guard flock(fd, LOCK_EX | LOCK_NB) == 0 else {
             close(fd)
             throw HostError.invalidDataDirectory

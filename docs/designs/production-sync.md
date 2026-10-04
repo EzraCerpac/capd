@@ -94,8 +94,9 @@ creation. Rejected database enrollment occurs before a new blob ownership marker
 written. Initialization fails closed if the marker is corrupt or its creation is
 interrupted. Database and blob-root enrollment are not one atomic filesystem
 transaction; failed new enrollment may require restoring the correctly paired storage.
-The host owns one authority/BlobStore instance per library and must not reuse existing
-unbound handles during enrollment.
+The host caches at most 16 authority/BlobStore instances, evicting the least recently
+used library before opening another. Evicted libraries reopen their durable state on
+the next authorized request. It must not reuse existing unbound handles during enrollment.
 
 ## Integration still required
 
