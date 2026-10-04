@@ -141,11 +141,20 @@ struct PhoneReconciliationTests {
         imported.revision = 1
         imported.seenCount = 7
         let payload = try JSONEncoder().encode(imported)
+        let blob = imported.source.kind == .image ? imported.source.blob : nil
         let db = try DatabaseQueue(path: url.path)
         try db.write { db in
             try db.execute(
-                sql: "INSERT INTO sync_records VALUES (?,?)",
-                arguments: [record.id.uuidString, payload])
+                sql: """
+                    INSERT INTO sync_records
+                    (id, payload, source_kind, content_hash, blob_digest, blob_byte_count)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                arguments: [
+                    record.id.uuidString, payload, imported.source.kind.rawValue,
+                    imported.source.contentHash?.precomposedStringWithCanonicalMapping,
+                    blob?.digest, blob?.byteCount,
+                ])
             try db.execute(sql: "UPDATE sync_meta SET cursor=1,floor=1")
         }
         return server
