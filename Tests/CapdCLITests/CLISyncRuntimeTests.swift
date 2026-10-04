@@ -7,6 +7,20 @@ import Testing
 
 @Suite("CLI bound Mac runtime", .timeLimit(.minutes(1)))
 struct CLISyncRuntimeTests {
+    @Test func unavailableSyncStoreUsesDocumentedExitCode() throws {
+        try withScratchRoot { root in
+            let paths = StoragePaths(root: root)
+            try paths.createDirectories()
+            try Data("not a database".utf8).write(to: paths.databaseURL)
+            for command in ["status", "run"] {
+                let result = try capd(["sync", command], root: root)
+                #expect(result.status == 3)
+                #expect(result.stderr.contains("store is unavailable"))
+                #expect(result.stdout.isEmpty)
+            }
+        }
+    }
+
     @Test func partialWriteErrorsFlushBeforeReturningTheirExitCode() throws {
         try withScratchRoot { root in
             let paths = StoragePaths(root: root)
@@ -99,11 +113,17 @@ struct CLISyncRuntimeTests {
                 deviceID: UUID())
             try MacSyncConfiguration(enrollment: enrollment, enabled: false).install(paths: paths)
             #expect(try capd(["add", "Must not fall back"], root: root).status == 3)
+            for command in ["status", "run"] {
+                #expect(try capd(["sync", command], root: root).status == 3)
+            }
             #expect(try SearchService(store: local).totalCaptureCount() == 0)
             let unsafe =
                 "{\"version\":1,\"endpoint\":\"http://127.0.0.1:1234/v1/sync\",\"binding\":{\"libraryID\":\"\(binding.libraryID)\",\"serviceID\":\"\(binding.serviceID)\"},\"deviceID\":\"\(enrollment.deviceID)\",\"enabled\":false}"
             try Data(unsafe.utf8).write(to: MacSyncConfiguration.url(paths: paths))
             #expect(try capd(["add", "Unsafe endpoint"], root: root).status == 3)
+            for command in ["status", "run"] {
+                #expect(try capd(["sync", command], root: root).status == 3)
+            }
             #expect(try SearchService(store: local).totalCaptureCount() == 0)
         }
     }

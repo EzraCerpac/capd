@@ -11,7 +11,7 @@ struct Sync: ParsableCommand {
         static let configuration = CommandConfiguration(
             abstract: "Show local sync state without network access.")
         func run() throws {
-            let session = try MacLibrarySession.open(paths: .live)
+            let session = try openLibrarySession()
             let status = blocking {
                 if let runtime = session.runtime { return await runtime.status() }
                 return MacSyncStatus.localOnly
@@ -24,7 +24,7 @@ struct Sync: ParsableCommand {
         static let configuration = CommandConfiguration(
             abstract: "Synchronize saved changes and remote captures.")
         func run() throws {
-            let session = try MacLibrarySession.open(paths: .live)
+            let session = try openLibrarySession()
             guard let runtime = session.runtime else {
                 throw CLIError(message: "Sync is not configured for this library.", code: 3)
             }

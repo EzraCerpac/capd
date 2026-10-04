@@ -151,7 +151,10 @@ enum StoreSync {
                 capture.enrichmentState = keepPending ? .pending : isThin ? .thin : .ok
                 capture.bodyStatus = isThin ? .thin : .ok
             case .image where record.generated.ocrText != nil:
-                capture.enrichmentState = .ok
+                let keepPending =
+                    capture.enrichmentState == .pending
+                    && original?.ocrText == record.generated.ocrText
+                capture.enrichmentState = keepPending ? .pending : .ok
             case .link where original?.body != nil:
                 capture.enrichmentState = .pending
                 capture.bodyStatus = .none

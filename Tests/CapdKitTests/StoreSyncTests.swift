@@ -677,6 +677,45 @@ struct StoreSyncTests {
         }
     }
 
+    @Test("Unchanged remote OCR preserves a requested refresh")
+    func unchangedOCRPreservesRefresh() throws {
+        try fixture { paths, binding, server in
+            let store = try Store(paths: paths, syncBinding: binding)
+            let client = try #require(store.syncClient)
+            let transport = StoreTestTransport(
+                server: server, binding: binding, deviceID: client.deviceID)
+            let remoteDevice = UUID()
+            let bytes = Data("Synthetic OCR image".utf8)
+            let blob = BlobReference(data: bytes)
+            try server.upload(blob, offset: 0, chunk: bytes, final: true)
+            var record = SharedCapture(source: CaptureSource(kind: .image, blob: blob))
+            record.generated = GeneratedContent(ocrText: "Existing OCR")
+            _ = try server.apply(
+                SyncOperation(
+                    deviceID: remoteDevice, sequence: 1, captureID: record.id,
+                    baseRevision: 0, mutation: .create(record)))
+            try client.pull(from: transport)
+            let local = try #require(try store.reader.read { try Capture.fetchOne($0) })
+            #expect(try store.requeueCaptures(ids: [local.id!]) == 1)
+            try client.pull(from: transport)
+            #expect(
+                try SearchService(store: store).capture(id: local.id!)?.enrichmentState == .pending)
+            _ = try server.apply(
+                SyncOperation(
+                    deviceID: remoteDevice, sequence: 2, captureID: record.id,
+                    baseRevision: 1,
+                    mutation: .edit(
+                        CaptureEdit(generatedPatch: GeneratedContentPatch(ocrText: .set("New OCR")))
+                    )
+                ))
+            try client.pull(from: transport)
+            #expect(try SearchService(store: store).capture(id: local.id!)?.enrichmentState == .ok)
+            #expect(try store.requeueCaptures(ids: [local.id!]) == 1)
+            try client.pull(from: transport)
+            #expect(try store.claimForEnrichment(id: local.id!) != nil)
+        }
+    }
+
     @Test("Remote content clears requeue terminal captures while retaining active claims")
     func clearedContentRequeues() throws {
         try fixture { paths, binding, _ in

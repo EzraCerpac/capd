@@ -31,11 +31,21 @@ func printToStderr(_ line: String) {
 }
 
 func openStore(readOnly: Bool = false) throws -> Store {
-    do {
-        if readOnly { return try MacLibrarySession.readOnlyStore(paths: .live) }
-        let session = try MacLibrarySession.open(paths: .live)
+    if !readOnly {
+        let session = try openLibrarySession()
         CLISyncSessions.remember(session)
         return session.store
+    }
+    do {
+        return try MacLibrarySession.readOnlyStore(paths: .live)
+    } catch {
+        throw CLIError(message: "The capture store is unavailable: \(describe(error))", code: 3)
+    }
+}
+
+func openLibrarySession() throws -> MacLibrarySession {
+    do {
+        return try MacLibrarySession.open(paths: .live)
     } catch {
         throw CLIError(message: "The capture store is unavailable: \(describe(error))", code: 3)
     }

@@ -6,6 +6,7 @@ import SQLite3
 public enum StoreError: Error, Equatable {
     /// The file on disk was written by a newer build of Capd than this one.
     case databaseIsNewerThanApp
+    case databaseNeedsMigration
 }
 
 public enum RatingError: Error, Equatable, Sendable {
@@ -26,6 +27,8 @@ extension StoreError: LocalizedError {
         switch self {
         case .databaseIsNewerThanApp:
             "The capture database was written by a newer version of Capd."
+        case .databaseNeedsMigration:
+            "The capture database needs an upgrade. Run `capd list` or open the Capd app, then retry."
         }
     }
 }
@@ -67,6 +70,9 @@ public final class Store: Sendable {
         syncClient = nil
         if try dbPool.read(Migrations.migrator.hasBeenSuperseded) {
             throw StoreError.databaseIsNewerThanApp
+        }
+        if try !dbPool.read(Migrations.migrator.hasCompletedMigrations) {
+            throw StoreError.databaseNeedsMigration
         }
     }
 

@@ -1,11 +1,38 @@
 import Foundation
+import GRDB
 import Testing
+
+@testable import CapdKit
 
 /// One scripted MCP session against a live `capd mcp` process. Each response is read
 /// before the next request is sent: the stdio transport stops at EOF without draining
 /// what is still buffered, so a fire-everything-then-close script loses replies.
 @Suite("capd mcp", .timeLimit(.minutes(1)))
 struct CLIMcpTests {
+    @Test("Pending migrations fail at startup with an actionable error", arguments: ["003", "004"])
+    func pendingMigrations(version: String) throws {
+        try withScratchRoot { root in
+            let paths = StoragePaths(root: root)
+            try paths.createDirectories()
+            let database = try DatabaseQueue(path: paths.databaseURL.path)
+            try Migrations.migrator.migrate(database, upTo: version)
+            try database.write { db in
+                try db.execute(
+                    sql: """
+                        INSERT INTO captures (kind, selection, created_at, updated_at, last_seen_at)
+                        VALUES ('text', 'Migration kestrel', ?, ?, ?)
+                        """, arguments: [Date(), Date(), Date()])
+            }
+            let result = try capd(["mcp"], root: root)
+            #expect(result.status == 3)
+            #expect(result.stderr.contains("capd list"))
+            #expect(result.stdout.isEmpty)
+            #expect(try database.read(Migrations.migrator.completedMigrations).last == version)
+            #expect(try capd(["list"], root: root).status == 0)
+            #expect(try capd(["mcp"], root: root).status == 0)
+        }
+    }
+
     @Test("Tools round-trip over MCP stdio")
     func stdioSession() throws {
         try withScratchRoot { root in
