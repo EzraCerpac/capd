@@ -6,12 +6,14 @@ import os
 @testable import CapdSystemIntegration
 
 struct CoreSpotlightSmokeTests {
-    @Test @MainActor func namedIndexUsesCompleteProtection() {
-        let backend = CoreSpotlightBackend(name: "dev.jxd.capd.synthetic.\(UUID().uuidString)")
-        if #available(iOS 27, macOS 27, *) {
-            #expect(backend.protectionClass == .complete)
+    #if compiler(>=6.4)
+        @Test @MainActor func namedIndexUsesCompleteProtection() {
+            let backend = CoreSpotlightBackend(name: "dev.jxd.capd.synthetic.\(UUID().uuidString)")
+            if #available(iOS 27, macOS 27, *) {
+                #expect(backend.protectionClass == .complete)
+            }
         }
-    }
+    #endif
 
     @Test(
         .enabled(if: ProcessInfo.processInfo.environment["CAPD_SPOTLIGHT_SYNTHETIC_SMOKE"] == "1"))

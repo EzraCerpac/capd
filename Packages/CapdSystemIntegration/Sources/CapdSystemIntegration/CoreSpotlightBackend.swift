@@ -10,8 +10,10 @@ public final class CoreSpotlightBackend: SpotlightBackend {
         index = CSSearchableIndex(name: name, protectionClass: .complete)
     }
 
-    @available(iOS 27, macOS 27, *)
-    var protectionClass: FileProtectionType { index.protectionClass }
+    #if compiler(>=6.4)
+        @available(iOS 27, macOS 27, *)
+        var protectionClass: FileProtectionType { index.protectionClass }
+    #endif
 
     public static func item(_ capture: SearchCapture, domain: String) -> CSSearchableItem {
         let attributes = CSSearchableItemAttributeSet(contentType: .text)

@@ -53,6 +53,12 @@ executable build does not establish signed-app shortcut discovery.
 
 ## Validation
 
+Local compilation and tests use Xcode 27 / Swift 6.4. No older SDK is installed in
+this environment. The SDK 27-only protection-class diagnostic getter and its
+entire test declaration are guarded by `compiler(>=6.4)`; Swift 6.2 builds omit
+that diagnostic. The normal named-index initializer still requests `.complete`
+on all supported toolchains. CI's Xcode 26.3 selection is unchanged.
+
 Unit tests use an in-memory index and synthetic fixtures. The opt-in `CAPD_SPOTLIGHT_SYNTHETIC_SMOKE=1` test uses a newly generated `dev.jxd.capd.synthetic.<UUID>` named index/domain, donates one synthetic item, queries only that domain, and deletes that domain. It catches errors and attempts scoped cleanup. Normal tests skip this system write test.
 
 ```sh
