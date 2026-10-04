@@ -33,6 +33,53 @@ struct AdministrationTests {
         }
     }
 
+    @Test func legacyBoundAuthorityIsRejectedWithoutMigratingIt() throws {
+        let f = try Fixture()
+        defer { f.clean() }
+        let record = SharedCapture(source: CaptureSource(kind: .text, selection: "legacy"))
+        _ = try f.server().apply(
+            SyncOperation(
+                deviceID: UUID(), sequence: 1, captureID: record.id,
+                baseRevision: 0, mutation: .create(record)))
+        let db = try DatabaseQueue(path: f.database.path)
+        try db.write {
+            try $0.execute(
+                sql: """
+                    DROP INDEX sync_records_identity;
+                    ALTER TABLE sync_records RENAME TO sync_records_current;
+                    CREATE TABLE sync_records (id TEXT PRIMARY KEY, payload BLOB NOT NULL);
+                    INSERT INTO sync_records (id, payload)
+                    SELECT id, payload FROM sync_records_current;
+                    DROP TABLE sync_records_current;
+                    """)
+        }
+        let legacyColumns = try db.read { try $0.columns(in: "sync_records").map(\.name) }
+        let legacyIDs = try db.read {
+            try String.fetchAll($0, sql: "SELECT id FROM sync_records ORDER BY id")
+        }
+        let legacyPayloads = try db.read {
+            try Data.fetchAll($0, sql: "SELECT payload FROM sync_records ORDER BY id")
+        }
+
+        #expect(throws: AdministrationError.invalidAuthority) { try f.admin() }
+        #expect(try db.read { try $0.columns(in: "sync_records").map(\.name) } == legacyColumns)
+        #expect(
+            try db.read {
+                try String.fetchAll($0, sql: "SELECT id FROM sync_records ORDER BY id")
+            } == legacyIDs)
+        #expect(
+            try db.read {
+                try Data.fetchAll($0, sql: "SELECT payload FROM sync_records ORDER BY id")
+            } == legacyPayloads)
+        #expect(
+            try db.read {
+                try String.fetchOne(
+                    $0,
+                    sql: "SELECT name FROM sqlite_master WHERE type = 'index' AND name = ?",
+                    arguments: ["sync_records_identity"])
+            } == nil)
+    }
+
     @Test func resourceBoundsAndUnsafeBlobIdentifiersRefuseBeforeAssetReads() throws {
         for fault in ["count", "total", "path", "size"] {
             let f = try Fixture(image: true)

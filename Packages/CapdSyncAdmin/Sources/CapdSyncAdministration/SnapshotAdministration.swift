@@ -78,6 +78,23 @@ public final class SnapshotAdministration {
                         throw AdministrationError.invalidAuthority
                     }
                 }
+                let recordColumns = Set(try db.columns(in: "sync_records").map(\.name))
+                guard
+                    Set([
+                        "id", "payload", "source_kind", "content_hash", "blob_digest",
+                        "blob_byte_count",
+                    ]).isSubset(of: recordColumns),
+                    let identityTable = try String.fetchOne(
+                        db,
+                        sql: "SELECT tbl_name FROM sqlite_master WHERE type = 'index' AND name = ?",
+                        arguments: ["sync_records_identity"]), identityTable == "sync_records",
+                    try String.fetchAll(
+                        db,
+                        sql:
+                            "SELECT name FROM pragma_index_info('sync_records_identity') ORDER BY seqno"
+                    )
+                        == ["source_kind", "content_hash", "blob_digest", "blob_byte_count", "id"]
+                else { throw AdministrationError.invalidAuthority }
                 let stored = try Data.fetchOne(
                     db, sql: "SELECT payload FROM sync_binding WHERE id = 1")
                 guard let stored,
