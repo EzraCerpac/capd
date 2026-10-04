@@ -3,6 +3,7 @@ import GRDB
 
 /// A single-library authority. HTTP access requires an immutable libraryID.
 public final class SyncServer: SyncTransport, Sendable {
+    public enum NoteResolutionError: Error { case capacity, unavailable, stale }
     private let writer: any DatabaseWriter
     private let binding: SyncLibraryBinding?
     public let blobs: BlobStore
@@ -90,13 +91,18 @@ public final class SyncServer: SyncTransport, Sendable {
         }
     }
 
-    public func apply(_ operation: SyncOperation, servicePrincipalID: String?) throws -> SyncReceipt
-    {
-        try apply(operation, servicePrincipalID: servicePrincipalID, validating: { _, _, _ in })
+    public func apply(
+        _ operation: SyncOperation, servicePrincipalID: String?,
+        requireExactNoteResolution: Bool = false
+    ) throws -> SyncReceipt {
+        try apply(
+            operation, servicePrincipalID: servicePrincipalID,
+            requireExactNoteResolution: requireExactNoteResolution, validating: { _, _, _ in })
     }
 
     func apply(
         _ operation: SyncOperation, servicePrincipalID: String? = nil,
+        requireExactNoteResolution: Bool = false,
         validating validate: (Database, SyncReceipt, FeedChange?) throws -> Void
     ) throws -> SyncReceipt {
         try write { db in
@@ -155,6 +161,15 @@ public final class SyncServer: SyncTransport, Sendable {
             }
             let cursor = try Int64.fetchOne(db, sql: "SELECT cursor FROM sync_meta")! + 1
             var record = try SyncDatabase.record(db, id: id)
+            if requireExactNoteResolution {
+                guard case .edit(let edit) = operation.mutation, let note = edit.note,
+                    let current = record, !current.deleted
+                else { throw NoteResolutionError.unavailable }
+                guard current.noteConflicts.count <= 20 else { throw NoteResolutionError.capacity }
+                guard Set(note.resolving) == Set(current.noteConflicts.map(\.operationID)),
+                    operation.baseRevision >= current.noteRevision
+                else { throw NoteResolutionError.stale }
+            }
             var outcome: SyncReceipt.Outcome = .accepted
             var changed = false
             switch operation.mutation {

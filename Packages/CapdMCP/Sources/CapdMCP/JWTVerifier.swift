@@ -151,7 +151,7 @@ public struct MCPJWTVerifier: MCPTokenVerifier {
             binding: policy.binding,
             scopes: scopes,
             deviceID: scopes.contains(MCPToolbox.writeScope) ? authorization.deviceID : nil,
-            expiresAt: Date(timeIntervalSince1970: Double(expiry)))
+            expiresAt: Date(timeIntervalSince1970: Double(expiry)), clientID: client)
     }
     private static func time(_ value: JSONValue?) -> Int64? {
         guard let v = value?.integer, (0...9_007_199_254_740_991).contains(v) else { return nil }

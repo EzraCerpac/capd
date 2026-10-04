@@ -6,6 +6,50 @@ import XCTest
 @testable import CapdMCP
 
 final class ToolboxRegressionTests: XCTestCase {
+    func testResolutionChecksCurrentAuthorityInsteadOfStaleReadStore() throws {
+        let f = try MCPTests.Fixture()
+        defer { try? FileManager.default.removeItem(at: f.directory) }
+        let id = UUID()
+        XCTAssertEqual(
+            f.call("create_capture", f.create(id: id, note: "original"))["isError"], .bool(false))
+        _ = try f.server.apply(
+            SyncOperation(
+                deviceID: UUID(), sequence: 1, captureID: id, baseRevision: 1,
+                mutation: .edit(CaptureEdit(note: NoteEdit("first conflict")))))
+        let observed = try XCTUnwrap(try f.store.capture(id: id))
+        let frozenURL = f.directory.appendingPathComponent("observed.sqlite")
+        var source: OpaquePointer?
+        var destination: OpaquePointer?
+        XCTAssertEqual(
+            sqlite3_open(f.directory.appendingPathComponent("authority.sqlite").path, &source),
+            SQLITE_OK)
+        defer { sqlite3_close(source) }
+        XCTAssertEqual(sqlite3_open(frozenURL.path, &destination), SQLITE_OK)
+        defer { sqlite3_close(destination) }
+        let backup = try XCTUnwrap(sqlite3_backup_init(destination, "main", source, "main"))
+        XCTAssertEqual(sqlite3_backup_step(backup, -1), SQLITE_DONE)
+        XCTAssertEqual(sqlite3_backup_finish(backup), SQLITE_OK)
+        XCTAssertEqual(
+            sqlite3_exec(destination, "PRAGMA journal_mode=DELETE", nil, nil, nil), SQLITE_OK)
+        let frozen = try AcceptedStore(databaseURL: frozenURL, binding: f.binding)
+        let toolbox = try MCPToolbox(store: frozen, authority: f.server)
+        _ = try f.server.apply(
+            SyncOperation(
+                deviceID: UUID(), sequence: 1, captureID: id, baseRevision: 1,
+                mutation: .edit(CaptureEdit(note: NoteEdit("intervening conflict")))))
+        let before = try f.server.baseline()
+        var resolution = editArguments(id: id, revision: observed.revision)
+        resolution["note"] = .string("resolved")
+        resolution["resolve_note_operations"] = .array(
+            observed.noteConflicts.map { .string($0.operationID.uuidString) })
+        XCTAssertEqual(
+            toolbox.call(name: "edit_capture", arguments: resolution, grant: f.grant).object?[
+                "isError"], .bool(true))
+        XCTAssertEqual(try f.server.baseline().cursor, before.cursor)
+        XCTAssertEqual(try f.server.baseline().captures, before.captures)
+        XCTAssertEqual(try f.store.nextSequence(deviceID: f.device), 2)
+    }
+
     func testExplicitResolutionRejectsMismatchedAndStaleSetsWithoutConsumingIdentity() throws {
         let f = try MCPTests.Fixture()
         defer { try? FileManager.default.removeItem(at: f.directory) }

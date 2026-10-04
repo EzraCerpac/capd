@@ -21,17 +21,19 @@ public struct MCPGrant: Sendable {
     public let issuer: String
     public let audience: String
     public let subject: String
+    public let clientID: String?
     public let binding: SyncLibraryBinding
     public let scopes: Set<String>
     public let deviceID: UUID?
     public let expiresAt: Date
     public init(
         issuer: String, audience: String, subject: String, binding: SyncLibraryBinding,
-        scopes: Set<String>, deviceID: UUID? = nil, expiresAt: Date
+        scopes: Set<String>, deviceID: UUID? = nil, expiresAt: Date, clientID: String? = nil
     ) {
         self.issuer = issuer
         self.audience = audience
         self.subject = subject
+        self.clientID = clientID
         self.binding = binding
         self.scopes = scopes
         self.deviceID = deviceID
@@ -225,6 +227,23 @@ public final class MCPToolbox: Sendable {
                 guard grant.scopes.contains(Self.writeScope), let device = grant.deviceID else {
                     throw MCPFailure.forbidden
                 }
+                let writerPrincipalID: String
+                if grant.issuer == MCPGrant.bridgeIssuer {
+                    guard let configured = servicePrincipalID, configured == grant.subject else {
+                        throw MCPFailure.forbidden
+                    }
+                    writerPrincipalID = configured
+                } else {
+                    let identity = try JSONEncoder().encode([
+                        grant.issuer, grant.audience, grant.subject, grant.clientID,
+                    ])
+                    writerPrincipalID =
+                        "mcp:"
+                        + SHA256.hash(data: identity).map {
+                            String(format: "%02x", $0)
+                        }.joined()
+                }
+                try authority.reserveServiceWriter(deviceID: device, principalID: writerPrincipalID)
                 let opID = try uuid(a, "operation_id")
                 let id = try uuid(a, "id")
                 let sequence = try number(a, "sequence", min: 1)
@@ -277,20 +296,6 @@ public final class MCPToolbox: Sendable {
                     guard a["resolve_note_operations"] == nil || a["note"] != nil else {
                         throw MCPFailure.invalidArguments
                     }
-                    if a["resolve_note_operations"] != nil,
-                        !(try store.hasReceipt(operationID: opID)),
-                        sequence == (try store.nextSequence(deviceID: device))
-                    {
-                        guard let current = try store.capture(id: id) else {
-                            throw MCPFailure.unavailable
-                        }
-                        guard current.noteConflicts.count <= 20 else {
-                            throw Failure.noteConflictCapacity
-                        }
-                        guard Set(resolving) == Set(current.noteConflicts.map(\.operationID)),
-                            base >= current.noteRevision
-                        else { throw MCPFailure.invalidArguments }
-                    }
                     let note: NoteEdit? =
                         a["note"] == nil
                         ? nil
@@ -326,7 +331,8 @@ public final class MCPToolbox: Sendable {
                         id: opID, deviceID: device, sequence: sequence, captureID: id,
                         baseRevision: base, mutation: mutation,
                         requestIdentity: try Self.requestIdentity(name: name, arguments: a)),
-                    servicePrincipalID: servicePrincipalID)
+                    servicePrincipalID: writerPrincipalID,
+                    requireExactNoteResolution: a["resolve_note_operations"] != nil)
                 var fields: Object = [
                     "operation_id": .string(receipt.operationID.uuidString),
                     "outcome": .string(receipt.outcome.rawValue),
@@ -358,6 +364,9 @@ public final class MCPToolbox: Sendable {
             case MCPFailure.capacity: code = "bounded_library_capacity_exceeded"
             case MCPFailure.unavailable: code = "capture_unavailable"
             case Failure.noteConflictCapacity: code = "note_conflict_resolution_capacity_exceeded"
+            case SyncServer.NoteResolutionError.capacity:
+                code = "note_conflict_resolution_capacity_exceeded"
+            case SyncServer.NoteResolutionError.unavailable: code = "capture_unavailable"
             case SyncError.operationIDReused: code = "operation_id_reused"
             case SyncError.outOfOrder(let expected): code = "sequence_conflict_expected_\(expected)"
             default: code = "invalid_or_unavailable_request"

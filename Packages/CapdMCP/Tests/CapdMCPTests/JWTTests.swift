@@ -117,6 +117,95 @@ final class JWTTests: XCTestCase {
         XCTAssertEqual(try request("list_recent").status, 401)
         XCTAssertEqual(try x.f.server.baseline().deviceSequences[x.f.device], 2)
     }
+
+    func testJWTWriterCannotInheritPersistedSyncDeviceHistory() throws {
+        let x = try Fixture()
+        defer { try? FileManager.default.removeItem(at: x.f.directory) }
+        let syncCapture = SharedCapture(source: CaptureSource(kind: .text, selection: "sync only"))
+        _ = try x.f.server.apply(
+            SyncOperation(
+                deviceID: x.f.device, sequence: 1, captureID: syncCapture.id, baseRevision: 0,
+                mutation: .create(syncCapture)))
+        let before = try x.f.server.baseline()
+        let verifier = MCPJWTVerifier(provider: try Provider(x.policy()))
+        let result = x.f.toolbox.call(
+            name: "create_capture", arguments: x.f.create(sequence: 2),
+            grant: try verifier.verify(x.token())
+        ).object
+        XCTAssertEqual(result?["isError"], .bool(true))
+        XCTAssertEqual(try x.f.server.baseline().captures, before.captures)
+        XCTAssertEqual(try x.f.server.baseline().cursor, before.cursor)
+        XCTAssertEqual(try x.f.store.nextSequence(deviceID: x.f.device), 2)
+    }
+
+    func testJWTReadDoesNotClaimWriterDeviceOrLoseReadAccessOnCollision() throws {
+        let x = try Fixture()
+        defer { try? FileManager.default.removeItem(at: x.f.directory) }
+        let verifier = MCPJWTVerifier(provider: try Provider(x.policy()))
+        let grant = try verifier.verify(x.token())
+        XCTAssertEqual(
+            x.f.toolbox.call(name: "list_recent", arguments: [:], grant: grant).object?["isError"],
+            .bool(false))
+        let syncCapture = SharedCapture(source: CaptureSource(kind: .text, selection: "sync only"))
+        _ = try x.f.server.apply(
+            SyncOperation(
+                deviceID: x.f.device, sequence: 1, captureID: syncCapture.id, baseRevision: 0,
+                mutation: .create(syncCapture)))
+        XCTAssertEqual(
+            x.f.toolbox.call(name: "list_recent", arguments: [:], grant: grant).object?["isError"],
+            .bool(false))
+        XCTAssertEqual(
+            x.f.toolbox.call(
+                name: "create_capture", arguments: x.f.create(sequence: 2), grant: grant
+            ).object?[
+                "isError"], .bool(true))
+        XCTAssertEqual(try x.f.server.baseline().deviceSequences[x.f.device], 1)
+    }
+
+    func testJWTWriterReservationSurvivesReopenAndSeparatesClientsAndOrdinarySync() throws {
+        let x = try Fixture()
+        defer { try? FileManager.default.removeItem(at: x.f.directory) }
+        let verifier = MCPJWTVerifier(provider: try Provider(x.policy()))
+        let grant = try verifier.verify(x.token())
+        let arguments = x.f.create()
+        XCTAssertEqual(
+            x.f.toolbox.call(name: "create_capture", arguments: arguments, grant: grant).object?[
+                "isError"], .bool(false))
+        let reopened = try MCPToolbox(store: x.f.store, authority: x.f.server)
+        XCTAssertEqual(
+            reopened.call(name: "create_capture", arguments: arguments, grant: grant).object?[
+                "isError"], .bool(false))
+        let syncCapture = SharedCapture(source: CaptureSource(kind: .text, selection: "sync only"))
+        XCTAssertThrowsError(
+            try x.f.server.apply(
+                SyncOperation(
+                    deviceID: x.f.device, sequence: 2, captureID: syncCapture.id, baseRevision: 0,
+                    mutation: .create(syncCapture)))
+        ) { error in
+            XCTAssertEqual(error as? SyncError, .wrongDevice)
+        }
+        let otherPolicy = try MCPJWTPolicy(
+            issuer: grant.issuer, audience: grant.audience, binding: x.f.binding,
+            keys: ["synthetic-key": x.key.publicKey.x963Representation],
+            principals: [
+                MCPJWTPrincipal(subject: grant.subject, clientID: "other-client"):
+                    MCPJWTAuthorization(scopes: grant.scopes, deviceID: x.f.device)
+            ])
+        var claims = x.claims
+        claims["client_id"] = .string("other-client")
+        let otherVerifier = MCPJWTVerifier(provider: Provider(otherPolicy))
+        XCTAssertEqual(
+            reopened.call(
+                name: "create_capture", arguments: x.f.create(sequence: 2),
+                grant: try otherVerifier.verify(x.token(claims))
+            ).object?["isError"], .bool(true))
+        XCTAssertEqual(
+            reopened.call(
+                name: "create_capture", arguments: x.f.create(sequence: 2), grant: grant
+            ).object?[
+                "isError"], .bool(false))
+        XCTAssertEqual(try x.f.store.nextSequence(deviceID: x.f.device), 3)
+    }
     func testRejectsSignatureHeaderClaimsAndEncodingAttacks() throws {
         let x = try Fixture()
         defer { try? FileManager.default.removeItem(at: x.f.directory) }
