@@ -303,13 +303,17 @@ public final class MobileStore: Sendable {
 
     /// A lightweight revision of committed local and synchronized library work.
     public func libraryRevision() throws -> MobileLibraryRevision {
-        try database.read(Self.libraryRevision)
+        let lease = try access?.lease()
+        defer { withExtendedLifetime(lease) {} }
+        return try database.read(Self.libraryRevision)
     }
 
     func syncSnapshot(previousRevision: MobileLibraryRevision?, previousConflictCount: Int) throws
         -> (revision: MobileLibraryRevision, conflictCount: Int)
     {
-        try database.read { db in
+        let lease = try access?.lease()
+        defer { withExtendedLifetime(lease) {} }
+        return try database.read { db in
             let revision = try Self.libraryRevision(db)
             let conflicts =
                 revision == previousRevision
