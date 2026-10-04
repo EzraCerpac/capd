@@ -10,8 +10,13 @@ public final class CaptureSystemBridge: CaptureActionHost {
     private var libraryID: UUID?
     private var captures: [String: SearchCapture] = [:]
     private var deferredRoute: CaptureRoute?
+    private let preparation: @MainActor () async throws -> Void
 
-    public init() {}
+    public init(preparingForIntent: @escaping @MainActor () async throws -> Void = {}) {
+        preparation = preparingForIntent
+    }
+
+    public func prepareForIntent() async throws { try await preparation() }
 
     /// Installs the host early in app startup, before a foreground intent performs.
     public func install() { CaptureIntentRuntime.shared.host = self }

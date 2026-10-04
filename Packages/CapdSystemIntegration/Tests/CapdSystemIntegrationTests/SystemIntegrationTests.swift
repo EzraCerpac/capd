@@ -86,6 +86,7 @@ struct CaptureRouteTests {
         #expect(item.attributeSet.title == "Synthetic capture")
         #expect(item.attributeSet.textContent == "synthetic indigo notebook")
         #expect(item.attributeSet.contentURL == CaptureRoute.open(reference).url)
+        #expect(item.expirationDate == Date.distantFuture)
         let activity = NSUserActivity(activityType: CSSearchableItemActionType)
         activity.userInfo = [CSSearchableItemActivityIdentifier: reference.id]
         #expect(CaptureRoute(spotlightActivity: activity) == .open(reference))
@@ -213,6 +214,52 @@ struct SpotlightCoordinatorTests {
 @MainActor
 @Suite(.serialized)
 struct IntentHostTests {
+    @Test func coldIntentsAndEntityQueriesAwaitHostPreparation() async throws {
+        let runtime = CaptureIntentRuntime.shared
+        let previous = runtime.host
+        defer { runtime.host = previous }
+        let preparation = HeldIntentPreparation()
+        let host = CaptureSystemBridge(preparingForIntent: { await preparation.wait() })
+        host.install()
+        let find = FindCapturesIntent()
+        find.query = "indigo"
+        let finding = Task { @MainActor in _ = try await find.perform() }
+        let resolving = Task { @MainActor in
+            try await CaptureEntityQuery().entities(for: [reference.id])
+        }
+        for _ in 0..<100 where preparation.waiters.count < 2 { await Task.yield() }
+        #expect(preparation.waiters.count == 2)
+        #expect(host.pendingAction == nil)
+        try host.refresh(libraryID: library, captures: [fixture()], systemSearchEnabled: true)
+        preparation.finish()
+        try await finding.value
+        #expect(try await resolving.value.map(\.id) == [reference.id])
+        #expect(host.consumeAction() == .find("indigo"))
+        let open = OpenCaptureIntent()
+        open.capture = CaptureEntity(fixture())
+        _ = try await open.perform()
+        #expect(host.consumeAction() == .open(reference))
+        host.invalidate()
+        await #expect(throws: SystemIntegrationError.privacyDisabled) {
+            _ = try await find.perform()
+        }
+        #expect(host.pendingAction == nil)
+    }
+
+    @Test func failedHostPreparationHasNoIntentSideEffects() async throws {
+        let runtime = CaptureIntentRuntime.shared
+        let previous = runtime.host
+        defer { runtime.host = previous }
+        let host = CaptureSystemBridge(preparingForIntent: {
+            throw SystemIntegrationError.unavailable
+        })
+        host.install()
+        let find = FindCapturesIntent()
+        find.query = "indigo"
+        await #expect(throws: SystemIntegrationError.unavailable) { _ = try await find.perform() }
+        #expect(host.pendingAction == nil)
+    }
+
     @Test func coldRouteWaitsForSnapshotAndHonorsConsent() throws {
         let previous = CaptureIntentRuntime.shared.host
         defer { CaptureIntentRuntime.shared.host = previous }
@@ -350,5 +397,23 @@ struct IntentHostTests {
         if #available(iOS 26, macOS 26, *) {
             #expect(FindCapturesIntent.supportedModes == .foreground(.immediate))
         }
+    }
+}
+
+@MainActor
+private final class HeldIntentPreparation {
+    var waiters: [CheckedContinuation<Void, Never>] = []
+    private var ready = false
+
+    func wait() async {
+        guard !ready else { return }
+        await withCheckedContinuation { waiters.append($0) }
+    }
+
+    func finish() {
+        ready = true
+        let pending = waiters
+        waiters.removeAll()
+        for continuation in pending { continuation.resume() }
     }
 }

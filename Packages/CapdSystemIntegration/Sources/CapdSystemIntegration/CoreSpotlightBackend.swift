@@ -24,7 +24,8 @@ public final class CoreSpotlightBackend: SpotlightBackend {
         attributes.contentURL = CaptureRoute.open(capture.reference).url
         let item = CSSearchableItem(
             uniqueIdentifier: capture.id, domainIdentifier: domain, attributeSet: attributes)
-        item.expirationDate = Date().addingTimeInterval(30 * 24 * 60 * 60)
+        // The coordinator retracts stale items and revoked domains explicitly.
+        item.expirationDate = .distantFuture
         return item
     }
 

@@ -15,11 +15,14 @@ Opt-out invalidates routing immediately and serializes scoped index deletion.
 The repair journal retains library scopes before OS writes and retires them only
 after confirmed deletion. Session-generation changes rebuild the index. The share
 extension writes a transactional revision marker; the app reconciles after it
-next opens. Libraries over 1,000 captures fail closed.
+next opens. Libraries over 1,000 captures retract their indexed domain and retain
+the repair record if deletion fails. Indexed items have no fixed expiration;
+reconciliation and consent withdrawal manage their removal.
 
 Strict `capd://find` and `capd://open` links and Spotlight activities resolve
-through the current host. Cold routes wait for the complete snapshot and obey
-consent. Find changes the filter; Open resolves the saved capture again; Capture
+through the current host. The app connects its selected-session model before
+installing the intent host. Cold routes and intents wait for the complete snapshot
+and obey consent. Find changes the filter; Open resolves the saved capture again; Capture
 Text stages an unsaved draft. No intent starts network work.
 
 Portable tests use synthetic stores and memory index backends. The OS smoke test

@@ -9,9 +9,14 @@ public enum CaptureAction: Equatable, Sendable {
 @MainActor
 public protocol CaptureActionHost: AnyObject {
     var systemSearchEnabled: Bool { get }
+    func prepareForIntent() async throws
     func search(_ query: String) throws -> [SearchCapture]
     func resolve(_ reference: CaptureReference) throws -> SearchCapture?
     func handle(_ action: CaptureAction) throws
+}
+
+extension CaptureActionHost {
+    public func prepareForIntent() async throws {}
 }
 
 @MainActor
@@ -20,6 +25,12 @@ public final class CaptureIntentRuntime {
     public weak var host: (any CaptureActionHost)?
 
     public init() {}
+
+    public func prepareForIntent() async throws {
+        try Task.checkCancellation()
+        try await availableHost().prepareForIntent()
+        try Task.checkCancellation()
+    }
 
     public func search(_ query: String) throws -> [SearchCapture] {
         try Task.checkCancellation()

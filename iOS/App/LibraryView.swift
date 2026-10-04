@@ -10,7 +10,7 @@ struct LibraryView: View {
     private var palette: CapdPalette {
         CapdPalette(colorScheme: colorScheme, increasedContrast: contrast == .increased)
     }
-    @State private var model = LibraryModel()
+    @Bindable var model: LibraryModel
     @State private var capturing = false
     @State private var showingSyncSettings = false
     @State private var openedCapture: UUID?

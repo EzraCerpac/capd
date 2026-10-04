@@ -7,16 +7,23 @@ import SwiftUI
 @main
 struct CapdPhoneApp: App {
     @State private var systemIntegration: CaptureSystemBridge
+    @State private var model: LibraryModel
 
     init() {
-        let bridge = CaptureSystemBridge()
+        let model = LibraryModel()
+        let bridge = CaptureSystemBridge(preparingForIntent: { [weak model] in
+            guard let model else { throw SystemIntegrationError.unavailable }
+            try await model.systemSearch.prepareForIntent()
+        })
+        model.systemSearch.connect(bridge)
         bridge.install()
         _systemIntegration = State(initialValue: bridge)
+        _model = State(initialValue: model)
     }
 
     var body: some Scene {
         WindowGroup {
-            LibraryView()
+            LibraryView(model: model)
                 .environment(systemIntegration)
                 .onOpenURL { url in
                     if let route = CaptureRoute(url: url) { systemIntegration.receive(route) }

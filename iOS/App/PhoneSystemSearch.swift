@@ -55,6 +55,20 @@ final class PhoneSystemSearch {
 
     func retry() { schedule() }
 
+    func prepareForIntent() async throws {
+        guard session != nil, bridge != nil, !paused else {
+            throw SystemIntegrationError.unavailable
+        }
+        while true {
+            let generation = generation
+            await tail?.value
+            try Task.checkCancellation()
+            guard !paused else { throw SystemIntegrationError.unavailable }
+            if generation == self.generation { break }
+        }
+        guard error == nil else { throw SystemIntegrationError.unavailable }
+    }
+
     func suspendAndDrain() async {
         paused = true
         bridge?.invalidate()
@@ -114,7 +128,17 @@ final class PhoneSystemSearch {
             let captures = snapshot.captures.map {
                 PhoneSearchProjection.capture($0, libraryID: libraryID)
             }
-            guard captures.count <= 1000 else { throw SystemIntegrationError.snapshotTooLarge }
+            guard captures.count <= 1000 else {
+                try journal.begin(libraryID)
+                let index =
+                    coordinator
+                    ?? SpotlightCoordinator(
+                        libraryID: libraryID, backend: backend())
+                try await bridge.deactivate(using: index)
+                try journal.removed(libraryID)
+                coordinator = nil
+                throw SystemIntegrationError.snapshotTooLarge
+            }
             try journal.begin(libraryID)
             if coordinator == nil {
                 coordinator = SpotlightCoordinator(libraryID: libraryID, backend: backend())

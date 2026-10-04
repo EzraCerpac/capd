@@ -24,6 +24,7 @@ public struct CaptureEntityQuery: EntityStringQuery {
         guard identifiers.allSatisfy({ CaptureReference(identifier: $0) != nil }) else {
             throw SystemIntegrationError.invalidInput
         }
+        try await CaptureIntentRuntime.shared.prepareForIntent()
         return try CaptureIntentRuntime.shared.resolve(
             identifiers.compactMap(CaptureReference.init(identifier:))
         ).map(CaptureEntity.init)
@@ -31,7 +32,8 @@ public struct CaptureEntityQuery: EntityStringQuery {
 
     @MainActor
     public func entities(matching string: String) async throws -> [CaptureEntity] {
-        try CaptureIntentRuntime.shared.search(string).map(CaptureEntity.init)
+        try await CaptureIntentRuntime.shared.prepareForIntent()
+        return try CaptureIntentRuntime.shared.search(string).map(CaptureEntity.init)
     }
 
     public func suggestedEntities() async throws -> [CaptureEntity] { [] }
@@ -54,6 +56,7 @@ public struct FindCapturesIntent: AppIntent {
 
     @MainActor
     public func perform() async throws -> some IntentResult {
+        try await CaptureIntentRuntime.shared.prepareForIntent()
         try CaptureIntentRuntime.shared.perform(.find(query))
         return .result()
     }
@@ -76,6 +79,7 @@ public struct OpenCaptureIntent: AppIntent {
         guard let reference = CaptureReference(identifier: capture.id) else {
             throw SystemIntegrationError.invalidInput
         }
+        try await CaptureIntentRuntime.shared.prepareForIntent()
         try CaptureIntentRuntime.shared.perform(.open(reference))
         return .result()
     }
@@ -98,6 +102,7 @@ public struct CaptureTextIntent: AppIntent {
 
     @MainActor
     public func perform() async throws -> some IntentResult {
+        try await CaptureIntentRuntime.shared.prepareForIntent()
         try CaptureIntentRuntime.shared.perform(.stageText(text))
         return .result()
     }
