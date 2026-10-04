@@ -53,13 +53,16 @@ struct SearchKeyHandlingTests {
         let hosting = NSHostingView(rootView: SearchView(model: model))
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 640, height: 470),
-            styleMask: [.borderless], backing: .buffered, defer: false)
+            styleMask: [.titled], backing: .buffered, defer: false)
+        defer { window.orderOut(nil) }
         window.contentView = hosting
         hosting.layoutSubtreeIfNeeded()
         window.makeKeyAndOrderFront(nil)
-        window.makeFirstResponder(hosting)
-        try await Task.sleep(for: .milliseconds(50))
-        #expect(window.firstResponder is NSTextView)
+        let field = try #require(editableTextField(in: hosting))
+        #expect(field.stringValue == model.queryText)
+        try #require(window.makeFirstResponder(field))
+        let editor = try #require(field.currentEditor() as? NSTextView)
+        #expect(window.firstResponder === editor)
 
         let event = try #require(
             NSEvent.keyEvent(
@@ -76,7 +79,11 @@ struct SearchKeyHandlingTests {
 
         #expect(window.performKeyEquivalent(with: event))
         #expect(recordedRating == 5)
-        window.orderOut(nil)
+    }
+
+    private func editableTextField(in view: NSView) -> NSTextField? {
+        if let field = view as? NSTextField, field.isEditable { return field }
+        return view.subviews.lazy.compactMap { editableTextField(in: $0) }.first
     }
 
     @Test("Command-R opens the reminder picker for the selected capture")
