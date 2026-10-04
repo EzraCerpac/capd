@@ -55,6 +55,7 @@ public struct CaptureSource: Codable, Equatable, Sendable {
 
 public struct GeneratedContent: Codable, Equatable, Sendable {
     public var body: String?
+    public var bodyIsThin: Bool?
     public var ocrText: String?
     public var tags: [String]
     public var taggingProcessed: Bool?
@@ -62,22 +63,24 @@ public struct GeneratedContent: Codable, Equatable, Sendable {
     public var unknownFields: [String: JSONValue] = [:]
 
     public init(
-        body: String? = nil, ocrText: String? = nil, tags: [String] = [],
+        body: String? = nil, bodyIsThin: Bool? = nil, ocrText: String? = nil, tags: [String] = [],
         taggingProcessed: Bool? = nil, taggingInputFingerprint: String? = nil
     ) {
         self.body = body
+        self.bodyIsThin = bodyIsThin
         self.ocrText = ocrText
         self.tags = tags
         self.taggingProcessed = taggingProcessed
         self.taggingInputFingerprint = taggingInputFingerprint
     }
     private enum CodingKeys: String, CodingKey, CaseIterable {
-        case body, ocrText, tags, taggingProcessed, taggingInputFingerprint
+        case body, bodyIsThin, ocrText, tags, taggingProcessed, taggingInputFingerprint
     }
     private static var known: Set<String> { Set(CodingKeys.allCases.map(\.rawValue)) }
     public init(from decoder: any Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         body = try c.decodeIfPresent(String.self, forKey: .body)
+        bodyIsThin = try c.decodeIfPresent(Bool.self, forKey: .bodyIsThin)
         ocrText = try c.decodeIfPresent(String.self, forKey: .ocrText)
         tags = try c.decode([String].self, forKey: .tags)
         taggingProcessed = try c.decodeIfPresent(Bool.self, forKey: .taggingProcessed)
@@ -89,6 +92,7 @@ public struct GeneratedContent: Codable, Equatable, Sendable {
         try encodeExtensions(unknownFields, to: encoder, known: Self.known)
         var c = encoder.container(keyedBy: CodingKeys.self)
         try c.encodeIfPresent(body, forKey: .body)
+        try c.encodeIfPresent(bodyIsThin, forKey: .bodyIsThin)
         try c.encodeIfPresent(ocrText, forKey: .ocrText)
         try c.encode(tags, forKey: .tags)
         try c.encodeIfPresent(taggingProcessed, forKey: .taggingProcessed)

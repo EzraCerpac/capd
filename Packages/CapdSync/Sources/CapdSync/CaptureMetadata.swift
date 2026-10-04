@@ -193,28 +193,32 @@ public enum TaggingProcessingUpdate: Codable, Equatable, Sendable {
 
 public struct GeneratedContentPatch: Codable, Equatable, Sendable {
     public var body: TextUpdate?
+    public var bodyIsThin: Bool?
     public var ocrText: TextUpdate?
     public var tags: [String]?
     public var taggingProcessing: TaggingProcessingUpdate?
     public var unknownFields: [String: JSONValue]
     public init(
-        body: TextUpdate? = nil, ocrText: TextUpdate? = nil, tags: [String]? = nil,
+        body: TextUpdate? = nil, bodyIsThin: Bool? = nil, ocrText: TextUpdate? = nil,
+        tags: [String]? = nil,
         taggingProcessing: TaggingProcessingUpdate? = nil,
         unknownFields: [String: JSONValue] = [:]
     ) {
         self.body = body
+        self.bodyIsThin = bodyIsThin
         self.ocrText = ocrText
         self.tags = tags
         self.taggingProcessing = taggingProcessing
         self.unknownFields = unknownFields
     }
     private enum CodingKeys: String, CodingKey, CaseIterable {
-        case body, ocrText, tags, taggingProcessing
+        case body, bodyIsThin, ocrText, tags, taggingProcessing
     }
     private static var known: Set<String> { Set(CodingKeys.allCases.map(\.rawValue)) }
     public init(from decoder: any Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         body = try c.decodeIfPresent(TextUpdate.self, forKey: .body)
+        bodyIsThin = try c.decodeIfPresent(Bool.self, forKey: .bodyIsThin)
         ocrText = try c.decodeIfPresent(TextUpdate.self, forKey: .ocrText)
         tags = try c.decodeIfPresent([String].self, forKey: .tags)
         taggingProcessing = try c.decodeIfPresent(
@@ -225,6 +229,7 @@ public struct GeneratedContentPatch: Codable, Equatable, Sendable {
         try encodeExtensions(unknownFields, to: encoder, known: Self.known)
         var c = encoder.container(keyedBy: CodingKeys.self)
         try c.encodeIfPresent(body, forKey: .body)
+        try c.encodeIfPresent(bodyIsThin, forKey: .bodyIsThin)
         try c.encodeIfPresent(ocrText, forKey: .ocrText)
         try c.encodeIfPresent(tags, forKey: .tags)
         try c.encodeIfPresent(taggingProcessing, forKey: .taggingProcessing)
@@ -252,6 +257,7 @@ extension GeneratedContent {
     var hasTaggingProcessing: Bool { taggingProcessed != nil || taggingInputFingerprint != nil }
 
     func validateTaggingProcessing() throws {
+        guard bodyIsThin == nil || body != nil else { throw SyncError.invalidOperation }
         switch (taggingProcessed, taggingInputFingerprint) {
         case (nil, nil), (false?, nil): break
         case (true?, let fingerprint?): try validateTaggingFingerprint(fingerprint)
@@ -280,7 +286,19 @@ extension SyncHTTPAction {
         }
     }
     var requiredEnvelopeVersion: Int {
-        requiresGeneratedProcessingContract ? 3 : (requiresMetadataContract ? 2 : 1)
+        requiresExtractionQualityContract
+            ? 4
+            : (requiresGeneratedProcessingContract ? 3 : (requiresMetadataContract ? 2 : 1))
+    }
+
+    var requiresExtractionQualityContract: Bool {
+        guard case .apply(let operation) = self else { return false }
+        switch operation.mutation {
+        case .create(let capture): return capture.generated.bodyIsThin != nil
+        case .edit(let edit):
+            return edit.generatedPatch?.bodyIsThin != nil || edit.generated?.bodyIsThin != nil
+        default: return false
+        }
     }
 }
 
@@ -288,7 +306,8 @@ extension SyncHTTPReply {
     func checkCapabilities(for action: SyncHTTPAction) throws {
         guard case .baseline = result else { throw SyncHTTPError.invalidResponse }
         guard metadataContractVersion == 1,
-            !action.requiresGeneratedProcessingContract || generatedProcessingContractVersion == 1
+            !action.requiresGeneratedProcessingContract || generatedProcessingContractVersion == 1,
+            !action.requiresExtractionQualityContract || extractionQualityContractVersion == 1
         else { throw SyncHTTPError.unsupportedVersion }
     }
 }

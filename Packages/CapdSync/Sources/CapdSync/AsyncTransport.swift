@@ -11,12 +11,14 @@ extension AsyncSyncTransport {
     /// Fetches an authenticated baseline with the capabilities required before initial import.
     public func importBaseline(
         credential: @escaping @Sendable () throws -> String,
-        requiringGeneratedProcessingContract: Bool = false, summaryOnly: Bool = false
+        requiringGeneratedProcessingContract: Bool = false,
+        requiringExtractionQualityContract: Bool = false, summaryOnly: Bool = false
     ) async throws -> Baseline {
         try await AsyncHTTPActions(transport: self, credential: credential)
             .baseline(
                 requiringMetadataContract: true,
                 requiringGeneratedProcessingContract: requiringGeneratedProcessingContract,
+                requiringExtractionQualityContract: requiringExtractionQualityContract,
                 summaryOnly: summaryOnly)
     }
 }
@@ -109,6 +111,10 @@ struct AsyncHTTPActions {
             }
             throw error
         default:
+            guard
+                !action.requiresExtractionQualityContract
+                    || reply.extractionQualityContractVersion == 1
+            else { throw SyncHTTPError.unsupportedVersion }
             guard response.status == 200,
                 reply.principal
                     == SyncPrincipal(
@@ -145,7 +151,8 @@ struct AsyncHTTPActions {
 
     func baseline(
         requiringMetadataContract: Bool = false,
-        requiringGeneratedProcessingContract: Bool = false, summaryOnly: Bool = false
+        requiringGeneratedProcessingContract: Bool = false,
+        requiringExtractionQualityContract: Bool = false, summaryOnly: Bool = false
     ) async throws -> Baseline {
         var limit = summaryOnly ? 0 : 100
         var after: UUID?
@@ -168,10 +175,12 @@ struct AsyncHTTPActions {
                 throw SyncHTTPError.invalidResponse
             }
             guard
-                !(requiringMetadataContract || requiringGeneratedProcessingContract)
+                !(requiringMetadataContract || requiringGeneratedProcessingContract
+                    || requiringExtractionQualityContract)
                     || reply.metadataContractVersion == 1,
                 !requiringGeneratedProcessingContract
-                    || reply.generatedProcessingContractVersion == 1
+                    || reply.generatedProcessingContractVersion == 1,
+                !requiringExtractionQualityContract || reply.extractionQualityContractVersion == 1
             else { throw SyncHTTPError.unsupportedVersion }
             guard page.captures.count <= limit,
                 first == nil

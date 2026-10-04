@@ -260,6 +260,9 @@ enum SyncDatabase {
             Set(record.manualTags).union(edit.addTags).subtracting(edit.removeTags)
         ).sorted()
         if var generated = edit.generated {
+            if generated.bodyIsThin == nil, generated.body == record.generated.body {
+                generated.bodyIsThin = record.generated.bodyIsThin
+            }
             if !generated.hasTaggingProcessing {
                 generated.taggingProcessed = record.generated.taggingProcessed
                 generated.taggingInputFingerprint = record.generated.taggingInputFingerprint
@@ -295,10 +298,15 @@ enum SyncDatabase {
         }
         if let patch = edit.generatedPatch {
             if let body = patch.body {
+                record.generated.bodyIsThin = nil
                 switch body {
                 case .set(let value): record.generated.body = value
                 case .clear: record.generated.body = nil
                 }
+            }
+            if let isThin = patch.bodyIsThin {
+                guard record.generated.body != nil else { throw SyncError.invalidOperation }
+                record.generated.bodyIsThin = isThin
             }
             if let ocr = patch.ocrText {
                 switch ocr {

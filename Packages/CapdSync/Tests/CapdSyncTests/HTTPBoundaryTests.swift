@@ -5,6 +5,99 @@ import Testing
 
 @Suite("Prepared authenticated sync boundary")
 struct HTTPBoundaryTests {
+    @Test func extractionQualityRequiresVersionFourAndCapabilityBeforeApply() async throws {
+        let f = try HTTPFixture()
+        defer { f.clean() }
+        var capture = SharedCapture(
+            source: CaptureSource(kind: .link, url: "https://example.invalid"))
+        capture.generated = GeneratedContent(body: "Login wall", bodyIsThin: true)
+        let operation = SyncOperation(
+            deviceID: f.device, sequence: 1, captureID: capture.id, baseRevision: 0,
+            mutation: .create(capture))
+        for version in [1, 2, 3] {
+            #expect(
+                try f.failure(f.handler.handle(f.request(.apply(operation), version: version)))
+                    == .unsupportedVersion)
+            #expect(f.resolutions.value == 0)
+        }
+        let omitQuality: @Sendable (SyncHTTPRequest) throws -> SyncHTTPResponse = { request in
+            let actual = f.handler.handle(request)
+            let reply = try SyncDatabase.decode(SyncHTTPReply.self, actual.body)
+            return SyncHTTPResponse(
+                status: actual.status, headers: actual.headers,
+                body: try SyncDatabase.encode(
+                    SyncHTTPReply(
+                        version: reply.version, principal: reply.principal, result: reply.result,
+                        metadataContractVersion: reply.metadataContractVersion,
+                        generatedProcessingContractVersion: reply.generatedProcessingContractVersion
+                    )))
+        }
+        let missingQuality = f.transport("A", executor: omitQuality)
+        await #expect(throws: SyncHTTPError.unsupportedVersion) {
+            try await QualityWire(execute: omitQuality, binding: f.binding, deviceID: f.device)
+                .importBaseline(credential: { "A" }, requiringExtractionQualityContract: true)
+        }
+        #expect(throws: SyncHTTPError.unsupportedVersion) {
+            try missingQuality.request(.apply(operation))
+        }
+        let client = try f.client("quality")
+        try client.enqueue(captureID: capture.id, mutation: .create(capture))
+        let bytes = try client.pendingOperations()
+        await #expect(throws: SyncHTTPError.unsupportedVersion) {
+            try await client.push(
+                to: QualityWire(execute: omitQuality, binding: f.binding, deviceID: f.device),
+                credential: { "A" })
+        }
+        #expect(try client.pendingOperations() == bytes)
+        #expect(try f.a.baseline().captures.isEmpty)
+        try client.push(to: f.transport("A"))
+        #expect(try f.a.baseline().captures.first?.generated.bodyIsThin == true)
+        try client.enqueue(
+            captureID: capture.id,
+            mutation: .edit(CaptureEdit(generatedPatch: GeneratedContentPatch(bodyIsThin: false))))
+        try await client.push(
+            to: RetainedImageWire(binding: f.binding, deviceID: f.device, handler: f.handler),
+            credential: { "A" })
+        #expect(try f.a.baseline().captures.first?.generated.bodyIsThin == false)
+    }
+
+    @Test func missingQualityReceiptCapabilityKeepsExactOperationForRetry() async throws {
+        let f = try HTTPFixture()
+        defer { f.clean() }
+        let client = try f.client("quality-receipt")
+        var capture = SharedCapture(source: CaptureSource(kind: .link))
+        capture.generated = GeneratedContent(body: "Paywall", bodyIsThin: true)
+        try client.enqueue(captureID: capture.id, mutation: .create(capture))
+        let pending = try client.pendingOperations()
+        let omitReceiptQuality: @Sendable (SyncHTTPRequest) throws -> SyncHTTPResponse = {
+            request in
+            let actual = f.handler.handle(request)
+            let reply = try SyncDatabase.decode(SyncHTTPReply.self, actual.body)
+            guard case .receipt = reply.result else { return actual }
+            return SyncHTTPResponse(
+                status: actual.status, headers: actual.headers,
+                body: try SyncDatabase.encode(
+                    SyncHTTPReply(
+                        version: reply.version, principal: reply.principal, result: reply.result,
+                        metadataContractVersion: reply.metadataContractVersion,
+                        generatedProcessingContractVersion: reply.generatedProcessingContractVersion
+                    )))
+        }
+        #expect(throws: SyncHTTPError.unsupportedVersion) {
+            try client.push(to: f.transport("A", executor: omitReceiptQuality))
+        }
+        #expect(try client.pendingOperations() == pending)
+        await #expect(throws: SyncHTTPError.unsupportedVersion) {
+            try await client.push(
+                to: QualityWire(
+                    execute: omitReceiptQuality, binding: f.binding, deviceID: f.device),
+                credential: { "A" })
+        }
+        #expect(try client.pendingOperations() == pending)
+        try client.push(to: f.transport("A"))
+        #expect(try client.pendingOperations().isEmpty)
+        #expect(try f.a.baseline().captures.first?.seenCount == 1)
+    }
     @Test func representableReceiptCannotPublishAnOversizedSingleFeedChange() throws {
         let f = try HTTPFixture()
         defer { f.clean() }
@@ -550,7 +643,7 @@ struct HTTPBoundaryTests {
                     method: "POST", path: valid.path, headers: valid.headers,
                     body: Data("bad A secret payload".utf8)), 400, .malformedRequest
             ),
-            (try f.request(.baseline, version: 4), 400, .unsupportedVersion),
+            (try f.request(.baseline, version: 5), 400, .unsupportedVersion),
             (
                 try f.request(
                     .upload(
@@ -624,6 +717,13 @@ struct HTTPBoundaryTests {
         try client.push(to: f.transport("A"))
         #expect(try f.a.baseline().captures.first?.seenCount == 1)
     }
+}
+
+private struct QualityWire: AsyncSyncTransport {
+    let execute: @Sendable (SyncHTTPRequest) throws -> SyncHTTPResponse
+    let binding: SyncLibraryBinding
+    let deviceID: UUID
+    func send(_ request: SyncHTTPRequest) async throws -> SyncHTTPResponse { try execute(request) }
 }
 
 private struct RetainedImageWire: AsyncSyncTransport {

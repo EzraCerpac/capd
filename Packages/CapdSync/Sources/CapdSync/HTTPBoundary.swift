@@ -93,16 +93,19 @@ public struct SyncHTTPReply: Codable, Sendable {
     public let result: SyncHTTPResult
     public let metadataContractVersion: Int?
     public let generatedProcessingContractVersion: Int?
+    public let extractionQualityContractVersion: Int?
 
     public init(
         version: Int, principal: SyncPrincipal?, result: SyncHTTPResult,
-        metadataContractVersion: Int? = nil, generatedProcessingContractVersion: Int? = nil
+        metadataContractVersion: Int? = nil, generatedProcessingContractVersion: Int? = nil,
+        extractionQualityContractVersion: Int? = nil
     ) {
         self.version = version
         self.principal = principal
         self.result = result
         self.metadataContractVersion = metadataContractVersion
         self.generatedProcessingContractVersion = generatedProcessingContractVersion
+        self.extractionQualityContractVersion = extractionQualityContractVersion
     }
 }
 
@@ -147,7 +150,7 @@ public struct SyncHTTPHandler: Sendable {
         do { envelope = try SyncDatabase.decode(SyncHTTPEnvelope.self, request.body) } catch {
             return failure(.malformedRequest, status: 400)
         }
-        guard (1...3).contains(envelope.version) else {
+        guard (1...4).contains(envelope.version) else {
             return failure(.unsupportedVersion, status: 400)
         }
         guard principal.serviceID == serviceID, envelope.expectedServiceID == serviceID,
@@ -234,7 +237,8 @@ public struct SyncHTTPHandler: Sendable {
     private func checkResponseSize(_ result: SyncHTTPResult, principal: SyncPrincipal) throws {
         let payload = SyncHTTPReply(
             version: 1, principal: principal, result: result,
-            metadataContractVersion: 1, generatedProcessingContractVersion: 1)
+            metadataContractVersion: 1, generatedProcessingContractVersion: 1,
+            extractionQualityContractVersion: 1)
         guard try SyncDatabase.encode(payload).count <= Self.maximumBodyBytes else {
             throw SyncHTTPError.resourceLimit
         }
@@ -246,7 +250,8 @@ public struct SyncHTTPHandler: Sendable {
         let payload = SyncHTTPReply(
             version: 1, principal: principal, result: result,
             metadataContractVersion: principal == nil ? nil : 1,
-            generatedProcessingContractVersion: principal == nil ? nil : 1)
+            generatedProcessingContractVersion: principal == nil ? nil : 1,
+            extractionQualityContractVersion: principal == nil ? nil : 1)
         if let body = try? SyncDatabase.encode(payload), body.count <= Self.maximumBodyBytes {
             var headers = ["Content-Type": "application/json", "Cache-Control": "no-store"]
             if status == 401 { headers["WWW-Authenticate"] = "Bearer" }
@@ -334,6 +339,10 @@ public struct SyncHTTPTransport: BoundSyncTransport {
             }
             throw error
         default:
+            guard
+                !action.requiresExtractionQualityContract
+                    || reply.extractionQualityContractVersion == 1
+            else { throw SyncHTTPError.unsupportedVersion }
             guard response.status == 200,
                 reply.principal
                     == SyncPrincipal(
