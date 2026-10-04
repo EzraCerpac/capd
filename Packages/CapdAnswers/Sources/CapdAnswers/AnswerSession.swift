@@ -16,8 +16,10 @@ public final class AnswerSession {
     private var task: Task<Void, Never>?
     private var requestID: UUID?
 
-    public init(model: any AnswerGenerating = OnDeviceAnswerModel(),
-        retriever: @escaping @Sendable () async throws -> any AnswerRetrieving) {
+    public init(
+        model: any AnswerGenerating = OnDeviceAnswerModel(),
+        retriever: @escaping @Sendable () async throws -> any AnswerRetrieving
+    ) {
         self.model = model
         makeRetriever = retriever
         availability = model.availability()
@@ -31,9 +33,18 @@ public final class AnswerSession {
         answer = nil
         message = nil
         let question = question.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !question.isEmpty else { message = AnswerError.emptyQuestion.localizedDescription; return }
-        guard question.count <= 500 else { message = AnswerError.questionTooLong.localizedDescription; return }
-        if case .unavailable(let reason) = availability { message = reason.explanation; return }
+        guard !question.isEmpty else {
+            message = AnswerError.emptyQuestion.localizedDescription
+            return
+        }
+        guard question.count <= 500 else {
+            message = AnswerError.questionTooLong.localizedDescription
+            return
+        }
+        if case .unavailable(let reason) = availability {
+            message = reason.explanation
+            return
+        }
         let id = UUID()
         requestID = id
         isAnswering = true
@@ -43,12 +54,14 @@ public final class AnswerSession {
             do {
                 let retriever = try await makeRetriever()
                 try Task.checkCancellation()
-                let result = try await GroundedAnswerService(retriever: retriever, model: model).answer(question)
+                let result = try await GroundedAnswerService(retriever: retriever, model: model)
+                    .answer(question)
                 guard !Task.isCancelled, self?.requestID == id else { return }
                 self?.answer = result
             } catch {
                 guard !Task.isCancelled, self?.requestID == id else { return }
-                self?.message = (error as? AnswerError)?.localizedDescription
+                self?.message =
+                    (error as? AnswerError)?.localizedDescription
                     ?? "Could not read the saved library. Try again."
                 self?.refreshAvailability()
             }
