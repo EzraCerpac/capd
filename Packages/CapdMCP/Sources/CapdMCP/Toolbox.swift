@@ -270,16 +270,22 @@ public final class MCPToolbox: Sendable {
                         }
                         return id
                     }
-                    guard resolving.isEmpty || a["note"] != nil else {
+                    guard a["resolve_note_operations"] == nil || a["note"] != nil else {
                         throw MCPFailure.invalidArguments
                     }
-                    if !resolving.isEmpty, sequence == (try store.nextSequence(deviceID: device)) {
+                    if a["resolve_note_operations"] != nil,
+                        !(try store.hasReceipt(operationID: opID)),
+                        sequence == (try store.nextSequence(deviceID: device))
+                    {
                         guard let current = try store.capture(id: id) else {
                             throw MCPFailure.unavailable
                         }
                         guard current.noteConflicts.count <= 20 else {
                             throw Failure.noteConflictCapacity
                         }
+                        guard Set(resolving) == Set(current.noteConflicts.map(\.operationID)),
+                            base >= current.noteRevision
+                        else { throw MCPFailure.invalidArguments }
                     }
                     let note: NoteEdit? =
                         a["note"] == nil
@@ -383,7 +389,7 @@ public final class MCPToolbox: Sendable {
         var o: Object = [
             "id": .string(c.id.uuidString), "revision": .number(Decimal(c.revision)),
             "kind": .string(c.source.kind.rawValue),
-            "created_at": .string(ISO8601DateFormatter().string(from: c.createdAt)),
+            "created_at": .string(Self.timestamp(c.createdAt)),
             "rating": .number(Decimal(c.rating)), "title": bounded(c.source.title),
             "url": bounded(c.source.url), "note": bounded(c.note),
         ]
@@ -391,7 +397,7 @@ public final class MCPToolbox: Sendable {
         o["generated_tags"] = .array(c.generated.tags.prefix(20).map { bounded($0) })
         truncated = truncated || c.manualTags.count > 20 || c.generated.tags.count > 20
         if let reminder = c.metadata?.reminderAt {
-            o["reminder_at"] = .string(ISO8601DateFormatter().string(from: reminder))
+            o["reminder_at"] = .string(Self.timestamp(reminder))
         }
         if full {
             o["note_conflict_count"] = .number(Decimal(c.noteConflicts.count))
@@ -486,7 +492,16 @@ public final class MCPToolbox: Sendable {
             throw MCPFailure.invalidArguments
         }
         let formatter = ISO8601DateFormatter()
+        formatter.formatOptions.insert(.withFractionalSeconds)
+        if let date = formatter.date(from: value) { return date }
+        formatter.formatOptions.remove(.withFractionalSeconds)
         guard let date = formatter.date(from: value) else { throw MCPFailure.invalidArguments }
         return date
+    }
+
+    private static func timestamp(_ date: Date) -> String {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions.insert(.withFractionalSeconds)
+        return formatter.string(from: date)
     }
 }

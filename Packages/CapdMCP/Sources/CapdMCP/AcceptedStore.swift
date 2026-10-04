@@ -93,4 +93,13 @@ public final class AcceptedStore: Sendable {
             return previous + 1
         }
     }
+
+    func hasReceipt(operationID: UUID) throws -> Bool {
+        try reader.read { db in
+            try check(db)
+            return try Bool.fetchOne(
+                db, sql: "SELECT EXISTS(SELECT 1 FROM sync_receipts WHERE id=?)",
+                arguments: [operationID.uuidString]) ?? false
+        }
+    }
 }

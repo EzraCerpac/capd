@@ -56,12 +56,16 @@ public struct MCPBridgeConfiguration: Decodable, Sendable {
             && value.utf8.allSatisfy { (48...57).contains($0) || (97...102).contains($0) }
     }
 
-    func authorize(_ bearer: String, serviceID: UUID, sync: HostConfiguration) throws -> MCPGrant? {
+    func validateBinding(serviceID: UUID, sync: HostConfiguration) throws {
         guard self.serviceID == serviceID, sync.serviceID == serviceID,
             !sync.enrollments.contains(where: {
                 $0.credentialSHA256 == credentialSHA256 || $0.deviceID == writerDeviceID
             })
         else { throw HostError.invalidConfiguration }
+    }
+
+    func authorize(_ bearer: String, serviceID: UUID, sync: HostConfiguration) throws -> MCPGrant? {
+        try validateBinding(serviceID: serviceID, sync: sync)
         guard !revoked, Self.isDigest(bearer) else { return nil }
         let digest = SHA256.hash(data: Data(bearer.utf8)).map { String(format: "%02x", $0) }
             .joined()

@@ -18,6 +18,10 @@ public final class Authority: @unchecked Sendable {
     public init(configurationURL: URL, dataDirectory: URL, mcpConfigurationURL: URL? = nil) throws {
         self.mcpConfigurationURL = mcpConfigurationURL
         let configuration = try HostConfiguration.read(configurationURL)
+        if let mcpConfigurationURL {
+            try MCPBridgeConfiguration.read(mcpConfigurationURL).validateBinding(
+                serviceID: configuration.serviceID, sync: configuration)
+        }
         serviceID = configuration.serviceID
         authorizer = ConfigurationAuthorizer(
             configurationURL: configurationURL, serviceID: serviceID)

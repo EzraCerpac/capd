@@ -12,6 +12,33 @@ import Testing
 @testable import CapdSyncServerHost
 
 @Suite("Separate assistant bridge") struct MCPBridgeTests {
+    @Test(arguments: ["missing", "malformed", "permissions", "service", "credential", "writer"])
+    func invalidInitialPolicyFailsBeforeListenersAndStorage(variant: String) async throws {
+        let f = try BridgeFixture()
+        defer { f.clean() }
+        switch variant {
+        case "missing": try FileManager.default.removeItem(at: f.bridgeConfig)
+        case "malformed": try Data("{}".utf8).write(to: f.bridgeConfig)
+        case "permissions":
+            try FileManager.default.setAttributes(
+                [.posixPermissions: 0o644], ofItemAtPath: f.bridgeConfig.path)
+        default:
+            var policy = f.policy()
+            if variant == "service" { policy["serviceID"] = UUID().uuidString }
+            if variant == "credential" { policy["credentialSHA256"] = f.digest(f.macBearer) }
+            if variant == "writer" { policy["writerDeviceID"] = f.macDevice.uuidString }
+            try f.write(policy)
+        }
+        let socket = f.root.appendingPathComponent("bridge.sock")
+        await #expect(throws: (any Error).self) {
+            try await HostHTTP.run(
+                configurationURL: f.syncConfig, dataDirectory: f.data, port: 0,
+                mcpConfigurationURL: f.bridgeConfig, mcpSocketURL: socket)
+        }
+        #expect(!FileManager.default.fileExists(atPath: socket.path))
+        #expect(!FileManager.default.fileExists(atPath: f.data.path))
+    }
+
     @Test func disabledUnauthorizedAndMissingLibraryDoNotOpenCaptureStorage() async throws {
         let f = try BridgeFixture()
         defer { f.clean() }
