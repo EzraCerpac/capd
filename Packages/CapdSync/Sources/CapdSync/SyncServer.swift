@@ -377,11 +377,24 @@ public final class SyncServer: SyncTransport, Sendable {
         try read { try SnapshotImport.preview($0, snapshot: snapshot, binding: binding) }
     }
 
-    /// Reads a recovered, quiescent authority without creating or changing SQLite files.
+    public enum SnapshotPreviewError: Error, Equatable, Sendable {
+        case authorityNeedsRecovery
+    }
+
+    /// Reads a checkpointed, recovered authority without creating or changing SQLite files.
     /// The caller must exclude all writers for the duration of this operation.
     public static func previewContentSnapshotImport(
         _ snapshot: ContentSnapshotImport, databaseURL: URL, binding: SyncLibraryBinding
     ) throws -> ContentSnapshotImportPreview {
+        for suffix in ["-wal", "-journal"] {
+            let sidecar = URL(fileURLWithPath: databaseURL.path + suffix)
+            if FileManager.default.fileExists(atPath: sidecar.path) {
+                let values = try sidecar.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey])
+                guard values.isRegularFile == true, values.fileSize == 0 else {
+                    throw SnapshotPreviewError.authorityNeedsRecovery
+                }
+            }
+        }
         guard databaseURL.isFileURL,
             var uri = URLComponents(url: databaseURL, resolvingAgainstBaseURL: true)
         else { throw SyncError.invalidOperation }
