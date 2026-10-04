@@ -6,6 +6,38 @@ import Testing
 
 @Suite("Snapshot import regressions")
 struct SnapshotImportRegressionTests {
+    @Test func indexedPreviewSkipsUnrelatedPayloadsAndIndexesStagedUnicodeDuplicates() throws {
+        let fixture = try SnapshotRegressionFixture()
+        defer { fixture.clean() }
+        let authority = fixture.capture(id: fixture.authorityID)
+        let writer = try SyncDatabase.open(
+            at: fixture.root.appendingPathComponent("authority.sqlite"))
+        try writer.write { db in
+            try SyncDatabase.save(db, authority)
+            try db.execute(
+                sql: """
+                    INSERT INTO sync_records (id, payload, source_kind, content_hash)
+                    VALUES (?, ?, 'text', 'unrelated')
+                    """, arguments: [UUID().uuidString, Data("damaged unrelated payload".utf8)])
+        }
+        var first = fixture.capture(
+            id: UUID(uuidString: "00000000-0000-0000-0000-000000000003")!)
+        first.source.contentHash = "café"
+        first.seenCount = 4
+        var second = fixture.capture(id: fixture.laterID)
+        second.source.contentHash = "cafe\u{301}"
+        second.seenCount = 8
+        let snapshot = fixture.snapshot([fixture.capture(id: fixture.sourceID), first, second])
+        let preview = try fixture.server.previewContentSnapshotImport(snapshot)
+        #expect(preview.items.map(\.canonicalCaptureID) == [authority.id, first.id, first.id])
+        #expect(preview.items.map(\.disposition) == [.merge, .insert, .merge])
+        #expect(preview.items.map(\.proposedSeenCount) == [1, 4, 8])
+        let receipt = try fixture.server.importContentSnapshot(snapshot, preview: preview)
+        #expect(receipt.items.map(\.canonicalCaptureID) == [authority.id, first.id, first.id])
+        #expect(try writer.read { try SyncDatabase.record($0, id: first.id)?.seenCount } == 8)
+        #expect(try writer.read { try SyncDatabase.canonical($0, second.id) } == first.id)
+    }
+
     @Test func legacyDuplicateRowsUseFirstCanonicalTombstone() throws {
         let fixture = try SnapshotRegressionFixture()
         defer { fixture.clean() }

@@ -111,25 +111,26 @@ enum SnapshotImport {
             }
             return prior.preview
         }
-        var records = Dictionary(
-            uniqueKeysWithValues: try SyncDatabase.records(db).map { ($0.id, $0) })
+        var records: [UUID: SharedCapture] = [:]
+        var fingerprints: [Fingerprint: UUID] = [:]
         let authorityCursor = try Int64.fetchOne(
             db, sql: "SELECT cursor FROM sync_meta WHERE id=1")!
         var items: [ContentSnapshotItemPreview] = []
         for incoming in snapshot.captures {
             let requested = try SyncDatabase.canonical(db, incoming.id)
             let existing: SharedCapture?
-            if let match = records[requested] {
+            if let match = try records[requested] ?? SyncDatabase.record(db, id: requested) {
                 guard sameIdentity(match.source, incoming.source) else {
                     throw ContentSnapshotImportError.identityCollision
                 }
                 existing = match
-            } else if let match = records.values.lazy.filter({
-                CaptureFingerprint.matches($0.source, incoming.source)
-            }).min(by: { $0.id.uuidString < $1.id.uuidString }) {
-                existing = match
             } else {
-                existing = nil
+                let authority = try SyncDatabase.matchingRecord(db, source: incoming.source)
+                let staged = Fingerprint(incoming.source)
+                    .flatMap { fingerprints[$0] }.flatMap { records[$0] }
+                let match = [authority, staged].compactMap { $0 }
+                    .min { $0.id.uuidString < $1.id.uuidString }
+                existing = match.map { records[$0.id] ?? $0 }
             }
             let canonical = existing?.id ?? incoming.id
             let tombstone = existing?.deleted == true || incoming.deleted
@@ -167,6 +168,11 @@ enum SnapshotImport {
                 records[canonical] = current
             } else {
                 records[canonical] = incoming
+            }
+            if let fingerprint = Fingerprint(incoming.source),
+                fingerprints[fingerprint].map({ canonical.uuidString < $0.uuidString }) ?? true
+            {
+                fingerprints[fingerprint] = canonical
             }
         }
         let bytes = try SyncDatabase.encode(snapshot)
@@ -316,6 +322,22 @@ enum SnapshotImport {
                     deviceID: snapshot.sourceDeviceID, sequence: 1, captureID: shape.id,
                     baseRevision: 0,
                     mutation: .create(shape)))
+        }
+    }
+
+    private struct Fingerprint: Hashable {
+        let kind: String
+        let contentHash: String
+        let blobDigest: String?
+        let blobByteCount: Int?
+
+        init?(_ source: CaptureSource) {
+            guard let hash = source.contentHash else { return nil }
+            kind = source.kind.rawValue
+            contentHash = hash
+            let blob = source.kind == .image ? source.blob : nil
+            blobDigest = blob?.digest
+            blobByteCount = blob?.byteCount
         }
     }
 
