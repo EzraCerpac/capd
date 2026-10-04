@@ -246,6 +246,35 @@ struct MacSyncRuntimeTests {
         #expect(await f.wire.summaryProbes == 2)
     }
 
+    @Test func discoveryReadsBoundProjectionWithoutRequestsOrOutboxWrites() async throws {
+        let f = try RuntimeFixture()
+        defer { f.clean() }
+        var remote = SharedCapture(
+            source: CaptureSource(
+                kind: .text, contentHash: "discovery", title: "Synthetic discovery",
+                selection: "Private synthetic body"), createdAt: Date())
+        remote.manualTags = ["manual"]
+        remote.generated.tags = ["generated"]
+        _ = try f.server.apply(
+            SyncOperation(
+                deviceID: UUID(), sequence: 1, captureID: remote.id,
+                baseRevision: 0, mutation: .create(remote)))
+        let session = try await f.activate()
+        #expect(await session.runtime!.sync().phase == .idle)
+        let requests = await f.wire.requests
+        let pending = try session.store.syncClient!.pendingOperations()
+        let current = try MacDiscoverySnapshot.load(paths: f.paths, localLibraryID: UUID())
+        #expect(current.libraryID == f.binding.libraryID)
+        #expect(current.captures.map(\.id) == [remote.id])
+        #expect(current.captures.first?.manualTags == ["manual"])
+        #expect(try session.store.syncClient!.pendingOperations() == pending)
+        #expect(await f.wire.requests == requests)
+        try MacSyncConfiguration.restore(nil, paths: f.paths)
+        #expect(throws: MacSyncError.configurationRequired) {
+            try MacDiscoverySnapshot.load(paths: f.paths, localLibraryID: UUID())
+        }
+    }
+
     @Test func activationIsAtomicAndUnconfiguredStaysLocal() async throws {
         let f = try RuntimeFixture()
         defer { f.clean() }
