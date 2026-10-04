@@ -103,6 +103,9 @@ final class StylingUITests: XCTestCase {
     func testAccessibilityLayout() throws {
         continueAfterFailure = false
         let app = XCUIApplication()
+        app.launchArguments += [
+            "-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryAccessibilityXXXL",
+        ]
         app.launch()
         XCTAssertTrue(app.buttons["captureButton"].waitForExistence(timeout: 10))
         screenshot("Styled accessibility library")
