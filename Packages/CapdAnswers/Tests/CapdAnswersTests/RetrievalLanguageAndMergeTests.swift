@@ -191,6 +191,7 @@ struct RetrievalLanguageAndMergeTests {
 }
 
 private actor QueryPassageRetriever: AnswerRetrieving {
+    func evidenceRevision() -> String { "immutable" }
     let passages: [String: String]
     var queries: [String] = []
     init(passages: [String: String]) { self.passages = passages }

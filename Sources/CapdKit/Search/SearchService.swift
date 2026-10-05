@@ -45,6 +45,10 @@ public struct SearchService: Sendable {
         try reader.read { db in try Capture.fetchOne(db, key: id) }
     }
 
+    func captures(ids: [Int64]) throws -> [Capture] {
+        try reader.read { db in try Capture.filter(keys: ids).fetchAll(db) }
+    }
+
     /// Finds the saved page represented by a URL after applying capture's canonicalization.
     public func capture(url: URL) throws -> Capture? {
         let hash = CaptureIdentity.contentHash(for: url)

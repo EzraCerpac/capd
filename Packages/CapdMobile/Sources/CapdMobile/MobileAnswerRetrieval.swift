@@ -31,6 +31,16 @@ public actor MobileAnswerRetrieval: AnswerRetrieving {
         access = nil
     }
 
+    public func evidenceRevision() async throws -> String {
+        let lease = try access?.lease()
+        defer { withExtendedLifetime(lease) {} }
+        try Task.checkCancellation()
+        let revision = try await database.read { db in try MobileStore.libraryRevision(db) }
+        try Task.checkCancellation()
+        return
+            "\(revision.cursor):\(revision.sequence):\(revision.pendingChanges):\(revision.rejectedChanges)"
+    }
+
     public func search(_ query: String, limit: Int) async throws -> [AnswerEvidence] {
         try await search([query], limit: limit)[0]
     }

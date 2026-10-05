@@ -26,7 +26,7 @@ public enum AnswerAvailability: Sendable, Equatable {
 public enum AnswerError: Error, LocalizedError, Equatable {
     case unavailable(AnswerAvailability.Reason)
     case emptyQuestion, questionTooLong
-    case insufficientEvidence, contextTooLarge, contentRejected, generationFailed
+    case insufficientEvidence, contextTooLarge, contentRejected, generationFailed, evidenceChanged
 
     public var errorDescription: String? {
         switch self {
@@ -39,6 +39,7 @@ public enum AnswerError: Error, LocalizedError, Equatable {
             "The matching text is too large for this question. Try a narrower question."
         case .contentRejected: "Apple Intelligence could not answer from this content."
         case .generationFailed: "The on-device model could not finish. Try again."
+        case .evidenceChanged: "Saved sources changed while answering. Ask again."
         }
     }
 }
@@ -58,6 +59,8 @@ public struct AnswerEvidence: Sendable, Equatable, Identifiable {
 
 /// Reads local captures from one snapshot, returning one result list per query in order.
 public protocol AnswerRetrieving: Sendable {
+    /// An opaque revision that changes whenever locally readable evidence changes.
+    func evidenceRevision() async throws -> String
     func search(_ queries: [String], limit: Int) async throws -> [[AnswerEvidence]]
 }
 
@@ -149,6 +152,8 @@ public struct GroundedAnswerService: Sendable {
         var candidates: [String: Candidate] = [:]
         var queries = [(terms.joined(separator: " "), 8.0)]
         if terms.count > 1 { queries += terms.map { ($0, 2.0) } }
+        // A change between this read and search conservatively requires a retry.
+        let revision = try await retriever.evidenceRevision()
         let results = try await retriever.search(queries.map(\.0), limit: 12)
         for ((_, weight), hits) in zip(queries, results) {
             try Task.checkCancellation()
@@ -231,6 +236,9 @@ public struct GroundedAnswerService: Sendable {
         }
         guard !statements.isEmpty else { throw AnswerError.insufficientEvidence }
         let cited = Set(statements.flatMap { $0.citations.map(\.number) })
+        let currentRevision = try await retriever.evidenceRevision()
+        try Task.checkCancellation()
+        guard currentRevision == revision else { throw AnswerError.evidenceChanged }
         return GroundedAnswer(
             question: question, statements: statements,
             sources: sources.filter { cited.contains($0.number) })
