@@ -129,6 +129,15 @@ final class LibraryModel {
             try openSelectedSession()
             reload()
         } catch {
+            librarySession = nil
+            store = nil
+            scheduler = nil
+            captures = []
+            capturesByID = [:]
+            loadedLibraryRevision = nil
+            loadedLibrarySessionToken = nil
+            syncState = AutomaticSyncState()
+            systemSearch.resumeWithoutSession()
             storeOpenError = error
             self.error = error.localizedDescription
         }

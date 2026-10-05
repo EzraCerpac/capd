@@ -48,6 +48,17 @@ final class PhoneSystemSearch {
         schedule()
     }
 
+    func resumeWithoutSession() {
+        session = nil
+        preparedLibraryID = nil
+        preparedSessionToken = nil
+        preparedRevision = nil
+        coordinator = nil
+        paused = false
+        if let bridge { invalidate(bridge) }
+        schedule()
+    }
+
     func setEnabled(_ value: Bool) {
         enabled = value
         defaults.set(value, forKey: "capd.system-search.enabled")
@@ -133,10 +144,10 @@ final class PhoneSystemSearch {
         }
         let revision = try session.store.libraryRevision()
         let snapshot = try session.store.systemSearchSnapshot()
+        let captures = snapshot.captures.map {
+            PhoneSearchProjection.capture($0, libraryID: libraryID)
+        }
         if enabled {
-            let captures = snapshot.captures.map {
-                PhoneSearchProjection.capture($0, libraryID: libraryID)
-            }
             guard captures.count <= 1000 else {
                 try journal.begin(libraryID)
                 let index =
@@ -154,19 +165,20 @@ final class PhoneSystemSearch {
                 coordinator = SpotlightCoordinator(libraryID: libraryID, backend: backend())
             }
             try await coordinator?.reconcile(captures, enabled: true)
-            if enabled && !paused {
-                try bridge.refresh(
-                    libraryID: libraryID, captures: captures, systemSearchEnabled: true)
-            } else {
+            if !enabled || paused {
                 try await coordinator?.reconcile([], enabled: false)
                 try journal.removed(libraryID)
                 invalidate(bridge)
                 coordinator = nil
             }
-        } else {
-            try bridge.refresh(libraryID: libraryID, captures: [], systemSearchEnabled: false)
         }
         try session.store.acknowledgeSystemSearch(snapshot.revision)
+        if enabled && !paused {
+            try bridge.refresh(
+                libraryID: libraryID, captures: captures, systemSearchEnabled: true)
+        } else if !enabled {
+            try bridge.refresh(libraryID: libraryID, captures: [], systemSearchEnabled: false)
+        }
         preparedRevision = revision
     }
 
