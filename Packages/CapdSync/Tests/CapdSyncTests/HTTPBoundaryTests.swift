@@ -488,24 +488,35 @@ struct HTTPBoundaryTests {
         try client.enqueue(captureID: capture.id, mutation: .create(capture))
         try client.push(to: f.transport("A"))
         let baseline = try f.a.baseline()
-        let operation = try client.enqueue(
-            captureID: capture.id,
-            mutation: .edit(
-                CaptureEdit(
-                    generatedPatch: GeneratedContentPatch(
-                        ocrText: .set(String(repeating: "o", count: 9_000_000))))))
+        let local = try client.captures()
+        let edit = CaptureEdit(
+            generatedPatch: GeneratedContentPatch(
+                ocrText: .set(String(repeating: "o", count: 9_000_000))))
+        #expect(throws: SyncHTTPError.resourceLimit) {
+            try client.enqueue(captureID: capture.id, mutation: .edit(edit))
+        }
+        let localUnchanged = try client.captures() == local
+        #expect(localUnchanged)
+        let pendingCount = try client.pendingOperations().count
+        #expect(pendingCount == 0)
+        let smaller = try client.enqueue(
+            captureID: capture.id, mutation: .edit(CaptureEdit(rating: 4)))
+        #expect(smaller.sequence == 2)
+        let operation = SyncOperation(
+            id: smaller.id, deviceID: smaller.deviceID, sequence: smaller.sequence,
+            captureID: smaller.captureID, baseRevision: smaller.baseRevision,
+            predecessorID: smaller.predecessorID, mutation: .edit(edit))
         for _ in 0..<2 {
-            #expect(throws: SyncHTTPError.resourceLimit) { try client.push(to: f.transport("A")) }
-            #expect(try client.pendingOperations() == [operation])
-            #expect(try f.a.baseline() == baseline)
+            #expect(throws: SyncHTTPError.resourceLimit) { try f.transport("A").apply(operation) }
+            #expect(try client.pendingOperations() == [smaller])
+            let authorityUnchanged = try f.a.baseline() == baseline
+            #expect(authorityUnchanged)
             #expect(try f.a.changes(after: baseline.cursor).changes.isEmpty)
         }
-        let smaller = SyncOperation(
-            id: operation.id, deviceID: f.device, sequence: operation.sequence,
-            captureID: capture.id, baseRevision: 1,
-            mutation: .edit(CaptureEdit(rating: 4)))
-        #expect(try f.transport("A").apply(smaller).outcome == .accepted)
+        #expect(try client.push(to: f.transport("A")).first?.outcome == .accepted)
+        #expect(try client.pendingOperations().isEmpty)
         #expect(try f.a.baseline().deviceSequences[f.device] == 2)
+        #expect(try f.a.baseline().captures.first?.rating == 4)
     }
 
     @Test(arguments: [false, true])
