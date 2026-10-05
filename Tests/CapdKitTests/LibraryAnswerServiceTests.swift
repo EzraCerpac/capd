@@ -87,7 +87,10 @@ struct LibraryAnswerServiceTests {
 
     @Test(
         "Sources changed during awaited generation require a new answer",
-        arguments: ["edit", "delete", "revision", "unchanged"])
+        arguments: [
+            "edit", "delete", "title", "url", "host", "note", "body", "ocr", "kind", "revision",
+            "unchanged",
+        ])
     func revalidatesSources(change: String) async throws {
         try await withAnswerStore { store in
             let id = try insert(
@@ -111,6 +114,17 @@ struct LibraryAnswerServiceTests {
                             arguments: ["Changed while answering", id])
                     case "delete":
                         try db.execute(sql: "DELETE FROM captures WHERE id = ?", arguments: [id])
+                    case "title", "url", "host", "note", "body":
+                        try db.execute(
+                            sql: "UPDATE captures SET \(change) = ? WHERE id = ?",
+                            arguments: ["Changed while answering", id])
+                    case "ocr":
+                        try db.execute(
+                            sql: "UPDATE captures SET ocr_text = ? WHERE id = ?",
+                            arguments: ["Changed while answering", id])
+                    case "kind":
+                        try db.execute(
+                            sql: "UPDATE captures SET kind = 'link' WHERE id = ?", arguments: [id])
                     case "revision":
                         try db.execute(
                             sql: "UPDATE captures SET updated_at = ? WHERE id = ?",
@@ -123,7 +137,7 @@ struct LibraryAnswerServiceTests {
                 ])
             }
             let service = LibraryAnswerService(search: SearchService(store: store), model: model)
-            if change == "unchanged" {
+            if change == "unchanged" || change == "revision" {
                 let answer = try await service.answer("hiking")
                 #expect(answer.sources.map(\.captureID).contains(id))
                 #expect(answer.sources.count == 2)
@@ -132,6 +146,113 @@ struct LibraryAnswerServiceTests {
                     try await service.answer("hiking")
                 }
             }
+        }
+    }
+
+    @Test(arguments: ["tagging", "claim", "timestamps", "rating"])
+    func bookkeepingChangesKeepUnchangedEvidence(change: String) async throws {
+        try await withAnswerStore { store in
+            let id = try insert(
+                Capture(
+                    kind: .text, title: "Hiking", selection: "Pack water and a warm jacket.",
+                    createdAt: Date()), into: store)
+            let model = StubAnswerModel { _, sources in
+                #expect(sources.first?.excerpt.contains("Pack water") == true)
+                await Task.yield()
+                try await store.dbPool.write { db in
+                    switch change {
+                    case "tagging":
+                        try db.execute(
+                            sql:
+                                "UPDATE captures SET tags = 'outdoors', tags_version = 2 WHERE id = ?",
+                            arguments: [id])
+                    case "claim":
+                        try db.execute(
+                            sql:
+                                "UPDATE captures SET enrichment_state = 'fetching', attempt_count = 1, last_attempt_at = ?, body_status = 'thin', body_source = 'fetch' WHERE id = ?",
+                            arguments: [Date(), id])
+                    case "timestamps":
+                        try db.execute(
+                            sql:
+                                "UPDATE captures SET updated_at = ?, last_seen_at = ?, seen_count = 2, reminder_at = ? WHERE id = ?",
+                            arguments: [Date(), Date(), Date(), id])
+                    default:
+                        try db.execute(
+                            sql: "UPDATE captures SET rating = 5 WHERE id = ?", arguments: [id])
+                    }
+                }
+                return LibraryAnswerDraft(statements: [
+                    .init(text: "Bring water and a warm layer.", sourceNumbers: [1])
+                ])
+            }
+            let answer = try await LibraryAnswerService(
+                search: SearchService(store: store), model: model
+            ).answer("hiking")
+            #expect(answer.sources.first?.captureID == id)
+            #expect(answer.sources.first?.excerpt.contains("Pack water") == true)
+        }
+    }
+
+    @Test(arguments: [false, true])
+    func tagSnippetEvidenceStaysFencedUnlessProseSupportsIt(prose: Bool) async throws {
+        try await withAnswerStore { store in
+            var capture = Capture(kind: .text, title: "Gear notes", createdAt: Date())
+            capture.tags = prose ? "outdoors" : "hiking"
+            if prose {
+                capture.body =
+                    String(repeating: "Earlier context. ", count: 70)
+                    + "Hiking\nrequires\twater and a warm jacket. "
+                    + String(repeating: "Later context. ", count: 70)
+            }
+            let id = try insert(capture, into: store)
+            let observed = Mutex("")
+            let model = StubAnswerModel { _, sources in
+                observed.withLock { $0 = sources[0].excerpt }
+                #expect(sources.first?.excerpt.lowercased().contains("hiking") == true)
+                if prose { #expect(sources.first?.excerpt.contains("…") == true) }
+                await Task.yield()
+                try await store.dbPool.write { db in
+                    try db.execute(
+                        sql: "UPDATE captures SET tags = 'cycling' WHERE id = ?", arguments: [id])
+                }
+                return LibraryAnswerDraft(statements: [
+                    .init(text: "Hiking is saved here.", sourceNumbers: [1])
+                ])
+            }
+            let service = LibraryAnswerService(search: SearchService(store: store), model: model)
+            if prose {
+                let answer = try await service.answer("hiking")
+                #expect(answer.sources.first?.excerpt == observed.withLock { $0 })
+            } else {
+                await #expect(throws: LibraryAnswerError.evidenceChanged) {
+                    try await service.answer("hiking")
+                }
+            }
+        }
+    }
+
+    @Test func hostSnippetAllowsUnrelatedTagChanges() async throws {
+        try await withAnswerStore { store in
+            var capture = Capture(
+                kind: .link, url: "https://hiking.example.invalid/item",
+                host: "hiking.example.invalid", title: "Gear notes", createdAt: Date())
+            capture.tags = "outdoors"
+            let id = try insert(capture, into: store)
+            let model = StubAnswerModel { _, sources in
+                #expect(sources[0].excerpt.contains("Relevant excerpt: hiking.example.invalid"))
+                await Task.yield()
+                try await store.dbPool.write { db in
+                    try db.execute(
+                        sql: "UPDATE captures SET tags = 'cycling' WHERE id = ?", arguments: [id])
+                }
+                return LibraryAnswerDraft(statements: [
+                    .init(text: "A saved hiking site.", sourceNumbers: [1])
+                ])
+            }
+            let answer = try await LibraryAnswerService(
+                search: SearchService(store: store), model: model
+            ).answer("hiking")
+            #expect(answer.sources.first?.captureID == id)
         }
     }
 
