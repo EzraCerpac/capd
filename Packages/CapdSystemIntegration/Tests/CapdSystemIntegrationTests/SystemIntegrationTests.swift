@@ -24,6 +24,8 @@ private final class MemoryIndex: SpotlightBackend {
     var batches: [[String]] = []
     var failReplace = false
     var partiallyAcceptReplace = false
+    var partialIdentifierDeleteFailures = 0
+    var partialDomainDeleteFailures = 0
     var pauseReplace = false
     var started = false
     var continuation: CheckedContinuation<Void, Never>?
@@ -45,6 +47,12 @@ private final class MemoryIndex: SpotlightBackend {
     }
     func delete(identifiers: [String]) async throws {
         calls.append("deleteIDs")
+        if partialIdentifierDeleteFailures > 0, let first = identifiers.first {
+            items.removeValue(forKey: first)
+            domains.removeValue(forKey: first)
+            partialIdentifierDeleteFailures -= 1
+            throw SystemIntegrationError.unavailable
+        }
         for id in identifiers {
             items.removeValue(forKey: id)
             domains.removeValue(forKey: id)
@@ -52,6 +60,14 @@ private final class MemoryIndex: SpotlightBackend {
     }
     func delete(domain: String) async throws {
         calls.append("deleteDomain")
+        if partialDomainDeleteFailures > 0 {
+            if let first = domains.filter({ $0.value == domain }).keys.sorted().first {
+                items.removeValue(forKey: first)
+                domains.removeValue(forKey: first)
+            }
+            partialDomainDeleteFailures -= 1
+            throw SystemIntegrationError.unavailable
+        }
         for id in domains.filter({ $0.value == domain }).keys {
             items.removeValue(forKey: id)
             domains.removeValue(forKey: id)
@@ -116,6 +132,79 @@ struct CaptureRouteTests {
 
 @MainActor
 struct SpotlightCoordinatorTests {
+    @Test func partialIdentifierDeletionRebuildsReintroducedUnchangedItems() async throws {
+        let clock = IndexClock()
+        let backend = MemoryIndex()
+        let coordinator = SpotlightCoordinator(
+            libraryID: library, backend: backend, now: { clock.date })
+        let first = fixture()
+        let omitted = SearchCapture(
+            reference: CaptureReference(
+                libraryID: library,
+                captureID: UUID(uuidString: "00000000-0000-0000-0000-000000000003")!),
+            title: "Omitted synthetic capture")
+        let retained = SearchCapture(
+            reference: CaptureReference(
+                libraryID: library,
+                captureID: UUID(uuidString: "00000000-0000-0000-0000-000000000004")!),
+            title: "Retained synthetic capture")
+        try await coordinator.reconcile([first, omitted, retained], enabled: true)
+        clock.date += 60 * 60
+        backend.partialIdentifierDeleteFailures = 1
+        await #expect(throws: SystemIntegrationError.unavailable) {
+            try await coordinator.reconcile([retained], enabled: true)
+        }
+        #expect(backend.items[first.id] == nil)
+        #expect(backend.items[omitted.id] != nil)
+        #expect(coordinator.needsRenewal)
+        clock.date += 6 * 60 * 60
+        try await coordinator.reconcile([first, retained], enabled: true)
+        #expect(Set(backend.items.keys) == [first.id, retained.id])
+        #expect(backend.batches.last == [first.id, retained.id].sorted())
+        #expect(backend.calls.filter { $0 == "deleteDomain" }.count == 2)
+        #expect(!coordinator.needsRenewal)
+        clock.date += 24 * 60 * 60 - 1
+        try await coordinator.reconcile([first, retained], enabled: true)
+        #expect(backend.batches.count == 2)
+        #expect(!coordinator.needsRenewal)
+        clock.date += 1
+        #expect(coordinator.needsRenewal)
+        try await coordinator.reconcile([first, retained], enabled: true)
+        #expect(backend.batches.count == 3)
+        #expect(backend.batches.last == [first.id, retained.id].sorted())
+    }
+
+    @Test func repeatedPartialDeletionFailuresKeepRecoveryScopedAndRetryable() async throws {
+        let backend = MemoryIndex()
+        let coordinator = SpotlightCoordinator(libraryID: library, backend: backend)
+        let first = fixture()
+        let omitted = SearchCapture(
+            reference: CaptureReference(libraryID: library, captureID: UUID()), title: "Omitted")
+        let foreign = SearchCapture(
+            reference: CaptureReference(libraryID: UUID(), captureID: UUID()), title: "Unrelated")
+        backend.items[foreign.id] = foreign
+        backend.domains[foreign.id] = "another-library-domain"
+        try await coordinator.reconcile([first, omitted], enabled: true)
+        backend.partialIdentifierDeleteFailures = 1
+        await #expect(throws: SystemIntegrationError.unavailable) {
+            try await coordinator.reconcile([], enabled: true)
+        }
+        backend.partialDomainDeleteFailures = 2
+        for _ in 0..<2 {
+            await #expect(throws: SystemIntegrationError.unavailable) {
+                try await coordinator.reconcile([first], enabled: true)
+            }
+            #expect(coordinator.needsRenewal)
+            #expect(backend.items[foreign.id] == foreign)
+            #expect(backend.batches.count == 1)
+        }
+        try await coordinator.reconcile([first], enabled: true)
+        #expect(Set(backend.items.keys) == [first.id, foreign.id])
+        #expect(backend.batches.last == [first.id])
+        #expect(backend.calls.filter { $0 == "deleteDomain" }.count == 4)
+        #expect(!coordinator.needsRenewal)
+    }
+
     @Test func unchangedEntriesRenewIndependentlyAfterOneDay() async throws {
         let clock = IndexClock()
         let backend = MemoryIndex()

@@ -94,7 +94,12 @@ public final class SpotlightCoordinator {
         try Task.checkCancellation()
         let removed = Set(indexed.keys).subtracting(visible.keys).sorted()
         if !removed.isEmpty {
-            try await backend.delete(identifiers: removed)
+            do {
+                try await backend.delete(identifiers: removed)
+            } catch {
+                initialized = false
+                throw error
+            }
             for id in removed { indexed.removeValue(forKey: id) }
         }
         try Task.checkCancellation()
