@@ -874,7 +874,7 @@ func activationDiscoveryLoadsOnlyNewestRetainedPreparation(corruptOlder: Bool) t
     #expect(try f.activation.preparations() == [newest])
 }
 
-@Test(arguments: ["", "newly-generated-synthetic-credential"])
+@Test(arguments: ["", "synthetic-activation-only"])
 func activationResumesJournaledCredentialAfterPrepublicationTermination(credential: String)
     async throws
 {
@@ -903,6 +903,62 @@ func activationResumesJournaledCredentialAfterPrepublicationTermination(credenti
     #expect(try f.credentials.read(for: prep.enrollment) == "synthetic-activation-only")
     #expect(try MobileLibraryAccess.selected(in: f.root).enrollment == prep.enrollment)
     #expect(try !reopened.hasPendingCredentialRecovery(for: prep))
+}
+
+@Test(arguments: ["newly-generated-synthetic-credential", "synthetic-activation-only "])
+func activationRefusesDifferentProposedCredentialDuringJournalRecovery(credential: String)
+    async throws
+{
+    let f = ActivationFixture()
+    defer { f.clean() }
+    _ = try f.populated()
+    let prep = try f.activation.prepare(endpoint: f.endpoint, binding: f.binding)
+    let server = try f.authority()
+    let handoff = try f.handoff(prep, server: server)
+    let credentials = InterruptedInsertionCredentials(store: f.credentials)
+    let activation = MobileLibraryActivation(root: f.root, credentials: credentials)
+    await #expect(throws: SyncHTTPError.unavailable) {
+        try await activation.activate(
+            prep, handoff: handoff, credential: "synthetic-activation-only",
+            transport: ActivationRemote(server, prep.enrollment))
+    }
+    let journalURL = prep.directory(in: f.root).appendingPathComponent("activation-credential.json")
+    let journal = try Data(contentsOf: journalURL)
+    let original = try Data(contentsOf: f.originalURL)
+    let selected = try MobileLibraryAccess.selected(in: f.root)
+    let transport = RecoveryCountingRemote(ActivationRemote(server, prep.enrollment))
+    await #expect(throws: SyncConnectionError.invalidCredential) {
+        try await activation.activate(
+            prep, handoff: handoff, credential: credential, transport: transport)
+    }
+    #expect(await transport.calls == 0)
+    #expect(try f.credentials.read(for: prep.enrollment) == "synthetic-activation-only")
+    #expect(try MobileLibraryAccess.selected(in: f.root) == selected)
+    #expect(try Data(contentsOf: f.originalURL) == original)
+    #expect(FileManager.default.fileExists(atPath: journalURL.path))
+    guard FileManager.default.fileExists(atPath: journalURL.path) else { return }
+    #expect(try Data(contentsOf: journalURL) == journal)
+    #expect(try activation.hasPendingCredentialRecovery(for: prep))
+    let resumed = try await activation.activate(
+        prep, handoff: handoff, credential: "", transport: transport)
+    #expect(resumed.enrollment == prep.enrollment)
+    #expect(try !activation.hasPendingCredentialRecovery(for: prep))
+}
+
+private actor RecoveryCountingRemote: AsyncSyncTransport {
+    nonisolated let binding: SyncLibraryBinding
+    nonisolated let deviceID: UUID
+    let remote: ActivationRemote
+    private(set) var calls = 0
+    init(_ remote: ActivationRemote) {
+        self.remote = remote
+        binding = remote.binding
+        deviceID = remote.deviceID
+    }
+    func send(_ request: SyncHTTPRequest) async throws -> SyncHTTPResponse {
+        calls += 1
+        return try await remote.send(request)
+    }
 }
 
 private final class InterruptedInsertionCredentials: SyncCredentialCreationStore,

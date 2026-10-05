@@ -329,7 +329,9 @@ public struct MobileLibraryActivation: Sendable {
         if let attempt = try credentialAttempt(for: preparation),
             let stored = try? credentials.read(for: enrollment)
         {
-            guard BlobReference(data: Data(stored.utf8)).digest == attempt.credentialDigest else {
+            guard BlobReference(data: Data(stored.utf8)).digest == attempt.credentialDigest,
+                credential.isEmpty || credential.utf8.elementsEqual(stored.utf8)
+            else {
                 throw SyncConnectionError.invalidCredential
             }
             activationCredential = stored
