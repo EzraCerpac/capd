@@ -353,6 +353,10 @@ def imported_capture(identity, payload, import_id):
         if blob["byteCount"] > 8_388_608:
             raise PreparationError("image exceeds the shared blob limit")
         source["blob"] = {key: blob[key] for key in ("digest", "byteCount")}
+        if row["kind"] == "image":
+            if source.get("contentHash") not in (None, blob["digest"]):
+                raise PreparationError("image fingerprint differs from verified bytes")
+            source["contentHash"] = blob["digest"]
     elif row["kind"] == "image":
         raise PreparationError("image needs verified bytes")
     generated = {"tags": payload["generatedTags"]}

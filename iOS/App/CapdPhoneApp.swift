@@ -63,7 +63,9 @@ final class LibraryModel {
         }
     }
 
-    func capture(id: UUID) -> MobileCapture? { capturesByID[id] }
+    func capture(id: UUID) -> MobileCapture? {
+        capturesByID[id] ?? (try? store?.capture(id: id))
+    }
 
     func update(capture: MobileCapture, note: String, tags: [String], resolving: [UUID]) -> Bool {
         do {

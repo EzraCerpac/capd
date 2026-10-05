@@ -300,9 +300,54 @@ class MigrationTests(unittest.TestCase):
         with self.assertRaises(migration.PreparationError):
             migration.import_initial_mac(self.archive, authority, binding, str(uuid.uuid4()))
 
+    def test_image_import_derives_verified_identity_for_absent_or_null_hash(self):
+        expected = migration.digest(self.source / "assets" / "nested" / "image.png")
+        for stored in ("absent", None, expected):
+            with self.subTest(stored=stored):
+                if stored is None:
+                    self.db.execute("ALTER TABLE captures ADD COLUMN content_hash TEXT")
+                elif stored != "absent":
+                    self.db.execute("UPDATE captures SET content_hash=? WHERE id=42", (stored,))
+                self.db.execute("DROP TABLE IF EXISTS sync_legacy_snapshot")
+                self.db.commit()
+                if self.archive.exists():
+                    shutil.rmtree(self.archive)
+                identities = migration.backfill_legacy(self.source, "captures.sqlite")
+                migration.backup(self.source, self.archive)
+                authority, binding = self.authority()
+                try:
+                    migration.import_initial_mac(self.archive, authority, binding, str(uuid.uuid4()))
+                    with contextlib.closing(sqlite3.connect(authority / "server.sqlite")) as db:
+                        row = db.execute("SELECT payload,content_hash,blob_digest,blob_byte_count FROM sync_records WHERE id=?", (identities[42],)).fetchone()
+                        record = json.loads(row[0])
+                        self.assertEqual(expected, record["source"].get("contentHash"))
+                        self.assertEqual(expected, row[1])
+                        self.assertEqual(expected, row[2])
+                        found = db.execute("SELECT id FROM sync_records WHERE source_kind='image' AND content_hash=? AND blob_digest=? AND blob_byte_count=?", (expected, expected, row[3])).fetchone()
+                        self.assertEqual((identities[42],), found)
+                finally:
+                    shutil.rmtree(authority)
+
+    def test_image_hash_mismatch_refuses_import_atomically(self):
+        self.db.execute("ALTER TABLE captures ADD COLUMN content_hash TEXT")
+        self.db.execute("UPDATE captures SET content_hash=? WHERE id=42", ("0" * 64,))
+        self.db.commit()
+        migration.backfill_legacy(self.source, "captures.sqlite")
+        migration.backup(self.source, self.archive)
+        authority, binding = self.authority()
+        before_assets = migration.inventory(authority / "assets")
+        with contextlib.closing(sqlite3.connect(authority / "server.sqlite")) as db:
+            before_sql = migration.sql_signature(db)
+        with self.assertRaisesRegex(migration.PreparationError, "image fingerprint differs from verified bytes"):
+            migration.import_initial_mac(self.archive, authority, binding, str(uuid.uuid4()))
+        with contextlib.closing(sqlite3.connect(authority / "server.sqlite")) as db:
+            self.assertEqual(before_sql, migration.sql_signature(db))
+        self.assertEqual(before_assets, migration.inventory(authority / "assets"))
+
     def test_imported_records_match_indexed_source_identity(self):
         self.db.execute("ALTER TABLE captures ADD COLUMN content_hash TEXT")
-        self.db.execute("UPDATE captures SET content_hash=? WHERE id=42", ("image-cafe\u0301",))
+        image_hash = migration.digest(self.source / "assets" / "nested" / "image.png")
+        self.db.execute("UPDATE captures SET content_hash=? WHERE id=42", (image_hash,))
         self.db.execute("UPDATE captures SET content_hash=?,asset_path=? WHERE id=81",
                         ("text-cafe\u0301", "nested/image.png"))
         self.db.commit()
@@ -315,10 +360,10 @@ class MigrationTests(unittest.TestCase):
             ORDER BY id LIMIT 1"""
         with contextlib.closing(sqlite3.connect(authority / "server.sqlite")) as db:
             records = {row[0]: json.loads(row[1]) for row in db.execute("SELECT id,payload FROM sync_records")}
-            self.assertEqual("image-cafe\u0301", records[identities[42]]["source"]["contentHash"])
+            self.assertEqual(image_hash, records[identities[42]]["source"]["contentHash"])
             self.assertEqual("text-cafe\u0301", records[identities[81]]["source"]["contentHash"])
             image_blob = records[identities[42]]["source"]["blob"]
-            image_identity = ("image", "image-caf\u00e9", image_blob["digest"], image_blob["byteCount"])
+            image_identity = ("image", image_hash, image_blob["digest"], image_blob["byteCount"])
             image_match = json.loads(db.execute(lookup, image_identity).fetchone()[0])
             self.assertEqual(identities[42], image_match["id"])
             wrong_size = (*image_identity[:3], image_blob["byteCount"] + 1)
