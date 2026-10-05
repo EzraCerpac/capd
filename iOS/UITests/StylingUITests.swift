@@ -75,6 +75,39 @@ final class StylingUITests: XCTestCase {
         let app = XCUIApplication()
         app.launch()
         XCTAssertTrue(app.buttons["captureButton"].waitForExistence(timeout: 10))
+        seedLongMetadataAndTags(in: app)
+        app.swipeUp()
+        screenshot("Styled long metadata and tags")
+        app.terminate()
+    }
+
+    @MainActor
+    func testAccessibilityLayout() throws {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchArguments += [
+            "-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryAccessibilityXXXL",
+        ]
+        app.launch()
+        XCTAssertTrue(app.buttons["captureButton"].waitForExistence(timeout: 10))
+        seedLongMetadataAndTags(in: app)
+        screenshot("Styled accessibility library")
+        app.swipeUp()
+        screenshot("Styled accessibility long row")
+        app.swipeUp()
+        screenshot("Styled accessibility scrolled sources")
+        let title = app.staticTexts["Long location source"]
+        XCTAssertTrue(title.exists)
+        title.tap()
+        XCTAssertTrue(app.buttons["editCapture"].waitForExistence(timeout: 5))
+        app.buttons["editCapture"].tap()
+        XCTAssertTrue(app.textFields["editTagsInput"].waitForExistence(timeout: 5))
+        screenshot("Styled accessibility annotation")
+        app.terminate()
+    }
+
+    @MainActor
+    private func seedLongMetadataAndTags(in app: XCUIApplication) {
         if !app.staticTexts["Long location source"].exists {
             app.buttons["captureButton"].tap()
             app.segmentedControls.buttons["Link"].tap()
@@ -94,33 +127,6 @@ final class StylingUITests: XCTestCase {
             XCTAssertTrue(app.buttons["editCapture"].waitForExistence(timeout: 5))
             app.navigationBars.buttons["BackButton"].tap()
         }
-        app.swipeUp()
-        screenshot("Styled long metadata and tags")
-        app.terminate()
-    }
-
-    @MainActor
-    func testAccessibilityLayout() throws {
-        continueAfterFailure = false
-        let app = XCUIApplication()
-        app.launchArguments += [
-            "-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryAccessibilityXXXL",
-        ]
-        app.launch()
-        XCTAssertTrue(app.buttons["captureButton"].waitForExistence(timeout: 10))
-        screenshot("Styled accessibility library")
-        app.swipeUp()
-        screenshot("Styled accessibility long row")
-        app.swipeUp()
-        screenshot("Styled accessibility scrolled sources")
-        let title = app.staticTexts["Long location source"]
-        XCTAssertTrue(title.exists)
-        title.tap()
-        XCTAssertTrue(app.buttons["editCapture"].waitForExistence(timeout: 5))
-        app.buttons["editCapture"].tap()
-        XCTAssertTrue(app.textFields["editTagsInput"].waitForExistence(timeout: 5))
-        screenshot("Styled accessibility annotation")
-        app.terminate()
     }
 
     @MainActor

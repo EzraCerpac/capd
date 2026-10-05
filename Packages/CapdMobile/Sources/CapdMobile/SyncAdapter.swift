@@ -98,7 +98,10 @@ public actor MobileSyncCoordinator {
             try Task.checkCancellation()
             let receipts: [SyncReceipt]
             if let connection = await adapter.asyncConnection() {
-                try await store.pull(from: connection.transport, credential: connection.credential)
+                do {
+                    try await store.pull(
+                        from: connection.transport, credential: connection.credential)
+                } catch SyncError.recoverySequenceCollision where !pullOnly {}
                 receipts =
                     pullOnly
                     ? []
@@ -107,7 +110,9 @@ public actor MobileSyncCoordinator {
                 try Task.checkCancellation()
                 try await store.pull(from: connection.transport, credential: connection.credential)
             } else if let transport = await adapter.transport() {
-                try store.pull(from: transport)
+                do {
+                    try store.pull(from: transport)
+                } catch SyncError.recoverySequenceCollision where !pullOnly {}
                 receipts = pullOnly ? [] : try store.push(to: transport)
                 try Task.checkCancellation()
                 try store.pull(from: transport)
