@@ -730,3 +730,75 @@ func reviewedCanonicalRecordsOnEarlyPagesCannotBypassVerifiedCursor(lateAuthorit
         try await reader.read { try Int64.fetchOne($0, sql: "SELECT cursor FROM sync_meta") }
             == 10_000)
 }
+
+private actor ActivationPreflightRemote: AsyncSyncTransport {
+    enum Failure: Error { case unexpectedFullBaseline }
+    nonisolated let binding: SyncLibraryBinding
+    nonisolated let deviceID: UUID
+    let base: ActivationRemote
+    let requiresSummary: Bool
+    var baselineLimits: [Int] = []
+
+    init(server: SyncServer, enrollment: SyncEnrollment, requiresSummary: Bool) {
+        base = ActivationRemote(server, enrollment)
+        binding = enrollment.binding
+        deviceID = enrollment.deviceID
+        self.requiresSummary = requiresSummary
+    }
+
+    func send(_ request: SyncHTTPRequest) async throws -> SyncHTTPResponse {
+        let envelope = try JSONDecoder().decode(SyncHTTPEnvelope.self, from: request.body)
+        if case .baselinePage(_, let limit, _) = envelope.action {
+            baselineLimits.append(limit)
+            if requiresSummary && limit != 0 { throw Failure.unexpectedFullBaseline }
+        }
+        return try await base.send(request)
+    }
+}
+
+@Test(arguments: [false, true])
+func activationWithoutReviewedImportUsesSummaryPreflights(archiveOriginal: Bool) async throws {
+    let f = ActivationFixture()
+    defer { f.clean() }
+    if archiveOriginal {
+        _ = try f.populated()
+    } else {
+        _ = try MobileLibrarySession.open(root: f.root, role: .app, credentials: f.credentials)
+    }
+    let prep = try f.activation.prepare(endpoint: f.endpoint, binding: f.binding)
+    let server = try f.authority()
+    let capture = SharedCapture(
+        source: CaptureSource(kind: .text, selection: "Synthetic summary preflight capture"))
+    _ = try server.apply(
+        SyncOperation(
+            deviceID: UUID(), sequence: 1, captureID: capture.id,
+            baseRevision: 0, mutation: .create(capture)))
+    let remote = ActivationPreflightRemote(
+        server: server, enrollment: prep.enrollment, requiresSummary: true)
+    let config = try await f.activation.activate(
+        prep, handoff: nil, credential: "synthetic-activation-only",
+        originalDisposition: archiveOriginal ? .keepArchivedOnly : .importReviewed,
+        transport: remote)
+    #expect(await remote.baselineLimits == [0, 0])
+    #expect(try MobileLibraryAccess.selected(in: f.root) == config)
+    let app = try MobileLibrarySession.open(root: f.root, role: .app, credentials: f.credentials)
+    #expect(try app.store.search().map(\.id) == [capture.id])
+    #expect(try app.store.pending().isEmpty)
+}
+
+@Test func reviewedActivationStillChecksFullAuthorityContentBeforePublication() async throws {
+    let f = ActivationFixture()
+    defer { f.clean() }
+    _ = try f.populated()
+    let prep = try f.activation.prepare(endpoint: f.endpoint, binding: f.binding)
+    let server = try f.authority()
+    let handoff = try f.handoff(prep, server: server)
+    let remote = ActivationPreflightRemote(
+        server: server, enrollment: prep.enrollment, requiresSummary: false)
+    _ = try await f.activation.activate(
+        prep, handoff: handoff, credential: "synthetic-activation-only", transport: remote)
+    let limits = await remote.baselineLimits
+    #expect(limits.count >= 2)
+    #expect(limits.first == 100)
+    #expect(limits.last == 100)
+}
