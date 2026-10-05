@@ -130,20 +130,26 @@ private struct OfflineReviewFixture {
 }
 
 private final class ReviewPagingTransport: SyncTransport, @unchecked Sendable {
-    let captureID = UUID()
+    let captureID: UUID
+    private let sourceRecord: SharedCapture
     private let deviceID = UUID()
     private let pages: Int
     private let lock = NSLock()
     private var requests = 0
     var calls: Int { lock.withLock { requests } }
-    init(pages: Int) { self.pages = pages }
+    init(pages: Int) {
+        let captureID = UUID()
+        self.captureID = captureID
+        self.sourceRecord = SharedCapture(
+            id: captureID, source: CaptureSource(kind: .text, selection: "Paged remote source"))
+        self.pages = pages
+    }
     func changes(after cursor: Int64, limit: Int) throws -> FeedPage {
         lock.withLock { requests += 1 }
         if cursor == Int64(pages * 100) { return FeedPage(cursor: cursor, changes: []) }
         let changes = (1...100).map { offset in
             let revision = cursor + Int64(offset)
-            var capture = SharedCapture(
-                id: captureID, source: CaptureSource(kind: .text, selection: "Paged remote source"))
+            var capture = sourceRecord
             capture.revision = revision
             return FeedChange(
                 cursor: revision, operationID: UUID(), deviceID: deviceID, sequence: revision,
