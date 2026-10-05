@@ -148,8 +148,43 @@ def working_copy(root):
     return root, descriptor
 
 
+def require_unused_sync(db):
+    error = "copied source must be unbound and unused for sync"
+    preparatory = {"sync_capture_ids", "sync_legacy_snapshot"}
+    tables = {name.lower(): name for (name,) in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    try:
+        for name, original in tables.items():
+            if not name.startswith("sync_") or name in preparatory:
+                continue
+            quoted = '"' + original.replace('"', '""') + '"'
+            if name != "sync_meta":
+                if db.execute(f"SELECT 1 FROM {quoted} LIMIT 1").fetchone():
+                    raise migration.PreparationError(error)
+                continue
+            rows = db.execute(f"SELECT id, role, device, sequence, cursor, floor, observed_sequence FROM {quoted}").fetchmany(2)
+            if not rows:
+                continue
+            if len(rows) != 1:
+                raise migration.PreparationError(error)
+            identifier, role, device, *counters = rows[0]
+            if type(identifier) is not int or identifier != 1 or role != "client" or not isinstance(device, str):
+                raise migration.PreparationError(error)
+            if str(uuid.UUID(device)).lower() != device.lower():
+                raise migration.PreparationError(error)
+            if any(type(value) is not int or value != 0 for value in counters):
+                raise migration.PreparationError(error)
+        if "sqlite_sequence" in tables:
+            for name, sequence in db.execute("SELECT name, seq FROM sqlite_sequence"):
+                if name.lower().startswith("sync_") and name.lower() not in preparatory and sequence != 0:
+                    raise migration.PreparationError(error)
+    except (sqlite3.Error, ValueError, AttributeError) as exc:
+        raise migration.PreparationError(error) from exc
+
+
 def backfill(root):
     root, _ = working_copy(root)
+    with contextlib.closing(migration.connect(root / DATABASE, readonly=True)) as db:
+        require_unused_sync(db)
     return migration._backfill_legacy(root, DATABASE)
 
 
@@ -164,6 +199,7 @@ def archive_prepared(root, destination):
         payload.mkdir(mode=0o700)
         with contextlib.closing(migration.connect(root / DATABASE, readonly=True)) as reader:
             migration.integrity(reader)
+            require_unused_sync(reader)
             signature = migration.sql_signature(reader)
             with contextlib.closing(sqlite3.connect(payload / DATABASE)) as target:
                 reader.backup(target)
@@ -195,6 +231,7 @@ def verify_prepared(archive):
         raise migration.PreparationError("prepared archive differs from its inventory")
     with contextlib.closing(migration.connect(payload / DATABASE, readonly=True)) as db:
         migration.integrity(db)
+        require_unused_sync(db)
         if migration.sql_signature(db) != manifest["sourceSQL"]:
             raise migration.PreparationError("prepared archive database differs")
     return manifest

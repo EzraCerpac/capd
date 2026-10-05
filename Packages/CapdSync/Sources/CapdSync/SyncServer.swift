@@ -191,6 +191,10 @@ public final class SyncServer: SyncTransport, Sendable {
                     if existing.deleted {
                         outcome = .deleted
                     } else {
+                        SyncDatabase.fillSourceContent(
+                            &existing.source,
+                            from: SourceContentPatch(
+                                title: incoming.source.title, selection: incoming.source.selection))
                         existing.revision = cursor
                         if existing.seenCount < Int.max { existing.seenCount += 1 }
                         existing.manualTags = Array(

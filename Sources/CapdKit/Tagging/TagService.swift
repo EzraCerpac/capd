@@ -15,10 +15,12 @@ public struct TagService: Sendable {
 
     private let store: Store
     private let tagger: any Tagger
+    private let generationGate: GenerationGate?
 
-    public init(store: Store, tagger: any Tagger) {
+    public init(store: Store, tagger: any Tagger, generationGate: GenerationGate? = nil) {
         self.store = store
         self.tagger = tagger
+        self.generationGate = generationGate
     }
 
     /// Tags up to `batch` untagged captures, returning how many were processed. Returns
@@ -29,7 +31,9 @@ public struct TagService: Sendable {
         -> Int
     {
         guard tagger.availability() == .available else { return 0 }
-        var taxonomy = try store.taxonomy()
+        let planningRevision = try await generationGate?.begin()
+        let planningSnapshot = generationGate == nil ? nil : try store.tagGenerationSnapshot()
+        var taxonomy = try planningSnapshot?.taxonomy ?? store.taxonomy()
         guard taxonomy.taggingEnabled else { return 0 }
 
         if try store.retaggingRequested() {
@@ -44,16 +48,31 @@ public struct TagService: Sendable {
                 planned = taxonomy.tags
             }
             let vocabulary = Self.sanitizeTags(planned)
+            if let planningRevision { try await generationGate?.validate(planningRevision) }
             _ = try store.prepareRetagging(
                 tags: vocabulary.isEmpty ? Self.sanitizeTags(taxonomy.tags) : vocabulary,
-                now: now)
+                now: now, expectedGeneration: planningSnapshot)
             taxonomy = try store.taxonomy()
         }
 
         let candidates = try store.untaggedCaptures(limit: batch)
         var processed = 0
-        for capture in candidates {
-            guard let id = capture.id else { continue }
+        for candidate in candidates {
+            guard let id = candidate.id else { continue }
+            let revision = try await generationGate?.begin()
+            let snapshot = generationGate == nil ? nil : try store.tagGenerationSnapshot()
+            let capture: Capture
+            if let snapshot {
+                guard
+                    let current = try store.untaggedCaptures(limit: batch).first(where: {
+                        $0.id == id
+                    })
+                else { continue }
+                capture = current
+                taxonomy = snapshot.taxonomy
+            } else {
+                capture = candidate
+            }
             let priorTaxonomy = taxonomy
             let mayInvent =
                 !taxonomy.retagInProgress && taxonomy.tags.count < Taxonomy.maxTags
@@ -75,9 +94,11 @@ public struct TagService: Sendable {
                 taxonomy.taggedSinceConsolidation += 1
             }
             taxonomy.updatedAt = now
+            if let revision { try await generationGate?.validate(revision) }
             if try store.completeTagging(
                 id: id, tags: accepted, taxonomy: taxonomy, now: now,
-                inputFingerprint: TaggingFingerprint.of(capture), expectedCapture: capture)
+                inputFingerprint: TaggingFingerprint.of(capture), expectedCapture: capture,
+                expectedGeneration: snapshot)
             {
                 processed += 1
             } else {
@@ -94,7 +115,9 @@ public struct TagService: Sendable {
     @discardableResult
     public func consolidateIfNeeded(now: Date = Date()) async throws -> Bool {
         guard tagger.availability() == .available else { return false }
-        let taxonomy = try store.taxonomy()
+        let generationRevision = try await generationGate?.begin()
+        let snapshot = generationGate == nil ? nil : try store.tagGenerationSnapshot()
+        let taxonomy = try snapshot?.taxonomy ?? store.taxonomy()
         guard taxonomy.taggingEnabled else { return false }
         guard !taxonomy.retagInProgress else { return false }
 
@@ -105,6 +128,7 @@ public struct TagService: Sendable {
         guard due, usage.count >= 2 else { return false }
 
         let revision = try await tagger.reviseTaxonomy(usage)
+        if let generationRevision { try await generationGate?.validate(generationRevision) }
         let (keep, mapping) = Self.sanitize(revision)
         guard !keep.isEmpty else { return false }
 
@@ -113,7 +137,8 @@ public struct TagService: Sendable {
         revised.tags = keep
         revised.taggedSinceConsolidation = 0
         revised.updatedAt = now
-        try store.applyTaxonomyRevision(mapping: mapping, taxonomy: revised, now: now)
+        try store.applyTaxonomyRevision(
+            mapping: mapping, taxonomy: revised, now: now, expectedGeneration: snapshot)
         return true
     }
 
