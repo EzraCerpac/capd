@@ -1,0 +1,29 @@
+{
+  "fill": {
+    "solid": "extended-srgb:0.07451,0.07451,0.08627,1.00000"
+  },
+  "groups": [
+    {
+      "layers": [
+        {
+          "image-name": "capd-glyph.svg",
+          "name": "capd-glyph"
+        }
+      ],
+      "shadow": {
+        "kind": "neutral",
+        "opacity": 0.6
+      },
+      "translucency": {
+        "enabled": true,
+        "value": 0.2
+      }
+    }
+  ],
+  "supported-platforms": {
+    "circles": [
+      "watchOS"
+    ],
+    "squares": "shared"
+  }
+}

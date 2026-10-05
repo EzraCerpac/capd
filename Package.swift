@@ -14,6 +14,7 @@ let package = Package(
     ],
     dependencies: [
         .package(path: "Packages/CapdSync"),
+        .package(path: "Packages/CapdDesignSystem"),
         .package(url: "https://github.com/groue/GRDB.swift", from: "7.11.1"),
         .package(url: "https://github.com/apple/swift-argument-parser", from: "1.8.2"),
         .package(url: "https://github.com/sindresorhus/KeyboardShortcuts", from: "3.0.1"),
@@ -46,6 +47,7 @@ let package = Package(
         .target(
             name: "CapdAppUI",
             dependencies: [
+                .product(name: "CapdDesignSystem", package: "CapdDesignSystem"),
                 "CapdKit",
                 "KeyboardShortcuts",
             ]
