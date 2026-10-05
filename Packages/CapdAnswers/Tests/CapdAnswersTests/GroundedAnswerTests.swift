@@ -205,6 +205,45 @@ private actor RankedRetriever: AnswerRetrieving {
     #expect(result.statements[0].citations[0].quote == "water and a warm jacket.")
 }
 
+@Test func oversizedGraphemeCannotBypassFinalExcerptByteBudget() async throws {
+    let oversized = "e" + String(repeating: "\u{301}", count: 600)
+    #expect(oversized.count == 1)
+    #expect(oversized.utf8.count > GroundedAnswerService.excerptLimit)
+    let reader = Retriever([
+        .init(
+            id: "capture-a", title: "Hiking",
+            excerpt: "Pack water and a warm jacket. " + oversized)
+    ])
+    let model = Model()
+    let answer = try await GroundedAnswerService(retriever: reader, model: model).answer("hiking")
+    let excerpt = try #require(answer.sources.first?.source.excerpt)
+    #expect(excerpt.utf8.count <= GroundedAnswerService.excerptLimit)
+    #expect(!excerpt.unicodeScalars.contains { $0.value == 0x301 })
+    #expect(await model.sources.first?.source.excerpt == excerpt)
+}
+
+@Test(arguments: [150, 200])
+func mergedMultibyteExcerptsRespectPerSourceAndTotalByteBudgets(repetitions: Int) async throws {
+    let reader = Retriever(
+        (0..<6).map { index in
+            .init(
+                id: "capture-\(index)", title: "Hiking",
+                excerpt: "Pack water and a warm jacket.\n\n"
+                    + String(repeating: "猫", count: repetitions) + "\n\n"
+                    + String(repeating: "犬", count: repetitions))
+        })
+    let model = Model()
+    _ = try await GroundedAnswerService(retriever: reader, model: model).answer("hiking water")
+    let sources = await model.sources
+    #expect(!sources.isEmpty)
+    #expect(
+        sources.allSatisfy { $0.source.excerpt.utf8.count <= GroundedAnswerService.excerptLimit })
+    #expect(
+        sources.reduce(0) { $0 + $1.source.excerpt.utf8.count }
+            <= GroundedAnswerService.totalExcerptLimit)
+    #expect(sources.allSatisfy { !$0.source.excerpt.contains("\u{FFFD}") })
+}
+
 @Test func invalidStatementDoesNotSuppressLaterValidStatementWithSameText() async throws {
     let text = supportedDraft.statements[0].text
     let model = Model(

@@ -120,6 +120,24 @@ struct RetrievalLanguageAndMergeTests {
         #expect(excerpt.count <= GroundedAnswerService.excerptLimit)
     }
 
+    @Test func combinedQueryPassageSurvivesShorterPerTermMentions() async throws {
+        let quote = "Orchids need filtered light to bloom."
+        let combined = String(repeating: "x", count: 570) + " " + quote
+        let reader = QueryPassageRetriever(passages: [
+            "orchid light bloom": combined,
+            "orchid": "orchid " + String(repeating: "a", count: 190),
+            "light": "light " + String(repeating: "b", count: 190),
+            "bloom": "bloom " + String(repeating: "c", count: 190),
+        ])
+        let answer = try await GroundedAnswerService(
+            retriever: reader, model: PassageQuoteModel(quote: quote)
+        ).answer("orchid light bloom")
+        let excerpt = try #require(answer.sources.first?.source.excerpt)
+        #expect(excerpt.components(separatedBy: "\n\n").contains(combined))
+        #expect(excerpt.contains("\n\n"))
+        #expect(excerpt.utf8.count <= GroundedAnswerService.excerptLimit)
+    }
+
     @Test(arguments: [false, true])
     func citationsCannotBridgeDistinctFieldOrQueryPassages(separateQueries: Bool) async throws {
         let selection = "orchid overview."
