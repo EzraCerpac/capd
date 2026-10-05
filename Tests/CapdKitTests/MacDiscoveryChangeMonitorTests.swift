@@ -5,6 +5,42 @@ import Testing
 @testable import CapdKit
 
 struct MacDiscoveryChangeMonitorTests {
+    @Test func equalInodesOnDifferentDevicesReopenTheReader() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let paths = StoragePaths(root: root)
+        try paths.createDirectories()
+        let firstURL = root.appendingPathComponent("first.sqlite")
+        let secondURL = root.appendingPathComponent("second.sqlite")
+        let firstWriter = try DatabaseQueue(path: firstURL.path)
+        let secondWriter = try DatabaseQueue(path: secondURL.path)
+        for writer in [firstWriter, secondWriter] {
+            try writer.write { try $0.execute(sql: "CREATE TABLE sample (value TEXT)") }
+        }
+        try FileManager.default.createSymbolicLink(
+            at: paths.databaseURL, withDestinationURL: firstURL)
+        var device: UInt64 = 11
+        let monitor = MacDiscoveryChangeMonitor(paths: paths) { path in
+            var attributes = try FileManager.default.attributesOfItem(atPath: path)
+            attributes[.systemNumber] = NSNumber(value: device)
+            attributes[.systemFileNumber] = NSNumber(value: 123)
+            return attributes
+        }
+        let initial = try monitor.revision()
+        #expect(try monitor.revision() == initial)
+        try FileManager.default.removeItem(at: paths.databaseURL)
+        try FileManager.default.createSymbolicLink(
+            at: paths.databaseURL, withDestinationURL: secondURL)
+        device = 22
+        let retargeted = try monitor.revision()
+        #expect(retargeted.fileNumber == initial.fileNumber)
+        #expect(retargeted.dataVersion == initial.dataVersion)
+        #expect(retargeted != initial)
+        #expect(try monitor.revision() == retargeted)
+        try secondWriter.write { try $0.execute(sql: "INSERT INTO sample VALUES ('New volume')") }
+        #expect(try monitor.revision() != retargeted)
+    }
+
     @Test(arguments: [false, true])
     func revisionTracksCommitsConfigurationAndDatabaseReplacement(throughSymlink: Bool) throws {
         let root = URL(fileURLWithPath: NSTemporaryDirectory())

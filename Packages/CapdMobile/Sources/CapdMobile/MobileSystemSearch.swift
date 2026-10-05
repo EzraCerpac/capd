@@ -6,7 +6,7 @@ public struct MobileSystemSearchSnapshot: Sendable {
 }
 
 /// Potentially indexed scopes survive failed OS writes and library replacement.
-/// Read and mutate only inside MobileLibrarySession.withSystemSearchLease.
+/// Read and mutate only inside withLease or MobileLibrarySession.withSystemSearchLease.
 public struct MobileSystemSearchJournal: Sendable {
     private struct State: Codable {
         let version: Int
@@ -16,6 +16,17 @@ public struct MobileSystemSearchJournal: Sendable {
 
     public init(root: URL) {
         url = root.appendingPathComponent("system-search-repair.json")
+    }
+
+    /// Allows scoped index cleanup even when the selected database cannot be opened.
+    public static func withLease<T: Sendable>(
+        root: URL, _ operation: @Sendable () async throws -> T
+    ) async throws -> T {
+        let library = try MobileLibraryLease(root: root, exclusive: false)
+        let search = try MobileLibraryLease(
+            root: root, exclusive: true, fileName: ".system-search.lock")
+        defer { withExtendedLifetime((library, search)) {} }
+        return try await operation()
     }
 
     public func libraries() throws -> [UUID] { try read().libraries }

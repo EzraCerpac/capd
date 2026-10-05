@@ -77,7 +77,8 @@ final class PhoneSystemSearch {
     }
 
     private func schedule() {
-        guard let bridge, let session, !paused else { return }
+        guard let bridge, !paused else { return }
+        let session = session
         let previous = tail
         generation += 1
         let generation = generation
@@ -88,8 +89,17 @@ final class PhoneSystemSearch {
             defer { if self.generation == generation { self.updating = false } }
             guard !self.paused else { return }
             do {
-                try await session.withSystemSearchLease { @MainActor in
-                    try await self.reconcile(session: session, bridge: bridge)
+                if let session, self.enabled {
+                    try await session.withSystemSearchLease { @MainActor in
+                        try await self.reconcile(session: session, bridge: bridge)
+                    }
+                } else {
+                    try await MobileSystemSearchJournal.withLease(root: MobileEnvironment.root()) {
+                        @MainActor in
+                        bridge.invalidate(
+                            preservingDeferredRoute: self.enabled && !self.paused)
+                        _ = try await self.cleanup(keeping: nil, bridge: bridge)
+                    }
                 }
                 self.error = nil
             } catch {
@@ -103,20 +113,7 @@ final class PhoneSystemSearch {
     private func reconcile(session: MobileLibrarySession, bridge: CaptureSystemBridge) async throws
     {
         let libraryID = session.token.binding?.libraryID ?? localID
-        let journal = MobileSystemSearchJournal(root: try MobileEnvironment.root())
-        if let previous = defaults.string(forKey: "capd.system-search.indexed-library-id")
-            .flatMap(UUID.init(uuidString:))
-        {
-            try journal.begin(previous)
-            defaults.removeObject(forKey: "capd.system-search.indexed-library-id")
-        }
-        for oldID in try journal.libraries() where oldID != libraryID || !enabled {
-            bridge.invalidate(preservingDeferredRoute: true)
-            let old = SpotlightCoordinator(libraryID: oldID, backend: backend())
-            try await old.reconcile([], enabled: false)
-            try journal.removed(oldID)
-            coordinator = nil
-        }
+        let journal = try await cleanup(keeping: enabled ? libraryID : nil, bridge: bridge)
         if preparedLibraryID != libraryID || preparedSessionToken != session.token {
             bridge.invalidate(preservingDeferredRoute: true)
             coordinator = nil
@@ -134,7 +131,8 @@ final class PhoneSystemSearch {
                     coordinator
                     ?? SpotlightCoordinator(
                         libraryID: libraryID, backend: backend())
-                try await bridge.deactivate(using: index)
+                bridge.invalidate(preservingDeferredRoute: enabled && !paused)
+                try await index.reconcile([], enabled: false)
                 try journal.removed(libraryID)
                 coordinator = nil
                 throw SystemIntegrationError.snapshotTooLarge
@@ -157,6 +155,26 @@ final class PhoneSystemSearch {
             try bridge.refresh(libraryID: libraryID, captures: [], systemSearchEnabled: false)
         }
         try session.store.acknowledgeSystemSearch(snapshot.revision)
+    }
+
+    private func cleanup(keeping libraryID: UUID?, bridge: CaptureSystemBridge) async throws
+        -> MobileSystemSearchJournal
+    {
+        let journal = MobileSystemSearchJournal(root: try MobileEnvironment.root())
+        if let previous = defaults.string(forKey: "capd.system-search.indexed-library-id")
+            .flatMap(UUID.init(uuidString:))
+        {
+            try journal.begin(previous)
+            defaults.removeObject(forKey: "capd.system-search.indexed-library-id")
+        }
+        for oldID in try journal.libraries() where oldID != libraryID {
+            bridge.invalidate(preservingDeferredRoute: enabled && !paused)
+            let old = SpotlightCoordinator(libraryID: oldID, backend: backend())
+            try await old.reconcile([], enabled: false)
+            try journal.removed(oldID)
+            coordinator = nil
+        }
+        return journal
     }
 
     private func backend() -> CoreSpotlightBackend {

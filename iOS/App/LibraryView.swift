@@ -129,7 +129,10 @@ struct LibraryView: View {
             model.reload()
         case .open(let reference):
             model.reload()
-            guard model.capture(id: reference.captureID) != nil else { return }
+            guard model.capture(id: reference.captureID) != nil else {
+                model.error = SystemIntegrationError.missingCapture.localizedDescription
+                return
+            }
             navigationPath = [reference.captureID]
         case .stageText(let text):
             stagedText = text

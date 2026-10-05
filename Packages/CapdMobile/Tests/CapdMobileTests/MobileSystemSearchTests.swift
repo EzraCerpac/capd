@@ -69,3 +69,45 @@ import Testing
     }
     #expect(try Data(contentsOf: path) == bytes)
 }
+
+@Test func searchCleanupLeaseDoesNotReadTheSelectedConfigurationOrDatabase() async throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: root) }
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    let configuration = root.appendingPathComponent("active-library.json")
+    let database = try MobileLibraryConfiguration.legacy.databaseURL(in: root)
+    let corrupt = Data("Synthetic corrupt selection".utf8)
+    try corrupt.write(to: configuration)
+    try FileManager.default.createDirectory(
+        at: database.deletingLastPathComponent(), withIntermediateDirectories: true)
+    try corrupt.write(to: database)
+    let libraryID = UUID()
+    try await MobileSystemSearchJournal.withLease(root: root) {
+        let journal = MobileSystemSearchJournal(root: root)
+        try journal.begin(libraryID)
+        #expect(try journal.libraries() == [libraryID])
+        try journal.removed(libraryID)
+        #expect(try journal.libraries().isEmpty)
+    }
+    #expect(try Data(contentsOf: configuration) == corrupt)
+    #expect(try Data(contentsOf: database) == corrupt)
+}
+
+@Test func searchCleanupLeaseHonorsActivationAndSearchExclusion() async throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: root) }
+    for lockName in [".library-transition.lock", ".system-search.lock"] {
+        let held = try MobileLibraryLease(root: root, exclusive: true, fileName: lockName)
+        await #expect(throws: MobileActivationError.transitionBusy) {
+            try await MobileSystemSearchJournal.withLease(root: root) {
+                try MobileSystemSearchJournal(root: root).begin(UUID())
+            }
+        }
+        #expect(try MobileSystemSearchJournal(root: root).libraries().isEmpty)
+        withExtendedLifetime(held) {}
+    }
+    let remaining = try await MobileSystemSearchJournal.withLease(root: root) {
+        try MobileSystemSearchJournal(root: root).libraries()
+    }
+    #expect(remaining.isEmpty)
+}
