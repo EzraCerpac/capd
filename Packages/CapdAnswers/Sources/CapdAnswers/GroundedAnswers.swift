@@ -138,7 +138,8 @@ public struct GroundedAnswerService: Sendable {
             var score: Double
         }
         var candidates: [String: Candidate] = [:]
-        let queries = [(terms.joined(separator: " "), 8.0)] + terms.map { ($0, 2.0) }
+        var queries = [(terms.joined(separator: " "), 8.0)]
+        if terms.count > 1 { queries += terms.map { ($0, 2.0) } }
         let results = try await retriever.search(queries.map(\.0), limit: 12)
         for ((_, weight), hits) in zip(queries, results) {
             try Task.checkCancellation()
@@ -195,7 +196,6 @@ public struct GroundedAnswerService: Sendable {
                 statement.citations.count <= 6
             else { return nil }
             var citations: [AnswerDraft.Citation] = []
-            var seenSources = Set<Int>()
             for citation in statement.citations {
                 let quote = Self.normalized(citation.quote)
                 // Reject the whole statement if any purported source or verbatim support
@@ -205,8 +205,9 @@ public struct GroundedAnswerService: Sendable {
                         $0.contains(quote) && (quote.count >= 8 || quote == $0)
                     })
                 else { return nil }
-                if seenSources.insert(citation.number).inserted {
-                    citations.append(.init(number: citation.number, quote: quote))
+                let validated = AnswerDraft.Citation(number: citation.number, quote: quote)
+                if !citations.contains(validated) {
+                    citations.append(validated)
                 }
             }
             guard seenStatements.insert(text.lowercased()).inserted else { return nil }
