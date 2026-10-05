@@ -48,20 +48,18 @@ struct FetchChildTests {
     @Test("A hung child is killed at the deadline")
     func hungChildIsKilled() async throws {
         try await withStubChild("sleep 60", deadline: .milliseconds(300)) { step in
-            let start = ContinuousClock.now
-            let result = await step.fetchInChild(url: "https://example.com/a")
+            let (result, elapsed) = await timedFetch(step)
             #expect(result.status == .failed)
-            #expect(ContinuousClock.now - start < promptReturn)
+            #expect(elapsed < promptReturn)
         }
     }
 
     @Test("A grandchild keeping the pipe open does not stall the parent")
     func stragglingGrandchildDoesNotStall() async throws {
         try await withStubChild("sleep 60 &\nexit 0") { step in
-            let start = ContinuousClock.now
-            let result = await step.fetchInChild(url: "https://example.com/a")
+            let (result, elapsed) = await timedFetch(step)
             #expect(result.status == .failed)
-            #expect(ContinuousClock.now - start < promptReturn)
+            #expect(elapsed < promptReturn)
         }
     }
 
@@ -73,11 +71,10 @@ struct FetchChildTests {
             exit 0
             """
         try await withStubChild(script) { step in
-            let start = ContinuousClock.now
-            let result = await step.fetchInChild(url: "https://example.com/a")
+            let (result, elapsed) = await timedFetch(step)
             #expect(result.status == .ok)
             #expect(result.body == "words")
-            #expect(ContinuousClock.now - start < promptReturn)
+            #expect(elapsed < promptReturn)
         }
     }
 
@@ -96,6 +93,20 @@ struct FetchChildTests {
 /// A "returned promptly" bound with slack for starved CI runners, yet far below the
 /// 60-second sleeps a stalled parent would sit through.
 private let promptReturn: Duration = .seconds(30)
+
+private func timedFetch(_ step: FetchChildStep) async -> (BodyExtractionResult, Duration) {
+    await withCheckedContinuation { continuation in
+        DispatchQueue.global().async {
+            // Measure child startup, exit and pipe draining before the test task resumes;
+            // other parallel tests can occupy the cooperative executor after completion.
+            let start = ContinuousClock.now
+            let result = FetchChildStep.runChild(
+                executable: step.agentExecutable, url: "https://example.com/a",
+                deadline: step.deadline)
+            continuation.resume(returning: (result, ContinuousClock.now - start))
+        }
+    }
+}
 
 private func withStubChild(
     _ script: String,
