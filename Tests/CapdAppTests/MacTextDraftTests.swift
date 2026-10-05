@@ -3,11 +3,125 @@ import Foundation
 import Testing
 
 @testable import CapdApp
+@testable import CapdAppUI
 @testable import CapdKit
 
 @MainActor
 @Suite(.serialized, .timeLimit(.minutes(1)))
 struct MacTextDraftTests {
+    @Test(arguments: ["validation", "persistence", "cancelled"])
+    func failedSaveRetainsEditedDraftAndCanRetry(failure: String) async throws {
+        weak var draft: SyntheticTextDraft?
+        var reject = true
+        var attempts: [String] = []
+        var failedHUDs = 0
+        let coordinator = CaptureCoordinator(
+            environment: CaptureEnvironment(
+                isSecureInputActive: { false }, frontmostTarget: { nil },
+                selectedText: { _ in nil }, browserTab: { _, _ in nil },
+                pasteboardFallback: { .nothing }, fetchBody: { false },
+                ingest: { request in
+                    attempts.append(request.text ?? "")
+                    if reject {
+                        switch failure {
+                        case "validation": throw CaptureError.emptyRequest
+                        case "cancelled": throw CancellationError()
+                        default: throw DraftSaveFailure.persistence
+                        }
+                    }
+                    return .captured(
+                        Capture(kind: .text, selection: request.text, createdAt: request.capturedAt)
+                    )
+                }, enrich: { _ in }, now: Date.init),
+            present: { if $0.style == .failed { failedHUDs += 1 } })
+        let drafts = MacTextDrafts(
+            make: { text, complete in
+                let presentation = SyntheticTextDraft(text: text, complete: complete)
+                draft = presentation
+                return presentation
+            },
+            save: { text, complete in
+                coordinator.capture(
+                    request: CaptureRequest(text: text, fetchBody: false), completion: complete)
+            })
+        drafts.stage("Original synthetic draft")
+        draft?.text = "Edited synthetic draft"
+        let complete = try #require(draft?.complete)
+        complete("Edited synthetic draft")
+        #expect(draft?.saving == true)
+        await coordinator.drain()
+        #expect(draft != nil)
+        #expect(draft?.text == "Edited synthetic draft")
+        #expect(draft?.saving == false)
+        #expect(attempts == ["Edited synthetic draft"])
+        #expect(failedHUDs == 1)
+        reject = false
+        complete("Corrected synthetic draft")
+        await coordinator.drain()
+        #expect(attempts == ["Edited synthetic draft", "Corrected synthetic draft"])
+        #expect(draft == nil)
+    }
+
+    @Test func pendingSaveIgnoresDuplicatesAndOldAttemptCompletions() throws {
+        weak var draft: SyntheticTextDraft?
+        var submitted: [String] = []
+        var completions: [@MainActor (Bool) -> Void] = []
+        let drafts = MacTextDrafts(
+            make: { text, complete in
+                let presentation = SyntheticTextDraft(text: text, complete: complete)
+                draft = presentation
+                return presentation
+            },
+            save: { text, complete in
+                submitted.append(text)
+                completions.append(complete)
+            })
+        drafts.stage("Synthetic draft")
+        let submit = try #require(draft?.complete)
+        submit("First edit")
+        submit("Duplicate Save")
+        #expect(submitted == ["First edit"])
+        #expect(draft?.saving == true)
+        #expect(draft?.savedCount == 0)
+        completions[0](false)
+        #expect(draft?.saving == false)
+        submit("Corrected edit")
+        completions[0](true)
+        #expect(draft?.saving == true)
+        #expect(draft?.savedCount == 0)
+        #expect(submitted == ["First edit", "Corrected edit"])
+        completions[1](true)
+        #expect(draft == nil)
+        completions[1](true)
+        submit("Repeated Save")
+        #expect(submitted == ["First edit", "Corrected edit"])
+    }
+
+    @Test func unavailableSaveKeepsDraftCancelable() throws {
+        weak var draft: SyntheticTextDraft?
+        var submissions = 0
+        let drafts = MacTextDrafts(
+            make: { text, complete in
+                let presentation = SyntheticTextDraft(text: text, complete: complete)
+                draft = presentation
+                return presentation
+            },
+            save: { _, complete in
+                submissions += 1
+                complete(false)
+            })
+        drafts.stage("Synthetic unavailable draft")
+        let submit = try #require(draft?.complete)
+        submit("Edited unavailable draft")
+        #expect(draft != nil)
+        #expect(draft?.saving == false)
+        #expect(draft?.savedCount == 0)
+        submit(nil)
+        #expect(draft == nil)
+        submit("After cancellation")
+        #expect(submissions == 1)
+    }
+
     @Test func intentReturnsWithRetainedDraftsAndOnlyExplicitSaveCaptures() async throws {
         var saves: [String] = []
         weak var first: SyntheticTextDraft?
@@ -19,7 +133,11 @@ struct MacTextDraftTests {
                 created += 1
                 if created == 1 { first = draft } else { second = draft }
                 return draft
-            }, save: { saves.append($0) })
+            },
+            save: { text, complete in
+                saves.append(text)
+                complete(true)
+            })
         let host = MacSystemSearch(
             paths: StoragePaths(
                 root: FileManager.default.temporaryDirectory.appendingPathComponent(
@@ -65,14 +183,22 @@ struct MacTextDraftTests {
 
 @MainActor
 private final class SyntheticTextDraft: MacTextDraftPresentation {
-    let text: String
+    var text: String
     let complete: @MainActor (String?) -> Void
     var shown = false
+    var saving = false
+    var savedCount = 0
     init(text: String, complete: @escaping @MainActor (String?) -> Void) {
         self.text = text
         self.complete = complete
     }
     func show() { shown = true }
+    func setSaving(_ saving: Bool) { self.saving = saving }
+    func saved() { savedCount += 1 }
+}
+
+private enum DraftSaveFailure: Error {
+    case persistence
 }
 
 @MainActor

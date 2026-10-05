@@ -1,14 +1,52 @@
-import CapdKit
 import Foundation
 import GRDB
 import Testing
 
 @testable import CapdApp
 @testable import CapdAppUI
+@testable import CapdKit
 
 @MainActor
 @Suite("CaptureCoordinator")
 struct CaptureCoordinatorTests {
+    @Test(arguments: ["success", "validation", "persistence", "cancelled"])
+    func requestCompletionReportsIngestResultExactlyOnce(result: String) async {
+        var events: [String] = []
+        var completions: [Bool] = []
+        let coordinator = CaptureCoordinator(
+            environment: CaptureEnvironment(
+                isSecureInputActive: { false }, frontmostTarget: { nil },
+                selectedText: { _ in nil }, browserTab: { _, _ in nil },
+                pasteboardFallback: { .nothing }, fetchBody: { false },
+                ingest: { request in
+                    events.append("ingest")
+                    switch result {
+                    case "validation": throw CaptureError.emptyRequest
+                    case "persistence": throw SyntheticIngestFailure.persistence
+                    case "cancelled": throw CancellationError()
+                    default:
+                        events.append("persisted")
+                        return .captured(
+                            Capture(
+                                kind: .text, selection: request.text, createdAt: request.capturedAt)
+                        )
+                    }
+                }, enrich: { _ in }, now: Date.init),
+            present: { _ in events.append("HUD") })
+        coordinator.capture(request: CaptureRequest(text: "Synthetic text")) { succeeded in
+            events.append("completion")
+            completions.append(succeeded)
+        }
+        #expect(completions.isEmpty)
+        await coordinator.drain()
+        #expect(completions == [result == "success"])
+        #expect(
+            events
+                == (result == "success"
+                    ? ["ingest", "persisted", "HUD", "completion"]
+                    : ["ingest", "HUD", "completion"]))
+    }
+
     @Test("A browser press captures the tab's link with the AX selection attached")
     func browserCapturesLinkWithSelection() async throws {
         let harness = try Harness()
@@ -317,6 +355,10 @@ struct CaptureCoordinatorTests {
         #expect(harness.enriched.isEmpty)
         #expect(harness.presented.first?.style == .captured)
     }
+}
+
+private enum SyntheticIngestFailure: Error {
+    case persistence
 }
 
 /// A coordinator wired to stub inputs and a real store in a throwaway directory.

@@ -3,14 +3,17 @@ import AppKit
 @MainActor
 protocol MacTextDraftPresentation: AnyObject {
     func show()
+    func setSaving(_ saving: Bool)
+    func saved()
 }
 
 @MainActor
 final class MacTextDrafts {
     private var active: [UUID: any MacTextDraftPresentation] = [:]
+    private var saving: [UUID: UUID] = [:]
     private let make:
         (String, @escaping @MainActor (String?) -> Void) -> any MacTextDraftPresentation
-    private let save: (String) -> Void
+    private let save: (String, @escaping @MainActor (Bool) -> Void) -> Void
 
     init(
         make:
@@ -18,7 +21,7 @@ final class MacTextDrafts {
             any MacTextDraftPresentation = {
                 MacTextDraftWindow(text: $0, complete: $1)
             },
-        save: @escaping (String) -> Void
+        save: @escaping (String, @escaping @MainActor (Bool) -> Void) -> Void
     ) {
         self.make = make
         self.save = save
@@ -27,8 +30,28 @@ final class MacTextDrafts {
     func stage(_ text: String) {
         let id = UUID()
         let presentation = make(text) { [weak self] value in
-            guard let self, self.active.removeValue(forKey: id) != nil else { return }
-            if let value { self.save(value) }
+            guard let self, let presentation = self.active[id] else { return }
+            guard let value else {
+                self.active[id] = nil
+                self.saving[id] = nil
+                return
+            }
+            guard self.saving[id] == nil else { return }
+            let attempt = UUID()
+            self.saving[id] = attempt
+            presentation.setSaving(true)
+            self.save(value) { [weak self] succeeded in
+                guard let self, self.saving[id] == attempt,
+                    let presentation = self.active[id]
+                else { return }
+                self.saving[id] = nil
+                if succeeded {
+                    self.active[id] = nil
+                    presentation.saved()
+                } else {
+                    presentation.setSaving(false)
+                }
+            }
         }
         active[id] = presentation
         presentation.show()
@@ -41,6 +64,9 @@ private final class MacTextDraftWindow: NSWindowController, NSWindowDelegate,
 {
     private let editor = NSTextView(frame: NSRect(x: 0, y: 0, width: 380, height: 170))
     private var complete: (@MainActor (String?) -> Void)?
+    private var isSaving = false
+    private var saveButton: NSButton?
+    private var cancelButton: NSButton?
 
     init(text: String, complete: @escaping @MainActor (String?) -> Void) {
         self.complete = complete
@@ -73,6 +99,8 @@ private final class MacTextDraftWindow: NSWindowController, NSWindowDelegate,
         save.keyEquivalent = "\r"
         let cancel = NSButton(title: "Cancel", target: self, action: #selector(cancelDraft))
         cancel.keyEquivalent = "\u{1b}"
+        saveButton = save
+        cancelButton = cancel
         for view in [scroll, save, cancel] {
             view.translatesAutoresizingMaskIntoConstraints = false
             content.addSubview(view)
@@ -100,15 +128,37 @@ private final class MacTextDraftWindow: NSWindowController, NSWindowDelegate,
         window?.makeKeyAndOrderFront(nil)
     }
 
-    @objc private func saveDraft() { finish(editor.string, close: true) }
-    @objc private func cancelDraft() { finish(nil, close: true) }
+    func setSaving(_ saving: Bool) {
+        isSaving = saving
+        editor.isEditable = !saving
+        saveButton?.isEnabled = !saving
+        cancelButton?.isEnabled = !saving
+        window?.standardWindowButton(.closeButton)?.isEnabled = !saving
+    }
 
-    func windowWillClose(_ notification: Notification) { finish(nil, close: false) }
+    func saved() {
+        complete = nil
+        window?.close()
+    }
 
-    private func finish(_ text: String?, close: Bool) {
+    @objc private func saveDraft() {
+        guard !isSaving else { return }
+        complete?(editor.string)
+    }
+
+    @objc private func cancelDraft() {
+        guard !isSaving else { return }
+        finish(close: true)
+    }
+
+    func windowShouldClose(_ sender: NSWindow) -> Bool { !isSaving }
+
+    func windowWillClose(_ notification: Notification) { finish(close: false) }
+
+    private func finish(close: Bool) {
         guard let complete else { return }
         self.complete = nil
         if close { window?.close() }
-        complete(text)
+        complete(nil)
     }
 }

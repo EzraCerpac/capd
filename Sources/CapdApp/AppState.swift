@@ -366,8 +366,13 @@ final class AppState {
                 openURL: openURL,
                 showHUD: { hud.show($0) }),
             favicons: favicons)
-        textDrafts = MacTextDrafts { [weak self] text in
-            self?.coordinator?.capture(request: CaptureRequest(text: text, fetchBody: false))
+        textDrafts = MacTextDrafts { [weak self] text, complete in
+            guard let coordinator = self?.coordinator else {
+                complete(false)
+                return
+            }
+            coordinator.capture(
+                request: CaptureRequest(text: text, fetchBody: false), completion: complete)
         }
         let discovery = MacSystemSearch(paths: store.paths, enabled: settings.systemSearchEnabled) {
             [weak self] action, localID in
