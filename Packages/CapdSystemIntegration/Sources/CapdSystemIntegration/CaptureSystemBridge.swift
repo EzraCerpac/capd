@@ -81,6 +81,11 @@ public final class CaptureSystemBridge: CaptureActionHost {
         return pendingAction
     }
 
+    public func consumeRoutingError() -> String? {
+        defer { routingError = nil }
+        return routingError
+    }
+
     /// Clears the host immediately, then removes only the active library's Spotlight domain.
     public func deactivate(using coordinator: SpotlightCoordinator) async throws {
         guard libraryID == nil || coordinator.libraryID == libraryID else {
@@ -90,13 +95,16 @@ public final class CaptureSystemBridge: CaptureActionHost {
         try await coordinator.reconcile([], enabled: false)
     }
 
-    /// Withdraws the in-memory snapshot before switching libraries or disabling access.
+    /// Withdraws library-dependent state while keeping draft text available for review.
     /// Index deletion remains the caller's responsibility through its coordinator.
     public func invalidate(preservingDeferredRoute: Bool = false) {
         systemSearchEnabled = false
         libraryID = nil
         captures = [:]
-        pendingAction = nil
+        switch pendingAction {
+        case .stageText: break
+        default: pendingAction = nil
+        }
         routingError = nil
         if !preservingDeferredRoute { deferredRoute = nil }
     }

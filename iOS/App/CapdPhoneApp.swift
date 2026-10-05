@@ -50,6 +50,7 @@ final class LibraryModel {
     private(set) var librarySession: MobileLibrarySession?
     private var capturesByID: [UUID: MobileCapture] = [:]
     private var loadedLibraryRevision: MobileLibraryRevision?
+    private var loadedLibrarySessionToken: MobileLibrarySessionToken?
     private var store: MobileStore?
     private var storeOpenError: Error?
     private var scheduler: AutomaticSyncController?
@@ -140,8 +141,11 @@ final class LibraryModel {
             let library = try store?.search() ?? []
             capturesByID = Dictionary(uniqueKeysWithValues: library.map { ($0.id, $0) })
             captures = query.isEmpty ? library : try store?.search(query) ?? []
+            let libraryChanged = revision != loadedLibraryRevision
+                || librarySession?.token != loadedLibrarySessionToken
             loadedLibraryRevision = revision
-            if let librarySession { systemSearch.refresh(session: librarySession) }
+            loadedLibrarySessionToken = librarySession?.token
+            if libraryChanged, let librarySession { systemSearch.refresh(session: librarySession) }
         } catch {
             if error as? MobileActivationError == .sessionReplaced {
                 Task {

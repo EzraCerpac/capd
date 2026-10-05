@@ -82,8 +82,8 @@ struct LibraryView: View {
                 consumeSystemAction()
             }
             .onChange(of: systemBridge.pendingAction) { _, _ in consumeSystemAction() }
-            .onChange(of: systemBridge.routingError, initial: true) { _, message in
-                if let message { model.error = message }
+            .onChange(of: systemBridge.routingError, initial: true) { _, _ in
+                if let message = systemBridge.consumeRoutingError() { model.error = message }
             }
             .navigationDestination(item: $openedCapture) { id in
                 CaptureDetailView(captureID: id, model: model)
