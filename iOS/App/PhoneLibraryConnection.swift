@@ -20,6 +20,10 @@ final class PhoneLibraryConnection {
     private var reviewBytes: Data?
     private var receiptBytes: Data?
     var hasReceipt: Bool { receiptBytes != nil }
+    var hasPendingCredentialRecovery: Bool {
+        guard let preparation else { return false }
+        return (try? activation.hasPendingCredentialRecovery(for: preparation)) == true
+    }
     var transferDirectory: URL? { preparation?.transferDirectory(in: root) }
 
     init(
