@@ -16,7 +16,8 @@ public final class MacDiscoveryChangeMonitor {
     public init(paths: StoragePaths) { self.paths = paths }
 
     public func revision() throws -> Revision {
-        let attributes = try FileManager.default.attributesOfItem(atPath: paths.databaseURL.path)
+        let attributes = try FileManager.default.attributesOfItem(
+            atPath: paths.databaseURL.resolvingSymlinksInPath().path)
         guard let currentFile = (attributes[.systemFileNumber] as? NSNumber)?.uint64Value else {
             throw MacDiscoveryError.invalidIdentity
         }

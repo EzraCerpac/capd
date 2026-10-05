@@ -5,13 +5,20 @@ import Testing
 @testable import CapdKit
 
 struct MacDiscoveryChangeMonitorTests {
-    @Test func revisionTracksCommitsConfigurationAndDatabaseReplacement() throws {
+    @Test(arguments: [false, true])
+    func revisionTracksCommitsConfigurationAndDatabaseReplacement(throughSymlink: Bool) throws {
         let root = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("capd-discovery-revision-\(UUID())")
         defer { try? FileManager.default.removeItem(at: root) }
         let paths = StoragePaths(root: root)
         try paths.createDirectories()
-        let writer = try DatabaseQueue(path: paths.databaseURL.path)
+        let databaseURL =
+            throughSymlink ? root.appendingPathComponent("target.sqlite") : paths.databaseURL
+        let writer = try DatabaseQueue(path: databaseURL.path)
+        if throughSymlink {
+            try FileManager.default.createSymbolicLink(
+                at: paths.databaseURL, withDestinationURL: databaseURL)
+        }
         try writer.write { try $0.execute(sql: "CREATE TABLE sample (value TEXT)") }
         let monitor = MacDiscoveryChangeMonitor(paths: paths)
         let initial = try monitor.revision()
@@ -31,7 +38,7 @@ struct MacDiscoveryChangeMonitorTests {
         let replacement = try DatabaseQueue(path: replacementURL.path)
         try replacement.write { try $0.execute(sql: "CREATE TABLE replacement (value TEXT)") }
         try replacement.close()
-        try Data(contentsOf: replacementURL).write(to: paths.databaseURL, options: .atomic)
+        try Data(contentsOf: replacementURL).write(to: databaseURL, options: .atomic)
         let replaced = try monitor.revision()
         #expect(replaced != committed)
         #expect(try monitor.revision() == replaced)

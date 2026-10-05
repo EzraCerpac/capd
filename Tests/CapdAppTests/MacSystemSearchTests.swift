@@ -241,6 +241,62 @@ struct MacSystemSearchTests {
         #expect(Set(backend.items.keys) == [current.id])
     }
 
+    @Test func replacedSymlinkTargetInvalidatesReferencesAndRefreshesIndex() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let suite = "capd-discovery-symlink-\(UUID())"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer {
+            defaults.removePersistentDomain(forName: suite)
+            try? FileManager.default.removeItem(at: root)
+        }
+        let paths = StoragePaths(root: root.appendingPathComponent("link"))
+        let target = StoragePaths(root: root.appendingPathComponent("target"))
+        try paths.createDirectories()
+        do {
+            let store = try MacLibrarySession.open(paths: target).store
+            _ = try CaptureService(store: store).ingest(
+                CaptureRequest(text: "Old target", title: "Old target"))
+            try store.dbPool.close()
+        }
+        try FileManager.default.createSymbolicLink(
+            at: paths.databaseURL,
+            withDestinationURL: target.databaseURL)
+        let backend = DiscoveryMemoryIndex()
+        var opened: [Int64] = []
+        let host = MacSystemSearch(
+            paths: paths, enabled: true, defaults: defaults,
+            backend: backend, dispatch: { _, id in if let id { opened.append(id) } })
+        let saved = try #require(try host.search("").first)
+        let replacement = StoragePaths(root: root.appendingPathComponent("replacement"))
+        do {
+            let store = try MacLibrarySession.open(paths: replacement).store
+            _ = try CaptureService(store: store).ingest(
+                CaptureRequest(text: "New target", title: "New target"))
+            try store.dbPool.close()
+        }
+        for suffix in ["", "-wal", "-shm"] {
+            _ = try FileManager.default.replaceItemAt(
+                URL(fileURLWithPath: target.databaseURL.path + suffix),
+                withItemAt: URL(fileURLWithPath: replacement.databaseURL.path + suffix))
+        }
+        let current = try #require(try host.search("").first)
+        #expect(current.reference.libraryID != saved.reference.libraryID)
+        #expect(current.title == "New target")
+        let runtime = CaptureIntentRuntime()
+        runtime.host = host
+        #expect(try runtime.resolve([saved.reference]).isEmpty)
+        #expect(throws: SystemIntegrationError.missingCapture) {
+            try runtime.perform(.open(saved.reference))
+        }
+        #expect(opened.isEmpty)
+        try runtime.perform(.open(current.reference))
+        #expect(opened == [1])
+        host.refresh()
+        await host.settle()
+        #expect(Set(backend.items.keys) == [current.id])
+        #expect(backend.items[current.id]?.title == "New target")
+    }
+
     @Test func legacyPathIdentityRotatesOnceWithoutWritingTheStore() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         let suite = "capd-discovery-legacy-\(UUID())"

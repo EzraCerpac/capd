@@ -175,7 +175,8 @@ final class MacSystemSearch: CaptureActionHost {
     }
 
     private func databaseIdentity() throws -> String {
-        let attributes = try FileManager.default.attributesOfItem(atPath: paths.databaseURL.path)
+        let attributes = try FileManager.default.attributesOfItem(
+            atPath: paths.databaseURL.resolvingSymlinksInPath().path)
         guard let device = attributes[.systemNumber] as? NSNumber,
             let file = attributes[.systemFileNumber] as? NSNumber,
             let created = attributes[.creationDate] as? Date
