@@ -158,7 +158,11 @@ public final class MobileStore: Sendable {
 
     public func capture(id: UUID) throws -> MobileCapture? {
         try database.read { db in
-            try MobileCapture.filter(Column("id") == id.uuidString).fetchOne(db)
+            let alias = try String.fetchOne(
+                db, sql: "SELECT canonical FROM sync_aliases WHERE id = ?",
+                arguments: [id.uuidString])
+            let canonical = alias.flatMap(UUID.init(uuidString:)) ?? id
+            return try MobileCapture.filter(Column("id") == canonical.uuidString).fetchOne(db)
         }
     }
 

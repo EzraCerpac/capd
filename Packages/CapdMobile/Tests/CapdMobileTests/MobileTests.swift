@@ -166,6 +166,48 @@ private final class DroppedAcknowledgement: SyncTransport, @unchecked Sendable {
     #expect(try server.changes(after: 0).changes.count == 1)
 }
 
+@Test(arguments: [false, true])
+func deduplicatedDetailResolvesOriginalIDAcrossReopenAndDeletion(learnFromFeed: Bool) throws {
+    let f = Fixture()
+    defer { f.clean() }
+    let mobile = try MobileStore(url: f.url)
+    let mac = try f.mac()
+    let server = try f.server()
+    let local = try CaptureInput.make(text: "Synthetic duplicated source", isLink: false)
+    let canonical = SharedCapture(
+        source: CaptureSource(
+            kind: .text,
+            contentHash: CaptureFingerprint.contentHash(for: Data(local.selection.utf8)),
+            title: "Existing authority source", selection: local.selection))
+    try mac.enqueue(captureID: canonical.id, mutation: .create(canonical))
+    try mac.push(to: server)
+    try mobile.save(local)
+    #expect(try mobile.capture(id: local.id)?.id == local.id)
+    #expect(try mobile.capture(id: UUID()) == nil)
+    if learnFromFeed {
+        _ = try server.apply(#require(mobile.pending().first))
+        try mobile.pull(from: server)
+    } else {
+        try mobile.push(to: server)
+    }
+    #expect(try mobile.search().map(\.id) == [canonical.id])
+    let detail = try #require(try mobile.capture(id: local.id))
+    #expect(detail.id == canonical.id)
+    #expect(detail.title == "Existing authority source")
+    let reopened = try MobileStore(url: f.url)
+    #expect(try reopened.capture(id: local.id) == reopened.capture(id: canonical.id))
+    try reopened.push(to: server)
+    try reopened.update(id: local.id, note: "Edit from retained detail", tags: ["manual"])
+    #expect(try reopened.pending().first?.captureID == canonical.id)
+    try reopened.push(to: server)
+    #expect(try reopened.capture(id: local.id)?.note == "Edit from retained detail")
+    try reopened.delete(id: local.id)
+    #expect(try reopened.capture(id: local.id) == nil)
+    #expect(try reopened.capture(id: canonical.id) == nil)
+    try reopened.push(to: server)
+    #expect(try server.baseline().captures.first?.deleted == true)
+}
+
 @Test func pendingMobileNoteOverlayAndSeparateTagsSurviveMacPullAndConflict() throws {
     let f = Fixture()
     defer { f.clean() }
