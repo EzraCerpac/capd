@@ -4,6 +4,7 @@ import Testing
 @testable import CapdAnswers
 
 private actor Retriever: AnswerRetrieving {
+    func evidenceRevision() -> String { "immutable" }
     let hits: [AnswerEvidence]
     var calls = 0
     var limits: [Int] = []
@@ -122,6 +123,7 @@ func singleTermQuestionRetrievesExactlyOnce(question: String) async throws {
 }
 
 private actor RankedRetriever: AnswerRetrieving {
+    func evidenceRevision() -> String { "immutable" }
     var queries: [String] = []
     func search(_ queries: [String], limit: Int) -> [[AnswerEvidence]] {
         self.queries = queries
@@ -387,4 +389,32 @@ private actor HeldModel: AnswerGenerating {
     #expect(session.message == AnswerAvailability.Reason.modelNotReady.explanation)
     session.refreshAvailability()
     #expect(session.availability == .unavailable(.modelNotReady))
+}
+
+private actor RevisionRetriever: AnswerRetrieving {
+    private var revision = 0
+    func evidenceRevision() -> String { String(revision) }
+    func advance() { revision += 1 }
+    func search(_ queries: [String], limit: Int) -> [[AnswerEvidence]] {
+        queries.map { _ in
+            [.init(id: "capture-a", title: "Hiking", excerpt: "Pack water and a warm jacket.")]
+        }
+    }
+}
+
+@MainActor
+@Test func changedEvidenceNeverPublishesInAnswerSession() async throws {
+    let reader = RevisionRetriever()
+    let model = HeldModel()
+    let session = AnswerSession(model: model, retriever: { reader })
+    session.question = "hiking"
+    session.ask()
+    for _ in 0..<200 where !(await model.started) { try await Task.sleep(for: .milliseconds(5)) }
+    #expect(await model.started)
+    await reader.advance()
+    await model.finish()
+    for _ in 0..<200 where session.isAnswering { try await Task.sleep(for: .milliseconds(5)) }
+    #expect(session.answer == nil)
+    #expect(!session.isAnswering)
+    #expect(session.message == AnswerError.evidenceChanged.localizedDescription)
 }

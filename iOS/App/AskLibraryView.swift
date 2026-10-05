@@ -92,7 +92,7 @@ struct AskLibraryView: View {
                             }
                         }
                         Text(
-                            "Answers can be mistaken. Check the supporting text and open the sources."
+                            "Answers can be mistaken. Check the supporting text. Sources open their current saved version."
                         )
                         .font(.footnote).foregroundStyle(.secondary)
                     }

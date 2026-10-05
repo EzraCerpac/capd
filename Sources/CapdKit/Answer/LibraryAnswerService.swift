@@ -32,6 +32,7 @@ public enum LibraryAnswerError: Error, LocalizedError, Equatable {
     case noMatches
     case noSupportedClaims
     case contentRejected
+    case evidenceChanged
 
     public var errorDescription: String? {
         switch self {
@@ -45,6 +46,8 @@ public enum LibraryAnswerError: Error, LocalizedError, Equatable {
             "Cap couldn't build an answer supported by the matching captures."
         case .contentRejected:
             "Apple Intelligence couldn't answer from this content."
+        case .evidenceChanged:
+            "Saved sources changed while answering. Ask again."
         }
     }
 }
@@ -166,11 +169,13 @@ public struct LibraryAnswerService: Sendable {
         var remaining = Self.totalExcerptLimit
         var sources: [LibraryAnswer.Source] = []
         var prompts: [LibraryAnswerPromptSource] = []
+        var captures: [Capture] = []
         for hit in hits {
             guard let captureID = hit.capture.id, remaining > 0 else { continue }
             let excerpt = Self.evidence(from: hit, limit: min(Self.excerptLimit, remaining))
             guard !excerpt.isEmpty else { continue }
             remaining -= excerpt.count
+            captures.append(hit.capture)
 
             let number = sources.count + 1
             let title = Self.title(for: hit.capture)
@@ -190,6 +195,7 @@ public struct LibraryAnswerService: Sendable {
         guard !sources.isEmpty else { throw LibraryAnswerError.noMatches }
 
         let draft = try await model.answer(question: question, sources: prompts)
+        try Task.checkCancellation()
         let validNumbers = Set(sources.map(\.number))
         var seenStatements = Set<String>()
         let passages = draft.statements.compactMap { statement -> LibraryAnswer.Passage? in
@@ -207,6 +213,14 @@ public struct LibraryAnswerService: Sendable {
         }
         guard !passages.isEmpty else { throw LibraryAnswerError.noSupportedClaims }
 
+        try Task.checkCancellation()
+        let current = try search.captures(ids: sources.map(\.captureID))
+        try Task.checkCancellation()
+        guard
+            current.sorted(by: { ($0.id ?? 0) < ($1.id ?? 0) })
+                == captures.sorted(by: { ($0.id ?? 0) < ($1.id ?? 0) })
+        else { throw LibraryAnswerError.evidenceChanged }
+        try Task.checkCancellation()
         return LibraryAnswer(question: question, passages: passages, sources: sources)
     }
 
