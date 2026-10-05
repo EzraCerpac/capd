@@ -7,6 +7,14 @@ import Observation
 @Observable
 package final class AppSettings {
     private let defaults: UserDefaults
+    package var systemSearchEnabled: Bool {
+        didSet {
+            defaults.set(systemSearchEnabled, forKey: "systemSearchEnabled")
+            systemSearchChanged(systemSearchEnabled)
+        }
+    }
+    package var systemSearchIssue: String?
+    @ObservationIgnored package var systemSearchChanged: (Bool) -> Void = { _ in }
 
     package var fetchesPageBodies: Bool {
         didSet { defaults.set(fetchesPageBodies, forKey: Key.fetchesPageBodies) }
@@ -59,6 +67,7 @@ package final class AppSettings {
 
     package init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
+        systemSearchEnabled = defaults.bool(forKey: "systemSearchEnabled")
         autoTagsCaptures = true
         contextualRemindersEnabled =
             defaults.object(forKey: Key.contextualRemindersEnabled) as? Bool ?? false

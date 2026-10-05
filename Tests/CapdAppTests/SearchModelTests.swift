@@ -9,6 +9,34 @@ import Testing
 @MainActor
 @Suite("Search model")
 struct SearchModelTests {
+    @Test func liveQueriesReuseOneReadOnlyStoreAndSeeOtherWriters() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let paths = StoragePaths(root: root)
+        let store = try Store(paths: paths)
+        _ = try CaptureService(store: store).ingest(
+            CaptureRequest(text: "Synthetic first", title: "First", tags: ["manual"]))
+        let opens = Mutex(0)
+        let environment = SearchEnvironment.live(
+            searchService: SearchService(store: store), store: store,
+            queryStore: {
+                opens.withLock { $0 += 1 }
+                return try MacLibrarySession.readOnlyStore(paths: paths)
+            }, openURL: { _ in }, showHUD: { _ in })
+        for query in ["First", "Fir", ""] {
+            #expect(try await environment.search(query).count == 1)
+            #expect(try await environment.totalCount() == 1)
+            #expect(try await environment.tags() == ["manual"])
+        }
+        #expect(opens.withLock { $0 } == 1)
+        let otherWriter = try Store(paths: paths)
+        _ = try CaptureService(store: otherWriter).ingest(
+            CaptureRequest(text: "Synthetic second", title: "Second"))
+        #expect(try await environment.search("Second").count == 1)
+        #expect(try await environment.totalCount() == 2)
+        #expect(opens.withLock { $0 } == 1)
+    }
+
     @Test("A slow early query cannot overwrite a fast later one")
     func slowQueryLosesToNewer() async {
         let gate = Gate()

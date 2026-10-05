@@ -488,6 +488,65 @@ public final class MobileStore: Sendable {
         }
     }
 
+    public func systemSearchDiscoverySnapshot() throws -> MobileSystemSearchDiscoverySnapshot {
+        let lease = try access?.lease()
+        defer { withExtendedLifetime(lease) {} }
+        return try database.read { db in
+            let revision = try String.fetchOne(
+                db, sql: "SELECT revision FROM mobile_system_search WHERE id=1"
+            ).flatMap(UUID.init(uuidString:))
+            let count =
+                try Int.fetchOne(
+                    db,
+                    sql: "SELECT COUNT(*) FROM (SELECT 1 FROM mobile_captures LIMIT 1001)") ?? 0
+            guard count <= 1000 else {
+                return .init(revision: revision, captures: [], exceedsLimit: true)
+            }
+            let sizes = try Row.fetchOne(
+                db,
+                sql: """
+                    WITH sizes AS (
+                        SELECT length(CAST(id AS BLOB)) AS idBytes,
+                               length(CAST(kind AS BLOB)) AS kindBytes,
+                               length(CAST(title AS BLOB)) AS titleBytes,
+                               MIN(length(CAST(selection AS BLOB)), 4096) AS selectionBytes,
+                               length(CAST(manualTags AS BLOB)) AS tagBytes,
+                               typeof(revision) AS revisionType
+                        FROM mobile_captures
+                    )
+                    SELECT COALESCE(MAX(idBytes > 36 OR kindBytes > 5 OR titleBytes > 4096
+                                         OR tagBytes > 16384 OR revisionType != 'integer'), 0)
+                               AS oversized,
+                           COALESCE(MAX(idBytes + kindBytes + titleBytes + selectionBytes
+                                        + tagBytes + 8), 0) AS recordBytes,
+                           COALESCE(SUM(idBytes + kindBytes + titleBytes + selectionBytes
+                                        + tagBytes + 8), 0) AS totalBytes
+                    FROM sizes
+                    """)!
+            guard !(sizes["oversized"] as Bool), (sizes["recordBytes"] as Int) <= 32_768,
+                (sizes["totalBytes"] as Int) <= 8_388_608
+            else { return .init(revision: revision, captures: [], exceedsLimit: true) }
+            let rows = try Row.fetchAll(
+                db,
+                sql: """
+                    SELECT id, kind, title,
+                           CASE WHEN length(CAST(selection AS BLOB)) <= 4096 THEN selection
+                                ELSE substr(selection, 1, 1024) END AS selectionPrefix,
+                           length(CAST(selection AS BLOB)) > 4096 AS selectionTruncated,
+                           manualTags, revision
+                    FROM mobile_captures ORDER BY id LIMIT 1000
+                    """)
+            var captures: [MobileSystemSearchCapture] = []
+            for row in rows {
+                guard let capture = try MobileSystemSearchCapture(row: row) else {
+                    return .init(revision: revision, captures: [], exceedsLimit: true)
+                }
+                captures.append(capture)
+            }
+            return .init(revision: revision, captures: captures, exceedsLimit: false)
+        }
+    }
+
     private static func project(_ db: Database, record: SharedCapture) throws {
         try db.execute(
             sql: "UPDATE mobile_system_search SET revision=? WHERE id=1",

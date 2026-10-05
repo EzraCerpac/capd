@@ -1,12 +1,59 @@
 import Foundation
+import GRDB
 
 public struct MobileSystemSearchSnapshot: Sendable {
     public let revision: UUID?
     public let captures: [MobileCapture]
 }
 
+public struct MobileSystemSearchCapture: Equatable, Sendable {
+    public let id: UUID
+    public let kind: MobileCapture.Kind
+    public let title: String
+    public let derivedTitle: String
+    public let manualTags: [String]
+    public let revision: Int64
+
+    public init(_ canonical: MobileCapture) {
+        id = canonical.id
+        kind = canonical.kind
+        title = canonical.title
+        derivedTitle = String(
+            canonical.selection.trimmingCharacters(in: .whitespacesAndNewlines).prefix(80))
+        manualTags = Array(canonical.manualTags.prefix(32))
+        revision = canonical.revision
+    }
+
+    init?(row: Row) throws {
+        let id: String = row["id"]
+        let kind: String = row["kind"]
+        guard let identifier = UUID(uuidString: id),
+            let captureKind = MobileCapture.Kind(rawValue: kind)
+        else { throw MobileActivationError.invalidConfiguration }
+        let selection: String = row["selectionPrefix"]
+        let trimmed = selection.trimmingCharacters(in: .whitespacesAndNewlines)
+        let truncated: Bool = row["selectionTruncated"]
+        // A following grapheme proves the eightieth cannot extend beyond the SQL prefix.
+        guard !truncated || trimmed.count > 80 else { return nil }
+        self.id = identifier
+        self.kind = captureKind
+        title = row["title"]
+        derivedTitle = String(trimmed.prefix(80))
+        let tags: String = row["manualTags"]
+        manualTags = Array(
+            try JSONDecoder().decode([String].self, from: Data(tags.utf8)).prefix(32))
+        revision = row["revision"]
+    }
+}
+
+public struct MobileSystemSearchDiscoverySnapshot: Sendable {
+    public let revision: UUID?
+    public let captures: [MobileSystemSearchCapture]
+    public let exceedsLimit: Bool
+}
+
 /// Potentially indexed scopes survive failed OS writes and library replacement.
-/// Read and mutate only inside MobileLibrarySession.withSystemSearchLease.
+/// Read and mutate only inside withLease or MobileLibrarySession.withSystemSearchLease.
 public struct MobileSystemSearchJournal: Sendable {
     private struct State: Codable {
         let version: Int
@@ -16,6 +63,17 @@ public struct MobileSystemSearchJournal: Sendable {
 
     public init(root: URL) {
         url = root.appendingPathComponent("system-search-repair.json")
+    }
+
+    /// Allows scoped index cleanup even when the selected database cannot be opened.
+    public static func withLease<T: Sendable>(
+        root: URL, _ operation: @Sendable () async throws -> T
+    ) async throws -> T {
+        let library = try MobileLibraryLease(root: root, exclusive: false)
+        let search = try MobileLibraryLease(
+            root: root, exclusive: true, fileName: ".system-search.lock")
+        defer { withExtendedLifetime((library, search)) {} }
+        return try await operation()
     }
 
     public func libraries() throws -> [UUID] { try read().libraries }

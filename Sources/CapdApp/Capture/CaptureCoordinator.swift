@@ -50,10 +50,17 @@ final class CaptureCoordinator {
     }
 
     /// Queues a request built outside the app, e.g. from the share extension's handoff.
-    func capture(request: CaptureRequest) {
+    func capture(
+        request: CaptureRequest, completion: (@MainActor (Bool) -> Void)? = nil
+    ) {
         chain = Task { [previous = chain] in
             await previous?.value
-            self.ingestAndPresent(request, fallbackNote: nil)
+            guard !Task.isCancelled else {
+                completion?(false)
+                return
+            }
+            let succeeded = self.ingestAndPresent(request, fallbackNote: nil)
+            completion?(succeeded)
         }
     }
 
@@ -138,11 +145,14 @@ final class CaptureCoordinator {
         }
     }
 
-    private func ingestAndPresent(_ request: CaptureRequest, fallbackNote: String?) {
+    @discardableResult
+    private func ingestAndPresent(_ request: CaptureRequest, fallbackNote: String?) -> Bool {
         let content: HUDContent
         var pendingLink: Capture?
+        var succeeded = false
         do {
             let outcome = try environment.ingest(request)
+            succeeded = true
             content = .outcome(outcome, fallbackNote: fallbackNote, now: environment.now())
             let capture = outcome.capture
             if capture.kind == .link, capture.enrichmentState == .pending {
@@ -161,5 +171,6 @@ final class CaptureCoordinator {
                 self.enrichments[id] = nil
             }
         }
+        return succeeded
     }
 }

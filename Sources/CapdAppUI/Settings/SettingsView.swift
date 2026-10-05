@@ -50,6 +50,15 @@ package struct SettingsView: View {
                 .padding(.bottom, 8)
             }
             section("Intelligence") {
+                row("Find titles and manual tags in system search") {
+                    toggle($settings.systemSearchEnabled)
+                }
+                Text("Indexed entries receive a 30-day expiration and renew while capd is running.")
+                    .font(.caption).foregroundStyle(Theme.textSecondary)
+                if let issue = settings.systemSearchIssue {
+                    Text(issue).font(.caption).foregroundStyle(Theme.textSecondary)
+                }
+                hairline
                 row("Auto-tag captures on device") {
                     toggle($settings.autoTagsCaptures)
                         .disabled(settings.autoTagsUnavailableReason != nil)

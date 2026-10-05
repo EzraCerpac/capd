@@ -175,6 +175,18 @@ final class SearchModel {
         }
     }
 
+    /// A resolved deep link takes precedence over an older in-flight search.
+    func presentCapture(_ capture: Capture) {
+        generation += 1
+        for task in inflight.values { task.cancel() }
+        inflight.removeAll()
+        clearAnswer()
+        hits = [SearchHit(capture: capture, snippet: nil, score: nil)]
+        hasLoaded = true
+        totalCount = max(1, totalCount)
+        selectedIndex = showsAskOption ? 1 : 0
+    }
+
     /// ⇥ and ⇧⇥ walk the tag filters with "all captures" as the stop between the ends.
     func cycleTag(forward: Bool) {
         guard !availableTags.isEmpty else { return }

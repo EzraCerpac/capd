@@ -1,21 +1,26 @@
 import CapdDesignSystem
 import CapdMobile
+import CapdSystemIntegration
 import SwiftUI
 
 struct LibraryView: View {
+    @Environment(CaptureSystemBridge.self) private var systemBridge
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.colorSchemeContrast) private var contrast
     private var palette: CapdPalette {
         CapdPalette(colorScheme: colorScheme, increasedContrast: contrast == .increased)
     }
-    @State private var model = LibraryModel()
+    @Bindable var model: LibraryModel
     @State private var capturing = false
     @State private var asking = false
     @State private var showingSyncSettings = false
+    @State private var navigationPath: [UUID] = []
+    @State private var stagedText = ""
+    @State private var draftID = UUID()
     @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
-        NavigationStack {
+        NavigationStack(path: $navigationPath) {
             List {
                 if model.syncState.phase == .attention || model.syncState.conflictCount > 0
                     || model.syncState.rejectedChanges > 0
@@ -44,9 +49,7 @@ struct LibraryView: View {
                                     : "Search saved titles, links, source text, and notes."))
                     }
                     ForEach(model.captures) { capture in
-                        NavigationLink {
-                            CaptureDetailView(captureID: capture.id, model: model)
-                        } label: {
+                        NavigationLink(value: capture.id) {
                             CapdSourceRow(
                                 title: capture.title,
                                 metadata: MobileCapturePresentation.metadata(for: capture),
@@ -73,7 +76,21 @@ struct LibraryView: View {
                 prompt: "Search saved sources"
             )
             .onChange(of: model.query) { _, _ in model.reload() }
-            .onChange(of: scenePhase) { _, phase in model.sceneChanged(active: phase == .active) }
+            .onChange(of: scenePhase, initial: true) { _, phase in
+                model.systemSearch.setForeground(phase == .active)
+                model.sceneChanged(active: phase == .active)
+            }
+            .task {
+                model.systemSearch.connect(systemBridge)
+                consumeSystemAction()
+            }
+            .onChange(of: systemBridge.pendingAction) { _, _ in consumeSystemAction() }
+            .onChange(of: systemBridge.routingError, initial: true) { _, _ in
+                if let message = systemBridge.consumeRoutingError() { model.error = message }
+            }
+            .navigationDestination(for: UUID.self) { id in
+                CaptureDetailView(captureID: id, model: model)
+            }
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
                     Button("Device sync", systemImage: "gearshape") { showingSyncSettings = true }
@@ -84,16 +101,24 @@ struct LibraryView: View {
                         .accessibilityIdentifier("askCapButton")
                 }
                 ToolbarItem(placement: .topBarTrailing) {
-                    Button("Capture", systemImage: "plus") { capturing = true }
-                        .accessibilityIdentifier("captureButton")
+                    Button("Capture", systemImage: "plus") {
+                        stagedText = ""
+                        draftID = UUID()
+                        capturing = true
+                    }
+                    .accessibilityIdentifier("captureButton")
                 }
             }
-            .sheet(isPresented: $capturing) { CaptureForm(model: model) }
-            .sheet(isPresented: $asking) { AskLibraryView(library: model) }
-            .sheet(isPresented: $showingSyncSettings) {
+            .sheet(isPresented: $capturing, onDismiss: consumeSystemAction) {
+                CaptureForm(model: model, initialText: stagedText).id(draftID)
+            }
+            .sheet(isPresented: $asking, onDismiss: consumeSystemAction) {
+                AskLibraryView(library: model)
+            }
+            .sheet(isPresented: $showingSyncSettings, onDismiss: consumeSystemAction) {
                 SyncSettingsView(
                     state: model.syncState, retry: { model.retrySync() },
-                    connection: model.connection)
+                    systemSearch: model.systemSearch, connection: model.connection)
             }
             .alert(
                 "Library message",
@@ -105,6 +130,34 @@ struct LibraryView: View {
                 Text(model.error ?? "")
             }
         }.capdCanvas()
+    }
+
+    private func consumeSystemAction() {
+        guard !capturing else { return }
+        if showingSyncSettings || asking, let action = systemBridge.pendingAction {
+            switch action {
+            case .find, .open: return
+            case .stageText: break
+            }
+        }
+        guard let action = systemBridge.consumeAction() else { return }
+        switch action {
+        case .find(let query):
+            navigationPath = []
+            model.query = query
+            model.reload()
+        case .open(let reference):
+            model.reload()
+            guard model.capture(id: reference.captureID) != nil else {
+                model.error = SystemIntegrationError.missingCapture.localizedDescription
+                return
+            }
+            navigationPath = [reference.captureID]
+        case .stageText(let text):
+            stagedText = text
+            draftID = UUID()
+            capturing = true
+        }
     }
 }
 
@@ -121,6 +174,12 @@ struct CaptureForm: View {
     @State private var note = ""
     @State private var validationMessage: String?
     @Environment(\.dismiss) private var dismiss
+
+    init(model: LibraryModel, initialText: String = "") {
+        self.model = model
+        _text = State(initialValue: initialText)
+        _isLink = State(initialValue: initialText.isEmpty)
+    }
 
     var body: some View {
         NavigationStack {
@@ -190,7 +249,7 @@ struct CaptureDetailView: View {
                 Section {
                     Text(capture.title).font(CapdTypography.title).foregroundStyle(palette.text)
                         .textSelection(.enabled)
-                    Label("Available on this iPhone", systemImage: "iphone")
+                    Label("Available on this device", systemImage: "iphone")
                         .font(.subheadline).foregroundStyle(palette.textSecondary)
                     Text(capture.createdAt, style: .date).font(CapdTypography.metadata)
                         .foregroundStyle(palette.textSecondary)

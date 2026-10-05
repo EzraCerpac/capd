@@ -1,4 +1,5 @@
 import AppKit
+import CapdKit
 import SwiftUI
 
 /// Borderless so the window is just the search card; key-capable so typing lands in the
@@ -57,6 +58,16 @@ package final class SearchWindowController: NSObject, NSWindowDelegate {
         } else {
             show()
         }
+    }
+
+    package func show(query: String) {
+        show()
+        model.queryText = query
+    }
+
+    package func show(capture: Capture) {
+        show()
+        model.presentCapture(capture)
     }
 
     /// Summons with a short fade-and-settle; dismissal is instant, like Spotlight.

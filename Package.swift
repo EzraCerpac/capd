@@ -16,6 +16,7 @@ let package = Package(
         .package(path: "Packages/CapdSync"),
         .package(path: "Packages/CapdMobile"),
         .package(path: "Packages/CapdDesignSystem"),
+        .package(path: "Packages/CapdSystemIntegration"),
         .package(url: "https://github.com/groue/GRDB.swift", from: "7.11.1"),
         .package(url: "https://github.com/apple/swift-argument-parser", from: "1.8.2"),
         .package(url: "https://github.com/sindresorhus/KeyboardShortcuts", from: "3.0.1"),
@@ -60,6 +61,7 @@ let package = Package(
                 "CapdKit",
                 "CapdAppUI",
                 "CapdHandoff",
+                .product(name: "CapdSystemIntegration", package: "CapdSystemIntegration"),
                 "KeyboardShortcuts",
             ],
             resources: [.process("Resources")]

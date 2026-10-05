@@ -1,16 +1,46 @@
+import AppIntents
 import CapdMobile
+import CapdSystemIntegration
+import CoreSpotlight
 import SwiftUI
 
 @main
 struct CapdPhoneApp: App {
+    @State private var systemIntegration: CaptureSystemBridge
+    @State private var model: LibraryModel
+
+    init() {
+        let model = LibraryModel()
+        let bridge = CaptureSystemBridge(preparingForIntent: { [weak model] in
+            guard let model else { throw SystemIntegrationError.unavailable }
+            try await model.systemSearch.prepareForIntent()
+        })
+        model.systemSearch.connect(bridge)
+        bridge.install()
+        _systemIntegration = State(initialValue: bridge)
+        _model = State(initialValue: model)
+    }
+
     var body: some Scene {
-        WindowGroup { LibraryView() }
+        WindowGroup {
+            LibraryView(model: model)
+                .environment(systemIntegration)
+                .onOpenURL { url in
+                    if let route = CaptureRoute(url: url) { systemIntegration.receive(route) }
+                }
+                .onContinueUserActivity(CSSearchableItemActionType) { activity in
+                    if let route = CaptureRoute(spotlightActivity: activity) {
+                        systemIntegration.receive(route)
+                    }
+                }
+        }
     }
 }
 
 @MainActor
 @Observable
 final class LibraryModel {
+    let systemSearch = PhoneSystemSearch()
     var captures: [MobileCapture] = []
     var query = ""
     var error: String?
@@ -20,6 +50,7 @@ final class LibraryModel {
     private(set) var librarySession: MobileLibrarySession?
     private var capturesByID: [UUID: MobileCapture] = [:]
     private var loadedLibraryRevision: MobileLibraryRevision?
+    private var loadedLibrarySessionToken: MobileLibrarySessionToken?
     private var store: MobileStore?
     private var storeOpenError: Error?
     private var scheduler: AutomaticSyncController?
@@ -89,6 +120,7 @@ final class LibraryModel {
         connectivity = nil
         await previousStateTask?.value
         await scheduler?.suspendAndDrain()
+        await systemSearch.suspendAndDrain()
     }
 
     private func finishTransition() async {
@@ -97,6 +129,15 @@ final class LibraryModel {
             try openSelectedSession()
             reload()
         } catch {
+            librarySession = nil
+            store = nil
+            scheduler = nil
+            captures = []
+            capturesByID = [:]
+            loadedLibraryRevision = nil
+            loadedLibrarySessionToken = nil
+            syncState = AutomaticSyncState()
+            systemSearch.resumeWithoutSession()
             storeOpenError = error
             self.error = error.localizedDescription
         }
@@ -109,7 +150,12 @@ final class LibraryModel {
             let library = try store?.search() ?? []
             capturesByID = Dictionary(uniqueKeysWithValues: library.map { ($0.id, $0) })
             captures = query.isEmpty ? library : try store?.search(query) ?? []
+            let libraryChanged =
+                revision != loadedLibraryRevision
+                || librarySession?.token != loadedLibrarySessionToken
             loadedLibraryRevision = revision
+            loadedLibrarySessionToken = librarySession?.token
+            if libraryChanged, let librarySession { systemSearch.refresh(session: librarySession) }
         } catch {
             if error as? MobileActivationError == .sessionReplaced {
                 Task {
