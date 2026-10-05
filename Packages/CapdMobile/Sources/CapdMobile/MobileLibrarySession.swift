@@ -75,6 +75,24 @@ public final class MobileLibrarySession: Sendable {
         try store.canonicalCapture(id: id).map { .init(capture: $0, sessionToken: token) }
     }
 
+    public func websiteIcon(for url: String, token: MobileLibrarySessionToken) throws
+        -> WebsiteIconRecord?
+    {
+        guard token == self.token else { throw MobileActivationError.sessionReplaced }
+        let lease = try access.lease()
+        defer { withExtendedLifetime(lease) {} }
+        return try store.websiteIcon(for: url)
+    }
+
+    public func websiteIconData(
+        _ record: WebsiteIconRecord, token: MobileLibrarySessionToken
+    ) throws -> Data? {
+        guard token == self.token else { throw MobileActivationError.sessionReplaced }
+        let lease = try access.lease()
+        defer { withExtendedLifetime(lease) {} }
+        return try store.websiteIconData(record)
+    }
+
     /// App index updates and extension donation/repair use the same cross-process lock.
     /// Hold this through journal ownership checks and the exact-ID OS operation;
     /// an isCurrent check followed by an unlocked deletion is insufficient.

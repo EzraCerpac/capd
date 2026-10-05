@@ -421,6 +421,58 @@ public final class MobileStore: Sendable {
         }
     }
 
+    public func websiteIcon(for url: String) throws -> WebsiteIconRecord? {
+        let lease = try access?.lease()
+        defer { withExtendedLifetime(lease) {} }
+        guard let origin = WebsiteIconOrigin(url: url),
+            let record = try client.websiteIcon(originID: origin.id),
+            !record.deleted, record.content?.normalizerVersion == 1
+        else { return nil }
+        return record
+    }
+
+    public func websiteIconData(_ record: WebsiteIconRecord) throws -> Data? {
+        let lease = try access?.lease()
+        defer { withExtendedLifetime(lease) {} }
+        guard record.version == 1, !record.deleted,
+            let content = record.content, content.normalizerVersion == 1,
+            (1...262_144).contains(content.blob.byteCount),
+            try client.websiteIcon(originID: record.origin.id) == record
+        else { return nil }
+        return try client.blobs.read(content.blob)
+    }
+
+    public func websiteIconRevision() throws -> Int64 {
+        let lease = try access?.lease()
+        defer { withExtendedLifetime(lease) {} }
+        return try client.websiteIconRevision()
+    }
+
+    public func pullWebsiteIcons(from transport: any WebsiteIconSyncTransport) throws {
+        let lease = try access?.lease()
+        defer { withExtendedLifetime(lease) {} }
+        for _ in 0..<Self.pullPageBudget {
+            try Task.checkCancellation()
+            let before = try client.websiteIconCursor()
+            try client.pullWebsiteIcons(from: transport)
+            if try client.websiteIconCursor() == before { return }
+        }
+    }
+
+    public func pullWebsiteIcons(
+        from transport: any AsyncSyncTransport,
+        credential: @escaping @Sendable () throws -> String
+    ) async throws {
+        let lease = try access?.lease()
+        defer { withExtendedLifetime(lease) {} }
+        for _ in 0..<Self.pullPageBudget {
+            try Task.checkCancellation()
+            let before = try client.websiteIconCursor()
+            try await client.pullWebsiteIcons(from: transport, credential: credential)
+            if try client.websiteIconCursor() == before { return }
+        }
+    }
+
     @discardableResult
     public func push(to transport: any SyncTransport) throws -> [SyncReceipt] {
         let lease = try access?.lease()
