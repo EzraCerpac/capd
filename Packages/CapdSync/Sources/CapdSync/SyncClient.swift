@@ -116,7 +116,9 @@ public final class SyncClient: Sendable {
         let predecessor = try pending.last {
             try SyncDatabase.canonical(db, $0.captureID) == id
         }
-        let sequence = try Int64.fetchOne(db, sql: "SELECT sequence FROM sync_meta")! + 1
+        let previousSequence = try Int64.fetchOne(db, sql: "SELECT sequence FROM sync_meta")!
+        guard previousSequence < Int64.max else { throw SyncError.invalidOperation }
+        let sequence = previousSequence + 1
         let operation = SyncOperation(
             deviceID: deviceID, sequence: sequence,
             captureID: captureID, baseRevision: base, predecessorID: predecessor?.id,
@@ -280,7 +282,58 @@ public final class SyncClient: Sendable {
         case .accepted:
             let deleted: Bool
             if case .delete = operation.mutation { deleted = true } else { deleted = false }
-            guard record.deleted == deleted else { throw SyncError.invalidOperation }
+            guard record.deleted == deleted, record.revision > operation.baseRevision else {
+                throw SyncError.invalidOperation
+            }
+            let current = try SyncDatabase.record(db, id: record.id)
+            if let current {
+                guard sameIdentity(record, current) else { throw SyncError.invalidOperation }
+            }
+            let observed =
+                try Bool.fetchOne(
+                    db, sql: "SELECT EXISTS(SELECT 1 FROM sync_observed WHERE id = ?)",
+                    arguments: [operation.id.uuidString])!
+                || operation.sequence <= Int64.fetchOne(
+                    db, sql: "SELECT observed_sequence FROM sync_meta")!
+            if let current, !observed {
+                guard record.revision > current.revision else { throw SyncError.invalidOperation }
+                if case .recapture = operation.mutation {
+                    guard record.seenCount == Int.max || record.seenCount > current.seenCount else {
+                        throw SyncError.invalidOperation
+                    }
+                }
+                if case .create = operation.mutation {
+                    guard record.seenCount == Int.max || record.seenCount > current.seenCount else {
+                        throw SyncError.invalidOperation
+                    }
+                }
+            }
+            switch operation.mutation {
+            case .create(var incoming):
+                if record.id == incoming.id {
+                    incoming.revision = record.revision
+                    incoming.noteRevision = incoming.note == nil ? 0 : record.revision
+                    incoming.noteOperationID = operation.id
+                    incoming.manualTags = Array(Set(incoming.manualTags)).sorted()
+                    guard record == incoming else { throw SyncError.invalidOperation }
+                } else {
+                    guard CaptureFingerprint.matches(record.source, incoming.source),
+                        record.seenCount >= 2,
+                        Set(record.manualTags).isSuperset(of: incoming.manualTags),
+                        incoming.note == nil || containsNote(record, incoming.note)
+                    else { throw SyncError.invalidOperation }
+                }
+            case .edit(let edit):
+                var expected = record
+                _ = try SyncDatabase.edit(
+                    &expected, edit, operation: operation, base: record.revision, server: false)
+                guard expected.source == record.source,
+                    edit.note == nil || containsNote(record, expected.note),
+                    expected.rating == record.rating, expected.manualTags == record.manualTags,
+                    expected.generated == record.generated, expected.metadata == record.metadata
+                else { throw SyncError.invalidOperation }
+            default: break
+            }
         case .noteConflict:
             let hasNote: Bool
             switch operation.mutation {
@@ -432,13 +485,14 @@ public final class SyncClient: Sendable {
                 throw SyncError.invalidCursor
             }
             for change in page.changes {
-                try accept(db, change.capture)
                 if change.deviceID == deviceID {
+                    try validateLocalChange(change, in: db)
                     try SyncDatabase.alias(db, change.requestedCaptureID, to: change.capture.id)
                     try db.execute(
                         sql: "INSERT OR IGNORE INTO sync_observed (id) VALUES (?)",
                         arguments: [change.operationID.uuidString])
                 }
+                try accept(db, change.capture)
             }
             try rebuild(db)
             try db.execute(sql: "UPDATE sync_meta SET cursor = ?", arguments: [page.cursor])
@@ -473,8 +527,49 @@ public final class SyncClient: Sendable {
     }
 
     private func validate(_ baseline: Baseline, after oldCursor: Int64) throws {
-        guard baseline.cursor >= oldCursor, baseline.totalCaptureCount == baseline.captures.count
+        guard baseline.cursor >= oldCursor, baseline.totalCaptureCount == baseline.captures.count,
+            Set(baseline.captures.map(\.id)).count == baseline.captures.count,
+            baseline.captures.allSatisfy({ $0.revision >= 0 && $0.revision <= baseline.cursor })
         else { throw SyncError.invalidCursor }
+    }
+
+    private func validateLocalChange(_ change: FeedChange, in db: Database) throws {
+        if let pending = try operations(db).first(where: { $0.id == change.operationID }) {
+            guard pending.captureID == change.requestedCaptureID,
+                pending.sequence == change.sequence
+            else { throw SyncError.invalidOperation }
+            let outcome: SyncReceipt.Outcome =
+                change.capture.noteConflicts.contains(where: { $0.operationID == pending.id })
+                ? .noteConflict : .accepted
+            try validate(
+                SyncReceipt(operationID: pending.id, outcome: outcome, capture: change.capture),
+                for: pending, in: db)
+            if change.requestedCaptureID == change.capture.id { return }
+            if case .create(let incoming) = pending.mutation,
+                CaptureFingerprint.matches(incoming.source, change.capture.source)
+            {
+                return
+            }
+        }
+        guard change.requestedCaptureID != change.capture.id else { return }
+        guard try SyncDatabase.canonical(db, change.requestedCaptureID) == change.capture.id,
+            let current = try SyncDatabase.record(db, id: change.capture.id),
+            sameIdentity(current, change.capture)
+        else { throw SyncError.invalidOperation }
+    }
+
+    private func sameIdentity(_ lhs: SharedCapture, _ rhs: SharedCapture) -> Bool {
+        lhs.createdAt == rhs.createdAt && lhs.source.kind == rhs.source.kind
+            && lhs.source.contentHash == rhs.source.contentHash && lhs.source.url == rhs.source.url
+            && lhs.source.host == rhs.source.host && lhs.source.blob == rhs.source.blob
+            && (lhs.source.selection?.isEmpty ?? true || rhs.source.selection?.isEmpty ?? true
+                || lhs.source.selection == rhs.source.selection)
+            && (lhs.source.title?.isEmpty ?? true || rhs.source.title?.isEmpty ?? true
+                || lhs.source.title == rhs.source.title)
+    }
+
+    private func containsNote(_ record: SharedCapture, _ value: String?) -> Bool {
+        record.note == value || record.noteConflicts.contains(where: { $0.value == value })
     }
 
     private func checkBinding(_ transport: any SyncTransport) throws {
