@@ -297,7 +297,7 @@ public struct MobileLibraryActivation: Sendable {
         let readCredential: @Sendable () throws -> String = { try temporary.read(for: enrollment) }
         let baseline = try await remote.importBaseline(
             credential: readCredential,
-            requiringGeneratedProcessingContract: true)
+            requiringGeneratedProcessingContract: true, summaryOnly: handoff == nil)
         guard baseline.deviceSequences[enrollment.deviceID] == nil else {
             throw MobileActivationError.identityAlreadyUsed
         }
@@ -311,7 +311,7 @@ public struct MobileLibraryActivation: Sendable {
         // Recheck authoritative device history and imported content immediately before publication.
         let verified = try await remote.importBaseline(
             credential: readCredential,
-            requiringGeneratedProcessingContract: true)
+            requiringGeneratedProcessingContract: true, summaryOnly: handoff == nil)
         guard verified.deviceSequences[enrollment.deviceID] == nil else {
             throw MobileActivationError.identityAlreadyUsed
         }
@@ -323,8 +323,8 @@ public struct MobileLibraryActivation: Sendable {
         guard let stagedCursor, stagedCursor >= verified.cursor else {
             throw SyncError.invalidCursor
         }
-        let visible = try staged.search()
         if let handoff {
+            let visible = try staged.search()
             for item in handoff.review.preview.items
             where item.disposition != .preserveTombstone && !item.source.deleted {
                 guard visible.contains(where: { $0.id == item.canonicalCaptureID }) else {

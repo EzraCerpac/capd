@@ -182,15 +182,20 @@ struct LibraryConnectionView: View {
                     TextField("Library ID", text: $libraryID).accessibilityIdentifier(
                         "connectionLibraryID")
                     Button("Save backup and prepare connection") {
-                        reviewed = false
-                        authorized = false
-                        archiveOriginal = false
-                        reviewHash = ""
-                        receiptHash = ""
-                        credential = ""
+                        let previousBackupID = connection.preparation?.backupID
                         Task {
                             await connection.prepare(
                                 address: address, serviceID: serviceID, libraryID: libraryID)
+                            if let preparation = connection.preparation,
+                                preparation.backupID != previousBackupID
+                            {
+                                reviewed = false
+                                authorized = false
+                                archiveOriginal = false
+                                reviewHash = ""
+                                receiptHash = ""
+                                credential = ""
+                            }
                         }
                     }.disabled(
                         connection.busy || address.isEmpty || serviceID.isEmpty || libraryID.isEmpty
