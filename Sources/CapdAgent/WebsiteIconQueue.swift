@@ -13,7 +13,7 @@ actor WebsiteIconQueue {
         defer { draining = false }
         do {
             _ = try service.reclaimStale()
-            for _ in 0..<limit {
+            for _ in 0..<min(limit, 3) {
                 try Task.checkCancellation()
                 if try await !service.processNext() { return }
             }

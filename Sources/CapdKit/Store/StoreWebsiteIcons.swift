@@ -74,21 +74,27 @@ extension Store {
                 try WebsiteIconService.validatePNG(client.blobs.read(content.blob))
             }
             try write { db in
-                if record.deleted {
-                    try db.execute(
-                        sql:
-                            "UPDATE website_icon_jobs SET content=NULL,revision=?,state='pending',claim=NULL,claimed_at=NULL WHERE id=? AND revision<=?",
-                        arguments: [record.revision, record.id, record.revision])
-                } else if let content = record.content {
-                    try db.execute(
-                        sql:
-                            "INSERT INTO website_icon_jobs(id,origin,state,retry_after,attempts,content,revision) VALUES(?,?,'succeeded',0,0,?,?) ON CONFLICT(id) DO UPDATE SET content=excluded.content,revision=excluded.revision,state='succeeded',claim=NULL,claimed_at=NULL WHERE website_icon_jobs.revision<=excluded.revision",
-                        arguments: [
-                            record.id, record.origin.canonicalHTTPSOrigin,
-                            try JSONEncoder().encode(content), record.revision,
-                        ])
-                }
+                guard try client.websiteIcon(in: db, originID: record.id) == record else { return }
+                try Self.projectWebsiteIcon(in: db, record: record)
             }
+        }
+    }
+
+    static func projectWebsiteIcon(in db: Database, record: WebsiteIconRecord) throws {
+        try record.validate()
+        if record.deleted {
+            try db.execute(
+                sql:
+                    "UPDATE website_icon_jobs SET content=NULL,revision=?,state='pending',claim=NULL,claimed_at=NULL WHERE id=? AND revision<=?",
+                arguments: [record.revision, record.id, record.revision])
+        } else if let content = record.content {
+            try db.execute(
+                sql:
+                    "INSERT INTO website_icon_jobs(id,origin,state,retry_after,attempts,content,revision) VALUES(?,?,'succeeded',0,0,?,?) ON CONFLICT(id) DO UPDATE SET content=excluded.content,revision=excluded.revision,state='succeeded',claim=NULL,claimed_at=NULL WHERE website_icon_jobs.revision<=excluded.revision",
+                arguments: [
+                    record.id, record.origin.canonicalHTTPSOrigin,
+                    try JSONEncoder().encode(content), record.revision,
+                ])
         }
     }
 
@@ -180,6 +186,18 @@ extension Store {
                     ])
             }
             return true
+        }
+    }
+
+    func websiteIconClaimIsCurrent(_ claim: WebsiteIconClaim) throws -> Bool {
+        try reader.read { db in
+            try StoreSync.checkBinding(db, expected: claim.binding)
+            return try Self.websiteIconsEnabled(in: db)
+                && Bool.fetchOne(
+                    db,
+                    sql:
+                        "SELECT EXISTS(SELECT 1 FROM website_icon_jobs WHERE id=? AND claim=? AND state='claimed' AND EXISTS(SELECT 1 FROM capture_icon_origins WHERE origin_id=website_icon_jobs.id))",
+                    arguments: [claim.origin.id, claim.token.uuidString]) == true
         }
     }
 

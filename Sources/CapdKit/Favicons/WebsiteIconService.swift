@@ -60,10 +60,12 @@ public struct WebsiteIconService: Sendable {
         let configuration = try MacSyncConfiguration.load(paths: store.paths)
         guard configuration?.binding == claim.binding, configuration?.deviceID == claim.deviceID
         else { throw MacSyncError.configurationChanged }
+        guard try store.websiteIconClaimIsCurrent(claim) else { return }
         let content: WebsiteIconContent?
         var missing = false
         switch outcome {
         case .normalizedPNG(let bytes):
+            try Task.checkCancellation()
             guard (1...262_144).contains(bytes.count) else { throw SyncError.invalidBlob }
             let blobs =
                 try store.syncClient?.blobs
@@ -74,11 +76,13 @@ public struct WebsiteIconService: Sendable {
                 fetchedAt: now())
             try content?.validate()
         case .missing:
+            try Task.checkCancellation()
             missing = true
             content = nil
         case nil:
             content = nil
         }
+        if case .normalizedPNG = outcome { try Task.checkCancellation() }
         _ = try store.finishWebsiteIcon(claim, content: content, missing: missing, now: now())
     }
 }
