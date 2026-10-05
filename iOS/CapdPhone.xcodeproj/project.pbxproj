@@ -425,7 +425,7 @@
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = dev.jxd.capd.iphone.prototype;
 				SDKROOT = iphoneos;
-				TARGETED_DEVICE_FAMILY = "1,2";
+				TARGETED_DEVICE_FAMILY = 1;
 			};
 			name = Debug;
 		};
@@ -442,7 +442,7 @@
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = dev.jxd.capd.iphone.prototype;
 				SDKROOT = iphoneos;
-				TARGETED_DEVICE_FAMILY = "1,2";
+				TARGETED_DEVICE_FAMILY = 1;
 			};
 			name = Release;
 		};
@@ -477,7 +477,7 @@
 				PRODUCT_BUNDLE_IDENTIFIER = dev.jxd.capd.iphone.prototype.share;
 				SDKROOT = iphoneos;
 				SKIP_INSTALL = YES;
-				TARGETED_DEVICE_FAMILY = "1,2";
+				TARGETED_DEVICE_FAMILY = 1;
 			};
 			name = Release;
 		};
@@ -512,7 +512,7 @@
 				PRODUCT_BUNDLE_IDENTIFIER = dev.jxd.capd.iphone.prototype.share;
 				SDKROOT = iphoneos;
 				SKIP_INSTALL = YES;
-				TARGETED_DEVICE_FAMILY = "1,2";
+				TARGETED_DEVICE_FAMILY = 1;
 			};
 			name = Debug;
 		};
