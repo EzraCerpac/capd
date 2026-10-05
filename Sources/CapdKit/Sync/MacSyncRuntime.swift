@@ -111,11 +111,14 @@ public actor MacSyncRuntime {
                 } catch is CancellationError {
                     throw CancellationError()
                 } catch {
-                    iconIssue = (error as? SyncHTTPError) == .unsupportedVersion
+                    iconIssue =
+                        (error as? SyncHTTPError) == .unsupportedVersion
                         ? "This server needs an update to sync website icons. Saved captures still sync."
                         : "Website icons could not finish syncing. Cached icons remain available."
                 }
-                do { try store.refreshWebsiteIconsFromSync() } catch {
+                do {
+                    try store.refreshWebsiteIconsFromSync()
+                } catch {
                     iconIssue = "A website icon could not be verified. Saved captures still sync."
                 }
                 try Task.checkCancellation()

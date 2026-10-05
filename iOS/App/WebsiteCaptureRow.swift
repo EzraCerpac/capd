@@ -62,15 +62,17 @@ struct WebsiteCaptureRow: View {
                 fallbackSymbol: symbol, fallbackTint: tint, size: size)
         }
         .task(id: request) {
+            let expected = request
             record = nil
             loadedRequest = nil
-            guard request.display, let url = request.url, let token = scopeToken,
+            guard expected.display, let url = expected.url, let token = scopeToken,
                 let origin = WebsiteIconOrigin(url: url),
                 let found = try? await readRecord(url, token), !Task.isCancelled,
+                request == expected,
                 found.origin == origin, !found.deleted, (try? found.validate()) != nil
             else { return }
             record = found
-            loadedRequest = request
+            loadedRequest = expected
         }
     }
 }

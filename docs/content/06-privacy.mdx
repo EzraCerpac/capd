@@ -3,8 +3,9 @@ title: Privacy
 description: What stays on your Mac, what can connect to the network, and how on-device processing works.
 ---
 
-Your Capd library stays on your Mac in one SQLite database and local asset
-folders. Capd has no account, cloud sync, analytics, advertising, or telemetry.
+Your Capd library lives in local SQLite databases and asset folders. Optional
+enrolled library sync sends captures and verified assets to your configured
+server. Capd has no built-in account service, analytics, advertising, or telemetry.
 
 This page lists every network feature in the app.
 
@@ -29,13 +30,29 @@ page content for link captures** in Settings.
 
 ## Website icons
 
-When a saved website first appears in the HUD or search results, Capd may request
-its favicon from that website or the icon location declared by its home page.
-Requests use an ephemeral network session. Valid icons are cached locally in
-the `favicons/` folder; confirmed misses are retried after seven days.
+Website-icon generation is disabled by default. When enabled, the Mac Agent
+processes eligible saved links, including links received from an enrolled
+iPhone. It requests only `https://<original-host>/favicon.ico`, without the
+capture path, query, fragment, cookies, authentication or redirects. DNS reveals
+the hostname to the system resolver, and the website sees the icon request.
+Private, local and reserved destinations are refused before connecting.
 
-Favicon fetching currently has no separate setting. If a request fails or the
-Mac is offline, Capd displays a built-in symbol instead.
+The direct numeric connection verifies system TLS trust for the original
+hostname before sending HTTP. It bypasses application proxy settings; it does
+not promise hostname-triggered VPN activation. This transport supports TLS 1.2.
+Sites requiring a proxy, TLS 1.3 or a redirect display a built-in symbol.
+
+Accepted PNG, JPEG and ICO images become static 64-by-64 PNGs without source
+metadata. Verified bytes and icon records sync through the configured library
+server using the existing enrollment and authorization. Mac and iPhone views
+read local cached bytes; they do not fetch icons when a row appears. The iPhone
+never contacts the website for an icon.
+
+**Control generation:** use **Load website icons** in Mac Settings. Disabling it
+stops new claims; existing verified icons remain readable. The iPhone's
+**Show website icons** setting controls display only. Confirmed misses retry
+after seven days. Removing the last live link hides its shared icon; retained
+blob bytes are not physically erased by that deletion.
 
 ## Update checks
 

@@ -103,9 +103,16 @@ The Raycast extension in [`raycast/`](./raycast) adds **Capd: Search** and
 
 [See the CLI reference](https://capd.jxd.dev/cli).
 
+Website icons work across an enrolled Mac and iPhone library. Enable **Load
+website icons** on the Mac to let its Agent generate icons for eligible links
+saved on either device. Icons travel through the configured library server and
+remain available offline; the iPhone does not contact saved websites for icons.
+See [website icon generation and sync](docs/designs/website-icons.md).
+
 ## Private by design
 
-Capd has no account, cloud service, analytics, or telemetry. Page fetching,
+Capd has no built-in account service, analytics, or telemetry. Optional library
+sync uses your configured server. Page fetching,
 favicon requests, update checks, OCR, and automatic tagging are documented in
 the [privacy guide](https://capd.jxd.dev/privacy), including which network
 features can be disabled.
@@ -130,4 +137,3 @@ Want to build Capd, improve the docs, or send a patch? See
 | htomd       | Focused Markdown and metadata from messy HTML, in pure Python.        |                                            | [GitHub](https://github.com/jamiedavenport/htomd)       |
 
 <!-- md:include end -->
-

@@ -138,6 +138,22 @@ let package = Package(
                 "Tests/PhoneLibraryConnectionRecoveryTests.swift",
             ]
         ),
+        .testTarget(
+            name: "PhoneWebsiteIconTests",
+            dependencies: [.product(name: "CapdWebsiteIcons", package: "CapdWebsiteIcons")],
+            path: "iOS",
+            sources: ["App/PhoneWebsiteIcons.swift", "Tests/PhoneWebsiteIconTests.swift"]
+        ),
+        .testTarget(
+            name: "WebsiteIconIntegrationTests",
+            dependencies: [
+                "CapdKit",
+                .product(name: "CapdMobile", package: "CapdMobile"),
+                .product(name: "CapdSync", package: "CapdSync"),
+                .product(name: "GRDB", package: "GRDB.swift"),
+            ],
+            path: "Tests/WebsiteIconIntegrationTests"
+        ),
     ],
     swiftLanguageModes: [.v6]
 )
