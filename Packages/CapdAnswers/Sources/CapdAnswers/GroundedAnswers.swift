@@ -108,8 +108,14 @@ public struct GroundedAnswer: Sendable, Equatable {
 /// transcript persistence, or logging are performed by this service.
 public struct GroundedAnswerService: Sendable {
     public static let sourceLimit = 6
+    /// Maximum UTF-8 bytes in one source excerpt.
     public static let excerptLimit = 1_000
+    /// Maximum UTF-8 bytes across the source excerpts supplied to the model.
     public static let totalExcerptLimit = 5_000
+    private struct Passage {
+        let text: String
+        let weight: Double
+    }
     private let retriever: any AnswerRetrieving
     private let model: any AnswerGenerating
 
@@ -133,7 +139,7 @@ public struct GroundedAnswerService: Sendable {
 
         struct Candidate {
             let evidence: AnswerEvidence
-            var excerpts: [String]
+            var excerpts: [Passage]
             var matches: Int
             var score: Double
         }
@@ -151,14 +157,23 @@ public struct GroundedAnswerService: Sendable {
                     previous.matches += 1
                     previous.score += score
                     for fragment in Self.fragments(evidence.excerpt) {
-                        if previous.excerpts.contains(where: { $0.contains(fragment) }) { continue }
-                        previous.excerpts.removeAll { fragment.contains($0) }
-                        previous.excerpts.append(fragment)
+                        if previous.excerpts.contains(where: {
+                            $0.text.contains(fragment) && $0.weight >= weight
+                        }) {
+                            continue
+                        }
+                        previous.excerpts.removeAll {
+                            fragment.contains($0.text) && weight >= $0.weight
+                        }
+                        previous.excerpts.append(.init(text: fragment, weight: weight))
                     }
                     candidates[evidence.id] = previous
                 } else {
                     candidates[evidence.id] = Candidate(
-                        evidence: evidence, excerpts: Self.fragments(evidence.excerpt),
+                        evidence: evidence,
+                        excerpts: Self.fragments(evidence.excerpt).map {
+                            .init(text: $0, weight: weight)
+                        },
                         matches: 1, score: score)
                 }
             }
@@ -175,7 +190,7 @@ public struct GroundedAnswerService: Sendable {
             let excerpt = Self.mergedExcerpts(
                 candidate.excerpts, limit: min(Self.excerptLimit, remaining))
             guard !excerpt.isEmpty else { continue }
-            remaining -= excerpt.count
+            remaining -= excerpt.utf8.count
             sources.append(
                 .init(
                     number: sources.count + 1,
@@ -247,26 +262,52 @@ public struct GroundedAnswerService: Sendable {
 
     private static func fragments(_ excerpt: String) -> [String] {
         excerpt.components(separatedBy: "\n\n").compactMap {
-            let fragment = String(normalized($0).prefix(excerptLimit))
+            let fragment = normalized(boundedPrefix($0, byteLimit: excerptLimit))
             return fragment.isEmpty ? nil : fragment
         }
     }
 
-    private static func mergedExcerpts(_ fragments: [String], limit: Int) -> String {
+    private static func boundedPrefix(_ text: String, byteLimit: Int) -> String {
+        var end = text.startIndex
+        var remaining = byteLimit
+        while end < text.endIndex {
+            let next = text.index(after: end)
+            let cost = text[end..<next].utf8.count
+            guard cost <= remaining else { break }
+            remaining -= cost
+            end = next
+        }
+        return String(text[..<end])
+    }
+
+    private static func mergedExcerpts(_ fragments: [Passage], limit: Int) -> String {
         let separator = "\n\n"
         var remaining = limit
-        var selected: [(offset: Int, element: String)] = []
-        let shortestFirst = fragments.enumerated().sorted {
-            if $0.element.count != $1.element.count { return $0.element.count < $1.element.count }
+        var selected: [(offset: Int, element: Passage)] = []
+        let prioritized = fragments.enumerated().sorted {
+            if $0.element.weight != $1.element.weight {
+                return $0.element.weight > $1.element.weight
+            }
+            if $0.element.text.utf8.count != $1.element.text.utf8.count {
+                return $0.element.text.utf8.count < $1.element.text.utf8.count
+            }
             return $0.offset < $1.offset
         }
-        for fragment in shortestFirst {
-            let cost = fragment.element.count + (selected.isEmpty ? 0 : separator.count)
-            guard cost <= remaining else { continue }
+        for (index, fragment) in prioritized.enumerated() {
+            let cost =
+                fragment.element.text.utf8.count + (selected.isEmpty ? 0 : separator.utf8.count)
+            // Keep room for a second complete passage when selecting the first one.
+            let reserve =
+                selected.isEmpty
+                ? (prioritized.dropFirst(index + 1).map { $0.element.text.utf8.count }.min().map {
+                    $0 + separator.utf8.count
+                } ?? 0) : 0
+            guard cost + reserve <= remaining else { continue }
             selected.append(fragment)
             remaining -= cost
         }
-        return selected.sorted { $0.offset < $1.offset }.map(\.element).joined(separator: separator)
+        return selected.sorted { $0.offset < $1.offset }.map(\.element.text).joined(
+            separator: separator)
     }
 
     static func normalized(_ text: String) -> String {
