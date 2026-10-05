@@ -20,13 +20,20 @@ public final class SyncClient: Sendable {
         databaseURL: URL, blobDirectory: URL, deviceID: UUID? = nil,
         binding: SyncLibraryBinding? = nil
     ) throws {
-        let writer = try SyncDatabase.open(at: databaseURL)
+        let ownsBlobs = try BlobStore.validateExistingOwnership(blobDirectory, binding: binding)
         let files = (try? FileManager.default.contentsOfDirectory(atPath: blobDirectory.path)) ?? []
-        try writer.read {
-            _ = try SyncDatabase.checkEnrollment(
-                $0, role: "client", deviceID: deviceID, binding: binding,
-                hasUnboundBlobs: files.contains { $0 != "library-owner" })
+        if FileManager.default.fileExists(atPath: databaseURL.path) {
+            var configuration = Configuration()
+            configuration.readonly = true
+            let reader = try DatabaseQueue(path: databaseURL.path, configuration: configuration)
+            let storedBinding = try reader.read {
+                try SyncDatabase.checkEnrollment(
+                    $0, role: "client", deviceID: deviceID, binding: binding,
+                    hasUnboundBlobs: files.contains { $0 != "library-owner" })
+            }
+            guard storedBinding == nil || ownsBlobs else { throw SyncBindingError.mismatch }
         }
+        let writer = try SyncDatabase.open(at: databaseURL)
         try self.init(
             writer: writer,
             blobs: BlobStore(directory: blobDirectory, binding: binding),
@@ -475,25 +482,37 @@ public final class SyncClient: Sendable {
     }
 
     private func validate(_ page: FeedPage, after oldCursor: Int64) throws {
-        try read { db in
-            var cursor = oldCursor
-            var records: [UUID: SharedCapture] = [:]
-            for change in page.changes {
-                guard cursor < Int64.max, change.cursor == cursor + 1,
-                    change.capture.revision == change.cursor
-                else { throw SyncError.invalidCursor }
-                try SyncDatabase.validateHistorical(change.capture)
-                let current =
-                    try records[change.capture.id]
-                    ?? SyncDatabase.record(db, id: change.capture.id)
-                try validateIdentity(change.capture, replacing: current)
-                if current.map({ $0.revision <= change.capture.revision }) ?? true {
-                    records[change.capture.id] = change.capture
+        try write { db in
+            try db.inSavepoint {
+                var cursor = oldCursor
+                for change in page.changes {
+                    guard cursor < Int64.max, change.cursor == cursor + 1,
+                        change.capture.revision == change.cursor
+                    else { throw SyncError.invalidCursor }
+                    try accept(change, in: db)
+                    cursor = change.cursor
                 }
-                cursor = change.cursor
+                guard page.cursor == cursor else { throw SyncError.invalidCursor }
+                return .rollback
             }
-            guard page.cursor == cursor else { throw SyncError.invalidCursor }
         }
+    }
+
+    private func accept(_ change: FeedChange, in db: Database) throws {
+        try SyncDatabase.validateHistorical(change.capture)
+        try validateIdentity(
+            change.capture, replacing: SyncDatabase.record(db, id: change.capture.id))
+        if change.deviceID == deviceID {
+            try validateLocalChange(change, in: db)
+            try SyncDatabase.alias(db, change.requestedCaptureID, to: change.capture.id)
+            try db.execute(
+                sql: """
+                    INSERT OR IGNORE INTO sync_observed (id)
+                    SELECT id FROM sync_outbox WHERE id = ?
+                    """,
+                arguments: [change.operationID.uuidString])
+        }
+        try accept(db, change.capture)
     }
 
     private func commit(_ page: FeedPage, after oldCursor: Int64) throws {
@@ -503,22 +522,7 @@ public final class SyncClient: Sendable {
             else {
                 throw SyncError.invalidCursor
             }
-            for change in page.changes {
-                try SyncDatabase.validateHistorical(change.capture)
-                try validateIdentity(
-                    change.capture, replacing: SyncDatabase.record(db, id: change.capture.id))
-                if change.deviceID == deviceID {
-                    try validateLocalChange(change, in: db)
-                    try SyncDatabase.alias(db, change.requestedCaptureID, to: change.capture.id)
-                    try db.execute(
-                        sql: """
-                            INSERT OR IGNORE INTO sync_observed (id)
-                            SELECT id FROM sync_outbox WHERE id = ?
-                            """,
-                        arguments: [change.operationID.uuidString])
-                }
-                try accept(db, change.capture)
-            }
+            for change in page.changes { try accept(change, in: db) }
             try rebuild(db)
             try db.execute(sql: "UPDATE sync_meta SET cursor = ?", arguments: [page.cursor])
         }
