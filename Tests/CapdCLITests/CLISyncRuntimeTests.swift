@@ -9,7 +9,9 @@ import Testing
 
 @Suite("CLI bound Mac runtime", .timeLimit(.minutes(1)))
 struct CLISyncRuntimeTests {
-    @Test func postCommandFlushRetriesBusyLeaseWithoutRecreatingOperation() async throws {
+    @Test(.serialized, arguments: [Duration.milliseconds(75), .zero])
+    func postCommandFlushRetriesBusyLeaseWithoutRecreatingOperation(deadline: Duration) async throws
+    {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(
             "capd-cli-busy-\(UUID())")
         defer { try? FileManager.default.removeItem(at: root) }
@@ -48,9 +50,16 @@ struct CLISyncRuntimeTests {
         let clock = ContinuousClock()
         let started = clock.now
         let blocked = await CLISyncSessions.flush(
-            try #require(session.runtime), within: .milliseconds(75))
-        #expect(blocked.phase == .busy)
-        #expect(blocked.issue?.contains("remain queued") == true)
+            try #require(session.runtime), within: deadline)
+        let expectedIssue =
+            blocked.phase == .busy
+            ? "Another Capd process is synchronizing this library. Saved changes remain queued."
+            : "Sync timed out. Saved changes remain queued."
+        // The timer can finish before the contended lease snapshot returns.
+        #expect(blocked.phase == .busy || blocked.phase == .attention)
+        #expect(blocked.issue == expectedIssue)
+        #expect(blocked.pending == 1)
+        #expect(await wire.operations.isEmpty)
         #expect(started.duration(to: clock.now) < .seconds(2))
         #expect(
             try await session.store.reader.read {
