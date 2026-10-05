@@ -106,7 +106,9 @@ public final class MobileStore: Sendable {
             createdAt: capture.createdAt, note: capture.note.isEmpty ? nil : capture.note,
             metadata: capture.metadata)
         record.manualTags = capture.manualTags
-        return try enqueue(captureID: record.id, mutation: .create(record))
+        return try enqueue(captureID: record.id, mutation: .create(record)) { db in
+            try MobileCaptureSaveValidation.validate(record, in: db)
+        }
     }
 
     @discardableResult

@@ -49,7 +49,10 @@ public struct SearchService: Sendable {
     public func capture(url: URL) throws -> Capture? {
         let hash = CaptureIdentity.contentHash(for: url)
         return try reader.read { db in
-            try Capture.filter(Capture.CodingKeys.contentHash == hash).fetchOne(db)
+            try Capture.filter(
+                Capture.CodingKeys.kind == CaptureKind.link
+                    && Capture.CodingKeys.contentHash == hash
+            ).fetchOne(db)
         }
     }
 
