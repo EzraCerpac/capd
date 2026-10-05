@@ -259,12 +259,14 @@ public final class Store: Sendable {
 
             try existing.update(db)
             try synchronize(before, existing)
+            try Self.reconcileWebsiteIconOrigin(in: db, captureID: existing.id!)
             return .alreadyCaptured(existing, previousSeenAt: previousSeenAt)
         }
 
         var inserted = capture
         try inserted.insert(db)
         try synchronize(nil, inserted)
+        try Self.reconcileWebsiteIconOrigin(in: db, captureID: inserted.id!)
         return .captured(inserted)
     }
 
@@ -366,6 +368,7 @@ public final class Store: Sendable {
             let doomed = try Capture.filter(ids.contains(Capture.CodingKeys.id)).fetchAll(db)
             try enqueueDeleted(doomed, in: db)
             try Capture.filter(ids.contains(Capture.CodingKeys.id)).deleteAll(db)
+            try Self.revokeUnreferencedWebsiteIconClaims(in: db)
             return doomed
         }
         for capture in deleted {
