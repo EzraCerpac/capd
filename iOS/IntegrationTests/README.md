@@ -1,10 +1,12 @@
 # Combined feature checks
 
-`CombinedDiscoveryUITests.swift` is preserved outside the standalone iPhone test
-target because its cold-search-route flow requires both system search and local
-answers. It is not part of the Q&A branch's independent acceptance checks.
+`CombinedDiscoveryUITests.swift` contains saved-capture citation checks and a
+cold-search-route flow that uses system search, local answers and
+`CapdPhoneFixtureHost`.
 
-After both feature branches are integrated, include this directory in the owned
-synthetic simulator test target to exercise the combined flow. Do not run these
-capture-creating fixtures against a personal phone or library. The ordinary
-`UITests/AnswersUITests.swift` remains in the Q&A target.
+The `CapdPhoneUITests` target in `../project.yml` includes `../UITests`, not this
+directory. `../UITests/AnswersUITests.swift` is part of that configured target;
+these combined checks are not.
+
+These fixtures create captures and change system-search settings. Use an
+isolated synthetic simulator library, not a personal phone or library.
