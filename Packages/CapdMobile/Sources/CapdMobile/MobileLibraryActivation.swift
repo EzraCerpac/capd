@@ -1,4 +1,5 @@
 import CapdSync
+import Crypto
 import Foundation
 import GRDB
 
@@ -315,6 +316,13 @@ public struct MobileLibraryActivation: Sendable {
             throw MobileActivationError.identityAlreadyUsed
         }
         if let handoff { try Self.verifyAuthority(verified, handoff: handoff) }
+        let stagedReader = try Self.reader(next.databaseURL(in: root))
+        let stagedCursor = try await stagedReader.read { db in
+            try Int64.fetchOne(db, sql: "SELECT cursor FROM sync_meta WHERE id=1")
+        }
+        guard let stagedCursor, stagedCursor >= verified.cursor else {
+            throw SyncError.invalidCursor
+        }
         let visible = try staged.search()
         if let handoff {
             for item in handoff.review.preview.items
@@ -403,30 +411,77 @@ public struct MobileLibraryActivation: Sendable {
     }
 
     /// Logical state includes identity, cursor, exact outbox, receipts, aliases and visible projection.
-    /// SQL quote() keeps binary payloads byte-exact without decoding or rewriting operations.
-    private static func stateDigest(_ reader: DatabaseQueue) throws -> String {
-        let tables: [String: [[String]]] = try reader.read { db in
+    static func stateDigest(_ reader: DatabaseQueue) throws -> String {
+        try reader.read { db in
+            var hash = SHA256()
+            hash.update(data: Data("mobile-source-state-v2".utf8))
             let names = try String.fetchAll(
                 db,
                 sql:
                     "SELECT name FROM sqlite_master WHERE type='table' AND (name LIKE 'sync_%' OR name='mobile_captures' OR name='grdb_migrations') ORDER BY name"
             )
-            var result: [String: [[String]]] = [:]
             for name in names {
-                let quoted = "\"" + name.replacingOccurrences(of: "\"", with: "\"\"") + "\""
-                let columns = try Row.fetchAll(db, sql: "PRAGMA table_info(\(quoted))").map { row in
-                    "quote(\""
-                        + (row["name"] as String).replacingOccurrences(of: "\"", with: "\"\"")
-                        + "\")"
+                hash.update(data: Data([0xf0]))
+                hashValue(.string(name), into: &hash)
+                let quoted = quotedIdentifier(name)
+                let info = try Row.fetchAll(db, sql: "PRAGMA table_info(\(quoted))")
+                let columns = info.map { $0["name"] as String }
+                for column in columns { hashValue(.string(column), into: &hash) }
+                hash.update(data: Data([0xf1]))
+                let primaryKey = info.filter { ($0["pk"] as Int) > 0 }
+                    .sorted { ($0["pk"] as Int) < ($1["pk"] as Int) }
+                    .map { quotedIdentifier($0["name"] as String) + " COLLATE BINARY" }
+                let identifiers = columns.map(quotedIdentifier)
+                let order =
+                    primaryKey
+                    + identifiers.flatMap {
+                        ["typeof(\($0))", "\($0) COLLATE BINARY"]
+                    }
+                let rows = try Row.fetchCursor(
+                    db,
+                    sql:
+                        "SELECT \(identifiers.joined(separator: ",")) FROM \(quoted) ORDER BY \(order.joined(separator: ","))"
+                )
+                while let row = try rows.next() {
+                    hash.update(data: Data([0xf2]))
+                    for (_, value) in row { hashValue(value.storage, into: &hash) }
                 }
-                let rows = try Row.fetchAll(
-                    db, sql: "SELECT \(columns.joined(separator: ",")) FROM \(quoted)")
-                result[name] = rows.map { row in row.map { String.fromDatabaseValue($0.1)! } }
-                    .sorted { $0.lexicographicallyPrecedes($1) }
+                hash.update(data: Data([0xf3]))
             }
-            return result
+            return hash.finalize().map { String(format: "%02x", $0) }.joined()
         }
-        return BlobReference(data: try encode(tables)).digest
+    }
+
+    private static func quotedIdentifier(_ value: String) -> String {
+        "\"" + value.replacingOccurrences(of: "\"", with: "\"\"") + "\""
+    }
+
+    private static func hashValue(_ value: DatabaseValue.Storage, into hash: inout SHA256) {
+        let tag: UInt8
+        let bytes: Data
+        switch value {
+        case .null:
+            tag = 0
+            bytes = Data()
+        case .int64(let value):
+            tag = 1
+            var bits = value.bigEndian
+            bytes = withUnsafeBytes(of: &bits) { Data($0) }
+        case .double(let value):
+            tag = 2
+            var bits = value.bitPattern.bigEndian
+            bytes = withUnsafeBytes(of: &bits) { Data($0) }
+        case .string(let value):
+            tag = 3
+            bytes = Data(value.utf8)
+        case .blob(let value):
+            tag = 4
+            bytes = value
+        }
+        hash.update(data: Data([tag]))
+        var length = UInt64(bytes.count).bigEndian
+        withUnsafeBytes(of: &length) { hash.update(bufferPointer: $0) }
+        hash.update(data: bytes)
     }
 
     private static func copyAssets(from source: URL, to destination: URL) throws {
