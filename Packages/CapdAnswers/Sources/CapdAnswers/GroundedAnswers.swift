@@ -108,6 +108,10 @@ public struct GroundedAnswer: Sendable, Equatable {
 /// transcript persistence, or logging are performed by this service.
 public struct GroundedAnswerService: Sendable {
     public static let sourceLimit = 6
+    /// Maximum UTF-8 bytes in a question before trimming or text processing.
+    public static let questionByteLimit = 2_000
+    /// Maximum UTF-8 bytes in one source title supplied to the model.
+    public static let titleByteLimit = 640
     /// Maximum UTF-8 bytes in one source excerpt.
     public static let excerptLimit = 1_000
     /// Maximum UTF-8 bytes across the source excerpts supplied to the model.
@@ -131,9 +135,7 @@ public struct GroundedAnswerService: Sendable {
 
     public func answer(_ rawQuestion: String) async throws -> GroundedAnswer {
         try Task.checkCancellation()
-        let question = rawQuestion.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !question.isEmpty else { throw AnswerError.emptyQuestion }
-        guard question.count <= 500 else { throw AnswerError.questionTooLong }
+        let question = try Self.validatedQuestion(rawQuestion)
         if case .unavailable(let reason) = availability() { throw AnswerError.unavailable(reason) }
         let terms = Self.searchTerms(question)
         guard !terms.isEmpty else { throw AnswerError.insufficientEvidence }
@@ -195,7 +197,7 @@ public struct GroundedAnswerService: Sendable {
                     number: sources.count + 1,
                     source: .init(
                         id: candidate.evidence.id,
-                        title: String(candidate.evidence.title.prefix(160)), excerpt: excerpt)))
+                        title: Self.boundedTitle(candidate.evidence.title), excerpt: excerpt)))
         }
         guard !sources.isEmpty else { throw AnswerError.insufficientEvidence }
         try Task.checkCancellation()
@@ -234,7 +236,31 @@ public struct GroundedAnswerService: Sendable {
             sources: sources.filter { cited.contains($0.number) })
     }
 
-    public static func searchTerms(_ question: String) -> [String] {
+    static func validatedQuestion(_ rawQuestion: String) throws -> String {
+        guard rawQuestion.utf8.prefix(questionByteLimit + 1).count <= questionByteLimit else {
+            throw AnswerError.questionTooLong
+        }
+        let question = rawQuestion.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !question.isEmpty else { throw AnswerError.emptyQuestion }
+        guard question.count <= 500 else { throw AnswerError.questionTooLong }
+        return question
+    }
+
+    private static func boundedTitle(_ title: String) -> String {
+        var bounded = ""
+        var remaining = titleByteLimit
+        // Scalar iteration bounds work even when one character spans the entire title.
+        for scalar in title.unicodeScalars {
+            let cost = scalar.utf8.count
+            guard cost <= remaining else { break }
+            bounded.unicodeScalars.append(scalar)
+            remaining -= cost
+        }
+        return String(bounded.prefix(160))
+    }
+
+    public static func searchTerms(_ rawQuestion: String) -> [String] {
+        guard let question = try? validatedQuestion(rawQuestion) else { return [] }
         let stop: Set<String> = [
             "a", "an", "and", "are", "as", "at", "be", "by", "can", "did", "do",
             "does", "for", "from", "has", "have", "how", "i", "in", "is", "it", "me", "my", "of",
