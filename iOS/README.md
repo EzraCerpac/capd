@@ -9,7 +9,12 @@ Device sync settings includes an opt-in for Spotlight and Shortcuts. It indexes
 saved titles and manual tags. The complete library is reconciled after local edits
 and sync projection, independently of the visible filter. Strict search links
 support cold launch; Capture Text stages a draft requiring Save. Libraries over
-1,000 captures fail closed. See [discovery integration](../docs/designs/phone-discovery-integration.md).
+1,000 live captures fail closed. Discovery reads omit bodies, OCR, notes and
+conflicts. They cap retained titles at 4 KiB, tag JSON at 16 KiB, each metadata
+record at 32 KiB, and the snapshot at 8 MiB before decoding. Source selection
+returns at most 4 KiB; a shortened prefix must prove the exact first 80 graphemes
+used for title redaction. Oversized metadata or an ambiguous prefix also fails
+closed. See [discovery integration](../docs/designs/phone-discovery-integration.md).
 
 `Packages/CapdMobile` uses the shared `CapdSync` outbox, device identity and sequence.
 There is no separate mobile pending queue or set-of-IDs acknowledgement path. Local

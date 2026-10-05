@@ -143,12 +143,12 @@ final class PhoneSystemSearch {
             preparedSessionToken = session.token
         }
         let revision = try session.store.libraryRevision()
-        let snapshot = try session.store.systemSearchSnapshot()
+        let snapshot = try session.store.systemSearchDiscoverySnapshot()
         let captures = snapshot.captures.map {
             PhoneSearchProjection.capture($0, libraryID: libraryID)
         }
         if enabled {
-            guard captures.count <= 1000 else {
+            guard !snapshot.exceedsLimit else {
                 try journal.begin(libraryID)
                 let index =
                     coordinator
