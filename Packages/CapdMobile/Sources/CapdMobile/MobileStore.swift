@@ -451,7 +451,7 @@ public final class MobileStore: Sendable {
     public func pullWebsiteIcons(from transport: any WebsiteIconSyncTransport) throws {
         let lease = try access?.lease()
         defer { withExtendedLifetime(lease) {} }
-        for _ in 0..<Self.pullPageBudget {
+        for _ in 0..<8 {
             try Task.checkCancellation()
             let before = try client.websiteIconCursor()
             try client.pullWebsiteIcons(from: transport)
@@ -465,7 +465,7 @@ public final class MobileStore: Sendable {
     ) async throws {
         let lease = try access?.lease()
         defer { withExtendedLifetime(lease) {} }
-        for _ in 0..<Self.pullPageBudget {
+        for _ in 0..<8 {
             try Task.checkCancellation()
             let before = try client.websiteIconCursor()
             try await client.pullWebsiteIcons(from: transport, credential: credential)

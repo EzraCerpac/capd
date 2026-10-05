@@ -1,5 +1,6 @@
 import AppIntents
 import CapdMobile
+import CapdSync
 import CapdSystemIntegration
 import CoreSpotlight
 import SwiftUI
@@ -41,10 +42,12 @@ struct CapdPhoneApp: App {
 @Observable
 final class LibraryModel {
     let systemSearch = PhoneSystemSearch()
+    let websiteIcons = PhoneWebsiteIcons()
     var captures: [MobileCapture] = []
     var query = ""
     var error: String?
     var syncState = AutomaticSyncState()
+    private(set) var loadedWebsiteIconRevision: Int64 = 0
     var showSetupHint = !UserDefaults.standard.bool(forKey: "capd.sync-setup-explanation-seen")
     private(set) var connection: PhoneLibraryConnection?
     private(set) var librarySession: MobileLibrarySession?
@@ -101,6 +104,7 @@ final class LibraryModel {
                     guard !self.changingLibrary else { continue }
                     self.syncState = state
                     if state.libraryRevision != self.loadedLibraryRevision { self.reload() }
+                    self.loadedWebsiteIconRevision = state.websiteIconRevision
                 }
             }
             if !MobileEnvironment.holdsSyntheticOfflineWork {
@@ -114,6 +118,9 @@ final class LibraryModel {
 
     private func pauseForTransition() async {
         changingLibrary = true
+        librarySession = nil
+        loadedWebsiteIconRevision = 0
+        await websiteIcons.cache.reset()
         let previousStateTask = stateTask
         stateTask = nil
         previousStateTask?.cancel()
@@ -136,6 +143,7 @@ final class LibraryModel {
             capturesByID = [:]
             loadedLibraryRevision = nil
             loadedLibrarySessionToken = nil
+            loadedWebsiteIconRevision = 0
             syncState = AutomaticSyncState()
             systemSearch.resumeWithoutSession()
             storeOpenError = error
@@ -155,6 +163,7 @@ final class LibraryModel {
                 || librarySession?.token != loadedLibrarySessionToken
             loadedLibraryRevision = revision
             loadedLibrarySessionToken = librarySession?.token
+            loadedWebsiteIconRevision = try store?.websiteIconRevision() ?? 0
             if libraryChanged, let librarySession { systemSearch.refresh(session: librarySession) }
         } catch {
             if error as? MobileActivationError == .sessionReplaced {
@@ -170,6 +179,40 @@ final class LibraryModel {
 
     func capture(id: UUID) -> MobileCapture? {
         capturesByID[id] ?? (try? store?.capture(id: id))
+    }
+
+    func websiteIcon(for url: String, token: MobileLibrarySessionToken) async throws
+        -> WebsiteIconRecord?
+    {
+        guard !changingLibrary, let session = librarySession, session.token == token else {
+            throw MobileActivationError.sessionReplaced
+        }
+        let record = try await Task.detached(priority: .utility) {
+            try Task.checkCancellation()
+            return try session.websiteIcon(for: url, token: token)
+        }.value
+        try Task.checkCancellation()
+        guard !changingLibrary, librarySession?.token == token, session.isCurrent(token) else {
+            throw MobileActivationError.sessionReplaced
+        }
+        return record
+    }
+
+    func websiteIconData(_ record: WebsiteIconRecord, scopeToken: MobileLibrarySessionToken)
+        async throws -> Data?
+    {
+        guard !changingLibrary, let session = librarySession, session.token == scopeToken else {
+            throw MobileActivationError.sessionReplaced
+        }
+        let bytes = try await Task.detached(priority: .utility) {
+            try Task.checkCancellation()
+            return try session.websiteIconData(record, token: scopeToken)
+        }.value
+        try Task.checkCancellation()
+        guard !changingLibrary, librarySession?.token == scopeToken,
+            session.isCurrent(scopeToken)
+        else { throw MobileActivationError.sessionReplaced }
+        return bytes
     }
 
     func update(capture: MobileCapture, note: String, tags: [String], resolving: [UUID]) -> Bool {

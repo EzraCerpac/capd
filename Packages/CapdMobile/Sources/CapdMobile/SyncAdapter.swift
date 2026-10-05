@@ -73,7 +73,35 @@ public struct ReferenceSyncAdapter: MobileSyncAdapter {
 
 public enum SyncResult: Equatable, Sendable {
     case unconfigured, offline
-    case sent(Int, rejected: Int)
+    case sent(Int, rejected: Int, websiteIconIssue: WebsiteIconSyncIssue? = nil)
+}
+
+public enum WebsiteIconSyncIssue: String, Codable, Equatable, Sendable {
+    case unsupportedServer, unavailable, invalidData
+
+    public var detail: String {
+        switch self {
+        case .unsupportedServer:
+            "This server needs an update to sync website icons. Saved captures still sync."
+        case .unavailable:
+            "Website icons will retry when the connection is available. Cached icons remain available."
+        case .invalidData:
+            "A website icon could not be verified. Saved captures still sync."
+        }
+    }
+
+    public init(error: any Error) {
+        if (error as? SyncHTTPError) == .unsupportedVersion {
+            self = .unsupportedServer
+        } else if (error as? SyncError) == .transportDisconnected
+            || (error as? SyncError) == .acknowledgementLost
+            || (error as? SyncHTTPError) == .unavailable
+        {
+            self = .unavailable
+        } else {
+            self = .invalidData
+        }
+    }
 }
 
 public actor MobileSyncCoordinator {
@@ -126,6 +154,7 @@ public actor MobileSyncCoordinator {
             }
             try Task.checkCancellation()
             let receipts: [SyncReceipt]
+            var iconIssue: WebsiteIconSyncIssue?
             if let connection = await adapter.asyncConnection() {
                 do {
                     try await store.pull(
@@ -138,6 +167,14 @@ public actor MobileSyncCoordinator {
                         to: connection.transport, credential: connection.credential)
                 try Task.checkCancellation()
                 try await store.pull(from: connection.transport, credential: connection.credential)
+                do {
+                    try await store.pullWebsiteIcons(
+                        from: connection.transport, credential: connection.credential)
+                } catch is CancellationError {
+                    throw CancellationError()
+                } catch {
+                    iconIssue = WebsiteIconSyncIssue(error: error)
+                }
             } else if let transport = await adapter.transport() {
                 do {
                     try store.pull(from: transport)
@@ -145,12 +182,23 @@ public actor MobileSyncCoordinator {
                 receipts = pullOnly ? [] : try store.push(to: transport)
                 try Task.checkCancellation()
                 try store.pull(from: transport)
+                if let icons = transport as? any WebsiteIconSyncTransport {
+                    do {
+                        try store.pullWebsiteIcons(from: icons)
+                    } catch is CancellationError {
+                        throw CancellationError()
+                    } catch {
+                        iconIssue = WebsiteIconSyncIssue(error: error)
+                    }
+                }
             } else {
                 return SyncResult.unconfigured
             }
             let sent = receipts.filter { $0.outcome == .accepted || $0.outcome == .noteConflict }
                 .count
-            return SyncResult.sent(sent, rejected: receipts.count - sent)
+            try Task.checkCancellation()
+            return SyncResult.sent(
+                sent, rejected: receipts.count - sent, websiteIconIssue: iconIssue)
         }
         flight = (id, pullOnly, task)
         defer { if flight?.id == id { flight = nil } }
