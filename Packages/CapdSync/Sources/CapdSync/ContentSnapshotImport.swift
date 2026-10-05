@@ -116,7 +116,6 @@ enum SnapshotImport {
         let authorityCursor = try Int64.fetchOne(
             db, sql: "SELECT cursor FROM sync_meta WHERE id=1")!
         guard authorityCursor < Int64.max else { throw ContentSnapshotImportError.stalePreview }
-        var insertedCount = 0
         var items: [ContentSnapshotItemPreview] = []
         for incoming in snapshot.captures {
             let requested = try SyncDatabase.canonical(db, incoming.id)
@@ -146,7 +145,6 @@ enum SnapshotImport {
                         ? .insert : (tombstone ? .preserveTombstone : .merge),
                     differingFields: existing.map { differences($0, incoming) } ?? [],
                     proposedSeenCount: count, countIsExact: false))
-            if existing == nil { insertedCount += 1 }
             records[canonical] = prepareCapture(
                 existing: existing, incoming: incoming, cursor: authorityCursor + 1,
                 receiptID: incoming.noteOperationID, importNote: { $0 })
@@ -160,11 +158,7 @@ enum SnapshotImport {
         guard bytes.count <= SyncHTTPHandler.maximumBodyBytes else {
             throw ContentSnapshotImportError.invalidSnapshot
         }
-        try validateBaselineSize(
-            db, captures: records.values, cursor: authorityCursor + 1,
-            totalCaptureCount: try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM sync_records")!
-                + insertedCount,
-            snapshot: snapshot)
+        try validateResponseSizes(db, captures: records.values, snapshot: snapshot)
         return ContentSnapshotImportPreview(
             snapshotID: snapshot.snapshotID, digest: BlobReference(data: bytes).digest,
             targetBinding: snapshot.targetBinding, sourceDeviceID: snapshot.sourceDeviceID,
@@ -287,28 +281,37 @@ enum SnapshotImport {
         return current
     }
 
-    private static func validateBaselineSize(
-        _ db: Database, captures: Dictionary<UUID, SharedCapture>.Values, cursor: Int64,
-        totalCaptureCount: Int, snapshot: ContentSnapshotImport
+    private static func validateResponseSizes(
+        _ db: Database, captures: Dictionary<UUID, SharedCapture>.Values,
+        snapshot: ContentSnapshotImport
     ) throws {
-        let sequences = try Dictionary(
-            uniqueKeysWithValues: Row.fetchAll(db, sql: "SELECT id, sequence FROM sync_devices")
-                .map { row in
-                    (UUID(uuidString: row["id"] as String)!, row["sequence"] as Int64)
-                })
+        let deviceCount = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM sync_devices")!
+        let sourceIsKnown = try Bool.fetchOne(
+            db, sql: "SELECT EXISTS(SELECT 1 FROM sync_devices WHERE id=?)",
+            arguments: [snapshot.sourceDeviceID.uuidString])!
         let principal = SyncPrincipal(
             serviceID: snapshot.targetBinding.serviceID,
             libraryID: snapshot.targetBinding.libraryID, deviceID: snapshot.sourceDeviceID)
+        let budget = try SyncHTTPResponseBudget(
+            principal: principal, deviceCount: deviceCount + (sourceIsKnown ? 0 : 1))
         for capture in captures {
-            let reply = SyncHTTPReply(
-                version: 1, principal: principal,
-                result: .baseline(
-                    Baseline(
-                        cursor: cursor, captures: [capture], deviceSequences: sequences,
-                        totalCaptureCount: totalCaptureCount)),
-                metadataContractVersion: 1, generatedProcessingContractVersion: 1,
-                extractionQualityContractVersion: 1)
-            guard try SyncDatabase.encode(reply).count <= SyncHTTPHandler.maximumBodyBytes else {
+            guard try SyncDatabase.encode(capture).count <= budget.maximumCaptureBytes else {
+                throw SyncHTTPError.resourceLimit
+            }
+        }
+        let rows = try Row.fetchCursor(
+            db, sql: "SELECT id, length(payload) AS bytes FROM sync_records")
+        while let row = try rows.next() {
+            let storedBytes: Int = row["bytes"]
+            guard storedBytes <= budget.maximumCaptureBytes else {
+                throw SyncHTTPError.resourceLimit
+            }
+            if storedBytes <= budget.smallStoredCaptureBytes { continue }
+            let data = try Data.fetchOne(
+                db, sql: "SELECT payload FROM sync_records WHERE id=?",
+                arguments: [row["id"] as String])!
+            let capture = try SyncDatabase.decode(SharedCapture.self, data)
+            guard try SyncDatabase.encode(capture).count <= budget.maximumCaptureBytes else {
                 throw SyncHTTPError.resourceLimit
             }
         }

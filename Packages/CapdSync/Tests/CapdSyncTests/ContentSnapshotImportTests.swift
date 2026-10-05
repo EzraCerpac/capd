@@ -6,6 +6,61 @@ import Testing
 
 @Suite("Explicit content snapshot imports")
 struct ContentSnapshotImportTests {
+    @Test func knownDeviceSequenceGrowthCannotStrandImportedRecord() throws {
+        let f = try SnapshotFixture()
+        defer { f.clean() }
+        try f.seedMetadata(cursor: 8, sequence: 9)
+        let capture = try f.baselineLimitCapture(cursor: 9, sequence: 9)
+        #expect(
+            try f.baselineReplyBytes(capture, cursor: 9, sequences: [f.seedDevice: 9])
+                == SyncHTTPHandler.maximumBodyBytes)
+        #expect(
+            try f.baselineReplyBytes(capture, cursor: 9, sequences: [f.seedDevice: 10])
+                == SyncHTTPHandler.maximumBodyBytes + 1)
+        let before = try f.logicalState()
+        #expect(throws: SyncHTTPError.resourceLimit) {
+            try f.server.previewContentSnapshotImport(f.snapshot([capture]))
+        }
+        #expect(try f.logicalState() == before)
+    }
+
+    @Test func importRevalidatesUntouchedRecordBeforeCursorGrowth() throws {
+        let f = try SnapshotFixture()
+        defer { f.clean() }
+        try f.seedMetadata(cursor: 9, sequence: 9)
+        let capture = try f.baselineLimitCapture(cursor: 9, sequence: 9)
+        try f.database.write { try SyncDatabase.save($0, capture) }
+        #expect(try f.transport(f.seedDevice).baseline().captures.count == 1)
+        #expect(
+            try f.baselineReplyBytes(
+                capture, cursor: 10, sequences: [f.seedDevice: 9], totalCaptureCount: 2)
+                == SyncHTTPHandler.maximumBodyBytes + 1)
+        let before = try f.logicalState()
+        let incoming = f.capture(id: f.uniqueID, hash: "unrelated")
+        #expect(throws: SyncHTTPError.resourceLimit) {
+            try f.server.previewContentSnapshotImport(f.snapshot([incoming]))
+        }
+        #expect(try f.logicalState() == before)
+    }
+
+    @Test func importedRecordMustAlsoFitOrdinaryOperationReplies() throws {
+        let f = try SnapshotFixture()
+        defer { f.clean() }
+        try f.seedMetadata(cursor: 8, sequence: 9)
+        let capture = try f.baselineLimitCapture(cursor: 9, sequence: 9)
+        let change = FeedChange(
+            cursor: 10, operationID: UUID(), deviceID: f.seedDevice, sequence: 10,
+            requestedCaptureID: capture.id, capture: capture)
+        #expect(
+            try f.replyBytes(.page(FeedPage(cursor: 10, changes: [change])))
+                > SyncHTTPHandler.maximumBodyBytes)
+        let before = try f.logicalState()
+        #expect(throws: SyncHTTPError.resourceLimit) {
+            try f.server.previewContentSnapshotImport(f.snapshot([capture]))
+        }
+        #expect(try f.logicalState() == before)
+    }
+
     @Test func oversizedTagUnionRejectsImportWithoutChangingAuthority() throws {
         let f = try SnapshotFixture()
         defer { f.clean() }
@@ -61,7 +116,7 @@ struct ContentSnapshotImportTests {
         #expect(try f.transport(f.seedDevice).baseline().captures.count == 1)
     }
 
-    @Test func tagMergeFitsOnlyWhenCompleteBaselineReplyFits() throws {
+    @Test func tagMergeFitsOnlyWithinCommonResponseBudget() throws {
         let f = try SnapshotFixture()
         defer { f.clean() }
         var original = f.capture(id: f.duplicateID, hash: "duplicate")
@@ -70,19 +125,15 @@ struct ContentSnapshotImportTests {
         var merged = try #require(receipt.capture)
         merged.revision += 1
         merged.manualTags.append("")
-        let baseline = try f.server.baseline()
-        let overhead = try f.baselineReplyBytes(
-            merged, cursor: merged.revision, sequences: baseline.deviceSequences)
+        let budget = try f.responseBudget()
+        let overhead = try SyncDatabase.encode(merged).count
         var incoming = f.capture(id: f.phoneDuplicateID, hash: "duplicate")
         incoming.manualTags = [
-            String(repeating: "b", count: SyncHTTPHandler.maximumBodyBytes - overhead + 1)
+            String(repeating: "b", count: budget.maximumCaptureBytes - overhead + 1)
         ]
         merged.manualTags[1] = incoming.manualTags[0]
         #expect(try SyncDatabase.encode(merged).count < SyncHTTPHandler.maximumBodyBytes)
-        #expect(
-            try f.baselineReplyBytes(
-                merged, cursor: merged.revision, sequences: baseline.deviceSequences)
-                == SyncHTTPHandler.maximumBodyBytes + 1)
+        #expect(try SyncDatabase.encode(merged).count == budget.maximumCaptureBytes + 1)
         let tooLarge = f.snapshot([incoming])
         #expect(try SyncDatabase.encode(tooLarge).count < SyncHTTPHandler.maximumBodyBytes)
         let before = try f.logicalState()
@@ -97,10 +148,169 @@ struct ContentSnapshotImportTests {
         let recovered = try f.transport(f.seedDevice).baseline()
         #expect(recovered.cursor == imported.authorityCursor)
         #expect(recovered.captures.first?.manualTags == ["Authority tag", incoming.manualTags[0]])
-        #expect(
-            try f.baselineReplyBytes(
-                recovered.captures[0], cursor: recovered.cursor,
-                sequences: recovered.deviceSequences) == SyncHTTPHandler.maximumBodyBytes)
+        #expect(try SyncDatabase.encode(recovered.captures[0]).count == budget.maximumCaptureBytes)
+
+    }
+
+    @Test func safeImportSupportsMetadataGrowthAndOrdinaryHTTPMutations() throws {
+        let f = try SnapshotFixture()
+        defer { f.clean() }
+        try f.seedMetadata(cursor: 8, sequence: 9)
+        let otherDevices = (0..<3).map { _ in UUID() }
+        try f.database.write { db in
+            for device in otherDevices {
+                try db.execute(
+                    sql: "INSERT INTO sync_devices (id, sequence) VALUES (?, 9)",
+                    arguments: [device.uuidString])
+            }
+        }
+        let budget = try f.responseBudget()
+        var capture = f.capture(id: f.duplicateID, hash: "large")
+        capture.revision = 9
+        capture.seenCount = 9
+        capture.manualTags = [""]
+        capture.manualTags[0] = String(
+            repeating: "x",
+            count: budget.maximumCaptureBytes - (try SyncDatabase.encode(capture).count))
+        let snapshot = f.snapshot([capture])
+        let imported = try f.server.importContentSnapshot(
+            snapshot, preview: f.server.previewContentSnapshotImport(snapshot))
+        #expect(imported.authorityCursor == 9)
+        let sourceTransport = f.transport(f.sourceDevice)
+        let sourceMissing = try sourceTransport.apply(
+            SyncOperation(
+                deviceID: f.sourceDevice, sequence: 1, captureID: UUID(), baseRevision: 0,
+                mutation: .delete))
+        #expect(sourceMissing.outcome == .missing)
+        let transport = f.transport(f.seedDevice)
+        let missing = try transport.apply(
+            SyncOperation(
+                deviceID: f.seedDevice, sequence: 10, captureID: UUID(), baseRevision: 0,
+                mutation: .delete))
+        #expect(missing.outcome == .missing)
+        try f.database.write { db in
+            for device in otherDevices {
+                try db.execute(
+                    sql: "UPDATE sync_devices SET sequence=? WHERE id=?",
+                    arguments: [Int64.max, device.uuidString])
+            }
+        }
+        var current = try #require(try transport.baseline().captures.first)
+        #expect(try transport.baseline().deviceSequences[f.seedDevice] == 10)
+        #expect(try transport.baseline().deviceSequences[f.sourceDevice] == 1)
+        let mutations: [CaptureMutation] = [
+            .edit(CaptureEdit(rating: 4)), .delete, .restore, .recapture,
+        ]
+        for (offset, mutation) in mutations.enumerated() {
+            let previousCursor = current.revision
+            let receipt = try transport.apply(
+                SyncOperation(
+                    deviceID: f.seedDevice, sequence: Int64(11 + offset), captureID: current.id,
+                    baseRevision: current.revision, mutation: mutation))
+            #expect(receipt.outcome == .accepted)
+            current = try #require(receipt.capture)
+            #expect(
+                try transport.changes(after: previousCursor, limit: 1).changes.first?.capture
+                    == current)
+            #expect(try transport.baseline().captures.first == current)
+        }
+        #expect(current.revision == 13)
+        #expect(current.seenCount == 10)
+        var future = current
+        future.revision = Int64.max
+        future.noteRevision = Int64.max
+        future.seenCount = Int.max
+        future.deleted = false
+        let sequences = Dictionary(
+            uniqueKeysWithValues: ([f.seedDevice, f.sourceDevice] + otherDevices)
+                .map { ($0, Int64.max) })
+        let change = FeedChange(
+            cursor: Int64.max, operationID: UUID(), deviceID: f.seedDevice, sequence: Int64.max,
+            requestedCaptureID: future.id, capture: future)
+        var replySizes = [
+            try f.replyBytes(
+                .baseline(
+                    Baseline(
+                        cursor: Int64.max, captures: [future], deviceSequences: sequences,
+                        totalCaptureCount: Int.max)), contractVersion: Int.max),
+            try f.replyBytes(
+                .page(FeedPage(cursor: Int64.max, changes: [change])), contractVersion: Int.max),
+        ]
+        for outcome: SyncReceipt.Outcome in [
+            .accepted, .noteConflict, .deleted, .staleRestore, .missing, .alreadyExists,
+        ] {
+            replySizes.append(
+                try f.replyBytes(
+                    .receipt(SyncReceipt(operationID: UUID(), outcome: outcome, capture: future)),
+                    contractVersion: Int.max))
+        }
+        #expect(replySizes.max()! <= SyncHTTPHandler.maximumBodyBytes)
+        let remove = SyncOperation(
+            deviceID: f.seedDevice, sequence: 15, captureID: current.id,
+            baseRevision: current.revision,
+            mutation: .edit(CaptureEdit(removeTags: current.manualTags)))
+        let requestBytes = try SyncDatabase.encode(
+            SyncHTTPEnvelope(
+                expectedServiceID: f.binding.serviceID, expectedLibraryID: f.binding.libraryID,
+                expectedDeviceID: f.seedDevice, action: .apply(remove))
+        ).count
+        #expect(requestBytes < SyncHTTPHandler.maximumBodyBytes)
+        #expect(try transport.apply(remove).capture?.manualTags.isEmpty == true)
+        #expect(try transport.baseline().captures.first?.manualTags.isEmpty == true)
+    }
+
+    @Test func legacyStoredPayloadUsesCanonicalResponseSizeBeforeImport() throws {
+        let f = try SnapshotFixture()
+        defer { f.clean() }
+        try f.seedMetadata(cursor: 9, sequence: 9)
+        let budget = try f.responseBudget()
+        var capture = f.capture(id: f.duplicateID, hash: "legacy")
+        capture.revision = 9
+        capture.manualTags = [""]
+        let overhead = try SyncDatabase.encode(capture).count
+        capture.manualTags[0] = String(
+            repeating: "/", count: (budget.maximumCaptureBytes - overhead) / 2 + 1)
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+        func saveLegacy() throws {
+            let data = try encoder.encode(capture)
+            #expect(data.count < budget.maximumCaptureBytes)
+            try f.database.write { db in
+                try SyncDatabase.save(db, capture)
+                try db.execute(
+                    sql: "UPDATE sync_records SET payload=? WHERE id=?",
+                    arguments: [data, capture.id.uuidString])
+            }
+        }
+        try saveLegacy()
+        #expect(try SyncDatabase.encode(capture).count > budget.maximumCaptureBytes)
+        let snapshot = f.snapshot([f.capture(id: f.uniqueID, hash: "unrelated")])
+        let before = try f.logicalState()
+        #expect(throws: SyncHTTPError.resourceLimit) {
+            try f.server.previewContentSnapshotImport(snapshot)
+        }
+        #expect(try f.logicalState() == before)
+        #expect(try f.tableExists("sync_content_snapshot_imports") == false)
+        #expect(try f.tableExists("sync_content_snapshot_expired_feed") == false)
+        capture.manualTags[0].removeLast()
+        try saveLegacy()
+        try f.server.importContentSnapshot(
+            snapshot, preview: f.server.previewContentSnapshotImport(snapshot))
+        #expect(try f.transport(f.seedDevice).baseline().captures.count == 2)
+    }
+
+    @Test func captureNumericAndRestoreGrowthReserveMatchesEncoding() throws {
+        let f = try SnapshotFixture()
+        defer { f.clean() }
+        var capture = f.capture(id: f.duplicateID, hash: "widths")
+        capture.deleted = true
+        let originalBytes = try SyncDatabase.encode(capture).count
+        capture.revision = Int64.max
+        capture.noteRevision = Int64.max
+        capture.seenCount = Int.max
+        capture.deleted = false
+        let growth = try SyncDatabase.encode(capture).count - originalBytes
+        #expect(growth == 55)
     }
 
     @Test func previewPreservesConflictsAndImportsCountAsLowerBoundWithHonestNewReceipts() throws {
@@ -555,23 +765,61 @@ private struct SnapshotFixture {
         }
     }
 
-    func baselineReplyBytes(_ capture: SharedCapture, cursor: Int64, sequences: [UUID: Int64])
-        throws
-        -> Int
-    {
+    func baselineReplyBytes(
+        _ capture: SharedCapture, cursor: Int64, sequences: [UUID: Int64],
+        totalCaptureCount: Int = 1
+    ) throws -> Int {
+        try replyBytes(
+            .baseline(
+                Baseline(
+                    cursor: cursor, captures: [capture], deviceSequences: sequences,
+                    totalCaptureCount: totalCaptureCount)))
+    }
+
+    func replyBytes(_ result: SyncHTTPResult, contractVersion: Int = 1) throws -> Int {
         try SyncDatabase.encode(
-            SyncHTTPReply(
-                version: 1,
+            SyncHTTPResponseBudget.replyPayload(
+                result,
                 principal: SyncPrincipal(
-                    serviceID: binding.serviceID, libraryID: binding.libraryID,
-                    deviceID: seedDevice),
-                result: .baseline(
-                    Baseline(
-                        cursor: cursor, captures: [capture], deviceSequences: sequences,
-                        totalCaptureCount: 1)),
-                metadataContractVersion: 1, generatedProcessingContractVersion: 1,
-                extractionQualityContractVersion: 1)
+                    serviceID: binding.serviceID, libraryID: binding.libraryID, deviceID: seedDevice
+                ),
+                contractVersion: contractVersion)
         ).count
+    }
+
+    func responseBudget() throws -> SyncHTTPResponseBudget {
+        let count = try database.read { db in
+            let count = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM sync_devices")!
+            let sourceIsKnown = try Bool.fetchOne(
+                db, sql: "SELECT EXISTS(SELECT 1 FROM sync_devices WHERE id=?)",
+                arguments: [sourceDevice.uuidString])!
+            return count + (sourceIsKnown ? 0 : 1)
+        }
+        return try SyncHTTPResponseBudget(
+            principal: SyncPrincipal(
+                serviceID: binding.serviceID, libraryID: binding.libraryID, deviceID: sourceDevice),
+            deviceCount: count)
+    }
+
+    func seedMetadata(cursor: Int64, sequence: Int64) throws {
+        try database.write { db in
+            try db.execute(sql: "UPDATE sync_meta SET cursor=?", arguments: [cursor])
+            try db.execute(
+                sql: "INSERT INTO sync_devices (id, sequence) VALUES (?, ?)",
+                arguments: [seedDevice.uuidString, sequence])
+        }
+    }
+
+    func baselineLimitCapture(cursor: Int64, sequence: Int64) throws -> SharedCapture {
+        var capture = capture(id: duplicateID, hash: "large")
+        capture.revision = cursor
+        capture.manualTags = [""]
+        let overhead = try baselineReplyBytes(
+            capture, cursor: cursor, sequences: [seedDevice: sequence])
+        capture.manualTags = [
+            String(repeating: "x", count: SyncHTTPHandler.maximumBodyBytes - overhead)
+        ]
+        return capture
     }
 
     func outbox(_ name: String) throws -> [Data] {

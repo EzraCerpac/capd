@@ -109,6 +109,73 @@ public struct SyncHTTPReply: Codable, Sendable {
     }
 }
 
+struct SyncHTTPResponseBudget {
+    let maximumCaptureBytes: Int
+    let smallStoredCaptureBytes: Int
+
+    static func replyPayload(
+        _ result: SyncHTTPResult, principal: SyncPrincipal?, contractVersion: Int = 1
+    ) -> SyncHTTPReply {
+        SyncHTTPReply(
+            version: 1, principal: principal, result: result,
+            metadataContractVersion: principal == nil ? nil : contractVersion,
+            generatedProcessingContractVersion: principal == nil ? nil : contractVersion,
+            extractionQualityContractVersion: principal == nil ? nil : contractVersion)
+    }
+
+    init(principal: SyncPrincipal, deviceCount: Int) throws {
+        let capture = SharedCapture(
+            source: CaptureSource(kind: .text), createdAt: Date(timeIntervalSinceReferenceDate: 0))
+        let captureBytes = try SyncDatabase.encode(capture).count
+        func overhead(_ result: SyncHTTPResult) throws -> Int {
+            try SyncDatabase.encode(
+                Self.replyPayload(result, principal: principal, contractVersion: Int.max)
+            ).count - captureBytes
+        }
+        let sequenceBytes = try SyncDatabase.encode([principal.deviceID: Int64.max]).count - 2
+        guard deviceCount >= 0,
+            deviceCount <= SyncHTTPHandler.maximumBodyBytes / (sequenceBytes + 1)
+        else { throw SyncHTTPError.resourceLimit }
+        let sequencesBytes = deviceCount == 0 ? 0 : deviceCount * sequenceBytes + deviceCount - 1
+        let baselineOverhead =
+            try overhead(
+                .baseline(
+                    Baseline(
+                        cursor: Int64.max, captures: [capture], deviceSequences: [:],
+                        totalCaptureCount: Int.max))) + sequencesBytes
+        let change = FeedChange(
+            cursor: Int64.max, operationID: principal.deviceID, deviceID: principal.deviceID,
+            sequence: Int64.max, requestedCaptureID: capture.id, capture: capture)
+        var maximumOverhead = max(
+            baselineOverhead,
+            try overhead(.page(FeedPage(cursor: Int64.max, changes: [change]))))
+        for outcome: SyncReceipt.Outcome in [
+            .accepted, .noteConflict, .deleted, .staleRestore, .missing, .alreadyExists,
+        ] {
+            maximumOverhead = max(
+                maximumOverhead,
+                try overhead(
+                    .receipt(
+                        SyncReceipt(
+                            operationID: principal.deviceID, outcome: outcome, capture: capture))))
+        }
+        let revisionGrowth = 2 * (String(Int64.max).utf8.count - 1)
+        let countGrowth = String(Int.max).utf8.count - 1
+        let restoreGrowth = try SyncDatabase.encode(false).count - SyncDatabase.encode(true).count
+        maximumCaptureBytes =
+            SyncHTTPHandler.maximumBodyBytes - maximumOverhead
+            - revisionGrowth - countGrowth - restoreGrowth
+        guard maximumCaptureBytes >= 0 else { throw SyncHTTPError.resourceLimit }
+
+        // Decimal has a 128-bit coefficient and an 8-bit exponent; strings escape to six bytes.
+        let decimalScalarBytes = 2 * String(UInt64.max).utf8.count - Int(Int8.min) + 3
+        // Full fixed-point Double text bounds Date scalars, including sign, zero and decimal point.
+        let doubleScalarBytes = -Double.leastNonzeroMagnitude.exponent + 3
+        let scalarExpansion = max(6, max(decimalScalarBytes, doubleScalarBytes))
+        smallStoredCaptureBytes = max(0, (maximumCaptureBytes - captureBytes) / scalarExpansion)
+    }
+}
+
 /// Framework-neutral boundary; the host supplies HTTPS, admission limits and credential validation.
 public struct SyncHTTPHandler: Sendable {
     public static let maximumBodyBytes = 16_777_216
@@ -264,11 +331,7 @@ public struct SyncHTTPHandler: Sendable {
 
     private func replyPayload(_ result: SyncHTTPResult, principal: SyncPrincipal?) -> SyncHTTPReply
     {
-        SyncHTTPReply(
-            version: 1, principal: principal, result: result,
-            metadataContractVersion: principal == nil ? nil : 1,
-            generatedProcessingContractVersion: principal == nil ? nil : 1,
-            extractionQualityContractVersion: principal == nil ? nil : 1)
+        SyncHTTPResponseBudget.replyPayload(result, principal: principal)
     }
 
     private func checkResponseSize(_ result: SyncHTTPResult, principal: SyncPrincipal) throws {
