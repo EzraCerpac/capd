@@ -39,6 +39,7 @@ public struct WebsiteIconService: Sendable {
     public func reclaimStale() throws -> Int { try store.reclaimStaleWebsiteIconClaims(now: now()) }
 
     public static func validatePNG(_ bytes: Data) throws {
+        try WebsiteIconPNG.validate(bytes)
         guard (1...262_144).contains(bytes.count),
             let source = CGImageSourceCreateWithData(bytes as CFData, nil),
             CGImageSourceGetStatus(source) == .statusComplete,
