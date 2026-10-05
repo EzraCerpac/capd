@@ -42,6 +42,7 @@ final class AppState {
     @ObservationIgnored private var syncTask: Task<Void, Never>?
     @ObservationIgnored private var systemSearch: MacSystemSearch?
     @ObservationIgnored private var systemSearchTask: Task<Void, Never>?
+    @ObservationIgnored private var textDrafts: MacTextDrafts?
 
     enum MenuBarGlyph {
         case dropTarget
@@ -71,8 +72,10 @@ final class AppState {
             try start()
         } catch {
             startupFailure = error.localizedDescription
-            systemSearchTask = Task {
-                try? await MacSystemSearch.removePersistedIndex(paths: .live)
+            systemSearchTask = Task { [weak settings] in
+                await MacSystemSearchCleanup.run(
+                    remove: { try await MacSystemSearch.removePersistedIndex(paths: .live) },
+                    reportIssue: { settings?.systemSearchIssue = $0 })
             }
         }
 
@@ -361,6 +364,9 @@ final class AppState {
                 openURL: openURL,
                 showHUD: { hud.show($0) }),
             favicons: favicons)
+        textDrafts = MacTextDrafts { [weak self] text in
+            self?.coordinator?.capture(request: CaptureRequest(text: text, fetchBody: false))
+        }
         let discovery = MacSystemSearch(paths: store.paths, enabled: settings.systemSearchEnabled) {
             [weak self] action, localID in
             guard let self else { return }
@@ -373,20 +379,7 @@ final class AppState {
                 else { throw SystemIntegrationError.missingCapture }
                 self.search?.show(capture: capture)
             case .stageText(let text):
-                let alert = NSAlert()
-                alert.messageText = "Save text to capd"
-                let draft = NSTextField(wrappingLabelWithString: text)
-                draft.isEditable = true
-                draft.isSelectable = true
-                draft.frame = NSRect(x: 0, y: 0, width: 360, height: 140)
-                alert.accessoryView = draft
-                alert.addButton(withTitle: "Save")
-                alert.addButton(withTitle: "Cancel")
-                NSApp.activate()
-                if alert.runModal() == .alertFirstButtonReturn {
-                    self.coordinator?.capture(
-                        request: CaptureRequest(text: draft.stringValue, fetchBody: false))
-                }
+                self.textDrafts?.stage(text)
             }
         }
         discovery.reportIssue = { [weak settings] issue in settings?.systemSearchIssue = issue }
