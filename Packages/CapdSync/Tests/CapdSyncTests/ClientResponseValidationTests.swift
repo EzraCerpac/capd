@@ -194,21 +194,128 @@ struct ClientResponseValidationTests {
         #expect(probe.count == 0)
     }
 
-    @Test func causalQueuedNotesStillProduceCompleteAcceptedTransitions() throws {
+    @Test(arguments: [false, true])
+    func ratingPredecessorCannotAuthorizeNoteOverwrite(earlierNote: Bool) throws {
+        let f = try ResponseFixture()
+        defer { f.clean() }
+        let original = f.capture("rating predecessor")
+        try f.client.enqueue(captureID: original.id, mutation: .create(original))
+        try f.client.push(to: f.server)
+        var remoteBase: Int64 = 1
+        if earlierNote {
+            let first = try f.client.enqueue(
+                captureID: original.id, mutation: .edit(CaptureEdit(note: NoteEdit("First"))))
+            remoteBase = try #require(f.server.apply(first).capture).revision
+        }
+        let rating = try f.client.enqueue(
+            captureID: original.id, mutation: .edit(CaptureEdit(rating: 4)))
+        let note = try f.client.enqueue(
+            captureID: original.id, mutation: .edit(CaptureEdit(note: NoteEdit("Local"))))
+        _ = try f.server.apply(
+            SyncOperation(
+                deviceID: UUID(), sequence: 1, captureID: original.id, baseRevision: remoteBase,
+                mutation: .edit(CaptureEdit(note: NoteEdit("Remote")))))
+        let rated = try f.server.apply(rating)
+        let legitimate = try f.server.apply(note)
+        #expect(legitimate.outcome == .noteConflict)
+        var overwritten = try #require(rated.capture)
+        overwritten.revision = try #require(legitimate.capture).revision
+        _ = try SyncDatabase.edit(
+            &overwritten, CaptureEdit(note: NoteEdit("Local")), operation: note,
+            base: overwritten.noteRevision, server: true)
+        let forged = SyncReceipt(operationID: note.id, outcome: .accepted, capture: overwritten)
+        #expect(throws: SyncError.invalidOperation) {
+            try f.client.push(to: ResponseTransport(server: f.server, receipt: forged))
+        }
+        #expect(try f.client.pendingOperations() == [note])
+        #expect(try f.writer.read { try SyncDatabase.record($0, id: original.id) } == rated.capture)
+        #expect(try f.client.push(to: f.server) == [legitimate])
+        try f.client.pull(from: f.server)
+        #expect(
+            Set(try f.client.captures().first!.noteConflicts.compactMap(\.value)) == [
+                "Remote", "Local",
+            ])
+    }
+
+    @Test(arguments: [false, true])
+    func unobservedNoteConflictMustAdvanceBaseAndCurrent(advancesBase: Bool) throws {
+        let f = try ResponseFixture()
+        defer { f.clean() }
+        let original = f.capture("stale conflict")
+        try f.client.enqueue(captureID: original.id, mutation: .create(original))
+        try f.client.push(to: f.server)
+        let operation = try f.client.enqueue(
+            captureID: original.id, mutation: .edit(CaptureEdit(note: NoteEdit("Local"))))
+        let remoteDevice = UUID()
+        for sequence in 1...2 {
+            _ = try f.server.apply(
+                SyncOperation(
+                    deviceID: remoteDevice, sequence: Int64(sequence), captureID: original.id,
+                    baseRevision: 1, mutation: .edit(CaptureEdit(rating: sequence + 2))))
+        }
+        try f.client.pull(from: f.server)
+        let before = try f.client.captures()
+        var stale = try #require(f.server.baseline().captures.first)
+        stale.revision = advancesBase ? 2 : operation.baseRevision
+        stale.noteConflicts = [NoteVariant(operationID: operation.id, value: "Local")]
+        let forged = SyncReceipt(operationID: operation.id, outcome: .noteConflict, capture: stale)
+        #expect(throws: SyncError.invalidOperation) {
+            try f.client.push(to: ResponseTransport(server: f.server, receipt: forged))
+        }
+        #expect(try f.client.pendingOperations() == [operation])
+        #expect(try f.client.captures() == before)
+        #expect(try f.client.push(to: f.server).first?.outcome == .accepted)
+        #expect(try f.client.captures().first?.note == "Local")
+    }
+
+    @Test(arguments: ["direct", "reopen", "feed"])
+    func causalQueuedNotesStillProduceCompleteAcceptedTransitions(recovery: String) throws {
         let f = try ResponseFixture()
         defer { f.clean() }
         let original = f.capture("queued note")
         try f.client.enqueue(captureID: original.id, mutation: .create(original))
         try f.client.push(to: f.server)
-        try f.client.enqueue(
+        let first = try f.client.enqueue(
             captureID: original.id, mutation: .edit(CaptureEdit(note: NoteEdit("First"))))
-        try f.client.enqueue(captureID: original.id, mutation: .edit(CaptureEdit(rating: 4)))
-        try f.client.enqueue(
+        let rating = try f.client.enqueue(
+            captureID: original.id, mutation: .edit(CaptureEdit(rating: 4)))
+        let second = try f.client.enqueue(
             captureID: original.id, mutation: .edit(CaptureEdit(note: NoteEdit("Second"))))
+        let client: SyncClient
+        if recovery == "feed" {
+            _ = try f.server.apply(first)
+            _ = try f.server.apply(rating)
+            try f.client.pull(from: f.server)
+            #expect(
+                try f.writer.read {
+                    try Int.fetchOne($0, sql: "SELECT COUNT(*) FROM sync_receipts")
+                } == 2)
+            _ = try f.server.apply(second)
+            try f.client.pull(from: f.server)
+            #expect(try f.client.pendingOperations() == [first, rating, second])
+        }
+        if recovery == "reopen" {
+            #expect(throws: SyncError.acknowledgementLost) {
+                try f.client.push(
+                    to: ResponseTransport(server: f.server, failureOperationID: second.id))
+            }
+            #expect(try f.client.pendingOperations() == [second])
+            #expect(
+                try f.writer.read {
+                    try Int.fetchOne($0, sql: "SELECT COUNT(*) FROM sync_receipts")
+                } == 2)
+            client = try SyncClient(writer: f.writer, blobs: f.client.blobs)
+            #expect(try client.push(to: f.server).map(\.outcome) == [.accepted])
+        } else {
+            client = f.client
+            #expect(
+                try client.push(to: f.server).map(\.outcome) == [.accepted, .accepted, .accepted])
+        }
+        #expect(try client.captures().first?.note == "Second")
+        #expect(try client.captures().first?.noteConflicts.isEmpty == true)
         #expect(
-            try f.client.push(to: f.server).map(\.outcome) == [.accepted, .accepted, .accepted])
-        #expect(try f.client.captures().first?.note == "Second")
-        #expect(try f.client.captures().first?.noteConflicts.isEmpty == true)
+            try f.writer.read { try Int.fetchOne($0, sql: "SELECT COUNT(*) FROM sync_receipts") }
+                == 0)
     }
 
     @Test func unicodeEquivalentFingerprintsAgreeAcrossClientAuthorityAndStaging() throws {
@@ -619,8 +726,8 @@ struct ClientResponseValidationTests {
         #expect(try f.client.captures().first?.seenCount == 2)
     }
 
-    @Test(arguments: [false, true])
-    func pendingNoteConflictEchoRemainsValid(duplicateCreate: Bool) throws {
+    @Test(arguments: [false, true], [false, true])
+    func pendingNoteConflictEchoRemainsValid(duplicateCreate: Bool, laterRemoteEdit: Bool) throws {
         let f = try ResponseFixture()
         defer { f.clean() }
         let original = f.capture("conflict echo")
@@ -641,6 +748,13 @@ struct ClientResponseValidationTests {
         }
         let historical = try f.server.apply(operation)
         #expect(historical.outcome == .noteConflict)
+        if laterRemoteEdit {
+            _ = try f.server.apply(
+                SyncOperation(
+                    deviceID: UUID(), sequence: 1, captureID: original.id,
+                    baseRevision: try #require(historical.capture).revision,
+                    mutation: .edit(CaptureEdit(rating: 5))))
+        }
         try f.client.pull(from: f.server)
         #expect(try f.client.pendingOperations() == [operation])
         #expect(try f.client.push(to: f.server) == [historical])
@@ -764,9 +878,14 @@ private struct ResponseTransport: SyncTransport {
     var snapshot: Baseline? = nil
     var page: FeedPage? = nil
     var onDownload: (@Sendable () -> Void)? = nil
+    var failureOperationID: UUID? = nil
 
     func apply(_ operation: SyncOperation) throws -> SyncReceipt {
-        if let receipt { return receipt }
+        if operation.id == failureOperationID {
+            _ = try server.apply(operation)
+            throw SyncError.acknowledgementLost
+        }
+        if let receipt, receipt.operationID == operation.id { return receipt }
         return try server.apply(operation)
     }
 

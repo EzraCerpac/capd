@@ -58,7 +58,7 @@ public final class SyncClient: Sendable {
         self.deviceID = try SyncDatabase.prepare(
             writer, role: "client", deviceID: deviceID, binding: binding,
             hasUnboundBlobs: hasUnboundBlobs, prepareProjection: prepareProjection)!
-        try write(pruneObservations)
+        try write(pruneHistory)
     }
 
     private func read<T>(_ body: (Database) throws -> T) throws -> T {
@@ -244,6 +244,7 @@ public final class SyncClient: Sendable {
                 throw SyncError.invalidOperation
             }
             try validate(receipt, for: operation, in: db)
+            try retainReceipt(receipt, for: operation, in: db)
             if let record = receipt.capture {
                 try SyncDatabase.alias(db, operation.captureID, to: record.id)
                 try accept(db, record)
@@ -288,7 +289,7 @@ public final class SyncClient: Sendable {
             record.revision - 1 == current.revision,
             receipt.outcome == .accepted || receipt.outcome == .noteConflict
         {
-            try validateTransition(receipt, for: operation, from: current)
+            try validateTransition(receipt, for: operation, from: current, in: db)
         }
         let id = try SyncDatabase.canonical(db, operation.captureID)
         if record.id != id {
@@ -347,8 +348,12 @@ public final class SyncClient: Sendable {
             default: hasNote = false
             }
             guard hasNote, !record.deleted,
-                record.noteConflicts.contains(where: { $0.operationID == operation.id })
+                record.noteConflicts.contains(where: { $0.operationID == operation.id }),
+                record.revision > operation.baseRevision
             else { throw SyncError.invalidOperation }
+            if let current, !observed {
+                guard record.revision > current.revision else { throw SyncError.invalidOperation }
+            }
         case .deleted:
             guard record.deleted else { throw SyncError.invalidOperation }
             if case .restore = operation.mutation { throw SyncError.invalidOperation }
@@ -529,7 +534,7 @@ public final class SyncClient: Sendable {
                 try validateIdentity(record, replacing: SyncDatabase.record(db, id: record.id))
             }
             let acceptedSequence = baseline.deviceSequences[deviceID] ?? 0
-            try pruneObservations(db)
+            try pruneHistory(db)
             let observed = try String.fetchSet(db, sql: "SELECT id FROM sync_observed")
             guard
                 try !operations(db).contains(where: {
@@ -565,7 +570,8 @@ public final class SyncClient: Sendable {
     }
 
     private func validateTransition(
-        _ receipt: SyncReceipt, for operation: SyncOperation, from current: SharedCapture
+        _ receipt: SyncReceipt, for operation: SyncOperation, from current: SharedCapture,
+        in db: Database
     ) throws {
         guard let received = receipt.capture else { throw SyncError.invalidOperation }
         func expected(base: Int64) throws -> SyncReceipt? {
@@ -606,12 +612,46 @@ public final class SyncClient: Sendable {
                 capture: record)
         }
         if try expected(base: operation.baseRevision) == receipt { return }
-        if operation.predecessorID != nil,
-            try expected(base: max(operation.baseRevision, current.noteRevision)) == receipt
-        {
+        if try expected(base: causalBase(for: operation, in: db)) == receipt {
             return
         }
         throw SyncError.invalidOperation
+    }
+
+    private func causalBase(for operation: SyncOperation, in db: Database) throws -> Int64 {
+        let id = try SyncDatabase.canonical(db, operation.captureID)
+        var predecessorID = operation.predecessorID
+        var precedingSequence = operation.sequence
+        while let priorID = predecessorID {
+            guard
+                let row = try Row.fetchOne(
+                    db, sql: "SELECT operation, receipt FROM sync_receipts WHERE id = ?",
+                    arguments: [priorID.uuidString])
+            else { break }
+            let predecessor = try SyncDatabase.decode(SyncOperation.self, row["operation"])
+            let receipt = try SyncDatabase.decode(SyncReceipt.self, row["receipt"])
+            guard predecessor.deviceID == operation.deviceID,
+                predecessor.sequence < precedingSequence,
+                try SyncDatabase.canonical(db, predecessor.captureID) == id
+            else { throw SyncError.invalidOperation }
+            if let capture = receipt.capture, capture.noteOperationID == predecessor.id {
+                return max(operation.baseRevision, capture.noteRevision)
+            }
+            precedingSequence = predecessor.sequence
+            predecessorID = predecessor.predecessorID
+        }
+        return operation.baseRevision
+    }
+
+    private func retainReceipt(
+        _ receipt: SyncReceipt, for operation: SyncOperation, in db: Database
+    ) throws {
+        try db.execute(
+            sql: "INSERT OR REPLACE INTO sync_receipts (id, operation, receipt) VALUES (?, ?, ?)",
+            arguments: [
+                operation.id.uuidString, try SyncDatabase.encode(operation),
+                try SyncDatabase.encode(receipt),
+            ])
     }
 
     private func validateIdentity(_ record: SharedCapture, replacing current: SharedCapture?) throws
@@ -638,9 +678,10 @@ public final class SyncClient: Sendable {
             let outcome: SyncReceipt.Outcome =
                 change.capture.noteConflicts.contains(where: { $0.operationID == pending.id })
                 ? .noteConflict : .accepted
-            try validate(
-                SyncReceipt(operationID: pending.id, outcome: outcome, capture: change.capture),
-                for: pending, in: db)
+            let receipt = SyncReceipt(
+                operationID: pending.id, outcome: outcome, capture: change.capture)
+            try validate(receipt, for: pending, in: db)
+            try retainReceipt(receipt, for: pending, in: db)
             if change.requestedCaptureID == change.capture.id { return }
             if case .create(let incoming) = pending.mutation,
                 CaptureFingerprint.matches(incoming.source, change.capture.source)
@@ -698,7 +739,7 @@ public final class SyncClient: Sendable {
 
     private func rebuild(_ db: Database) throws {
         let before = try SyncDatabase.records(db, table: "sync_visible")
-        try pruneObservations(db)
+        try pruneHistory(db)
         let observed = try String.fetchSet(db, sql: "SELECT id FROM sync_observed")
         let observedSequence = try Int64.fetchOne(
             db, sql: "SELECT observed_sequence FROM sync_meta")!
@@ -771,9 +812,25 @@ public final class SyncClient: Sendable {
         }
     }
 
-    private func pruneObservations(_ db: Database) throws {
+    private func pruneHistory(_ db: Database) throws {
         try db.execute(
             sql: "DELETE FROM sync_observed WHERE id NOT IN (SELECT id FROM sync_outbox)")
+        let pending = try operations(db)
+        let retained = try Data.fetchAll(db, sql: "SELECT operation FROM sync_receipts")
+            .map { try SyncDatabase.decode(SyncOperation.self, $0) }
+        let history = Dictionary(
+            (retained + pending).map { ($0.id, $0) }, uniquingKeysWith: { _, new in new })
+        var needed = Set<UUID>()
+        for operation in pending {
+            var id: UUID? = operation.id
+            while let current = id, needed.insert(current).inserted {
+                id = history[current]?.predecessorID
+            }
+        }
+        for operation in retained where !needed.contains(operation.id) {
+            try db.execute(
+                sql: "DELETE FROM sync_receipts WHERE id = ?", arguments: [operation.id.uuidString])
+        }
     }
 }
 
