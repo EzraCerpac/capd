@@ -27,6 +27,7 @@ package final class AppSettings {
         }
     }
     package var websiteIconIssue: String?
+    package var websiteIconSyncIssue: String?
     @ObservationIgnored package var saveWebsiteIcons: (Bool) -> Void = { _ in }
 
     package var hasCompletedOnboarding: Bool {

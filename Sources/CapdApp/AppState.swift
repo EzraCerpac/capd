@@ -214,6 +214,7 @@ final class AppState {
                     Task { [weak self] in
                         let status = await runtime.sync(within: .seconds(5))
                         self?.syncIssue = status.issue
+                        self?.settings.websiteIconSyncIssue = status.websiteIconIssue
                         self?.noteConflicts = status.noteConflicts
                     }
                 }
@@ -244,6 +245,7 @@ final class AppState {
                 while !Task.isCancelled {
                     let status = await runtime.sync()
                     self?.syncIssue = status.issue
+                    self?.settings.websiteIconSyncIssue = status.websiteIconIssue
                     self?.noteConflicts = status.noteConflicts
                     self?.reminderScheduler?.refresh()
                     do {

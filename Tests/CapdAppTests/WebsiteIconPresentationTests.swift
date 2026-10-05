@@ -8,7 +8,7 @@ import Testing
 struct WebsiteIconPresentationTests {
     @Test func searchAndHUDCarryTheActualURLAndKeepActionsIndependent() throws {
         let raw = "https://www.sqlite.org:443/page?q=synthetic#section"
-        let capture = Capture(kind: .link, url: raw, host: "sqlite.org")
+        let capture = Capture(kind: .link, url: raw, host: "sqlite.org", createdAt: Date())
         let expected = try #require(URL(string: raw))
         let row = SearchRowContent(
             SearchHit(capture: capture, snippet: nil, score: nil), now: Date())
@@ -24,7 +24,7 @@ struct WebsiteIconPresentationTests {
 
     @Test func textAndImageDoNotAcquireWebsiteIconsFromIncidentalURLs() {
         for kind in [CaptureKind.text, .image] {
-            let capture = Capture(kind: kind, url: "https://sqlite.org")
+            let capture = Capture(kind: kind, url: "https://sqlite.org", createdAt: Date())
             let row = SearchRowContent(
                 SearchHit(capture: capture, snippet: nil, score: nil), now: Date())
             #expect(row.sourceURL == nil)

@@ -64,6 +64,10 @@ struct SyncSettingsView: View {
                         Text(
                             "Icons arrive through your connected library and stay available offline. This device never requests icons from websites. Enable Load website icons on a connected Mac; its background agent needs to be available to generate new icons, including for links saved here."
                         ).font(.footnote)
+                        if let issue = state.websiteIconIssue {
+                            Text(issue.detail).font(.footnote)
+                                .accessibilityIdentifier("websiteIconSyncIssue")
+                        }
                     }
                 }
                 if let systemSearch {

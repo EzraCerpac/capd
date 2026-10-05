@@ -37,6 +37,9 @@ package struct SettingsView: View {
                 if let issue = settings.websiteIconIssue {
                     Text(issue).font(.caption).foregroundStyle(Theme.textSecondary)
                 }
+                if let issue = settings.websiteIconSyncIssue {
+                    Text(issue).font(.caption).foregroundStyle(Theme.textSecondary)
+                }
                 hairline
                 row("Fetch page content for link captures") {
                     toggle($settings.fetchesPageBodies)
