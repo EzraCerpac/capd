@@ -7,6 +7,14 @@ import GRDB
 public actor MobileAnswerRetrieval: AnswerRetrieving {
     private let database: DatabasePool
     private let access: MobileLibraryAccess?
+    private static let substantiveProseSQL: String = {
+        // SQLite's default trim omits tabs, newlines, and Unicode whitespace.
+        let whitespace =
+            "char(9,10,11,12,13,32,133,160,5760,8192,8193,8194,8195,8196,8197,8198,8199,8200,8201,8202,8203,8232,8233,8239,8287,12288)"
+        return ["selection", "note", "body", "ocrText"].map {
+            "length(trim(coalesce(mobile_captures.\($0), ''), \(whitespace))) > 0"
+        }.joined(separator: " OR ")
+    }()
 
     public init(databaseURL: URL, access: MobileLibraryAccess? = nil) throws {
         self.access = access
@@ -70,9 +78,7 @@ public actor MobileAnswerRetrieval: AnswerRetrieving {
                     FROM mobile_captures_fts
                     JOIN mobile_captures ON mobile_captures.localID = mobile_captures_fts.rowid
                     WHERE mobile_captures_fts MATCH ?
-                        AND (length(mobile_captures.selection) > 0 OR length(mobile_captures.note) > 0
-                            OR length(coalesce(mobile_captures.body, '')) > 0
-                            OR length(coalesce(mobile_captures.ocrText, '')) > 0)
+                        AND (\(substantiveProseSQL))
                     ORDER BY bm25(mobile_captures_fts), mobile_captures.createdAt DESC,
                         mobile_captures.localID DESC LIMIT ?
                     """, arguments: [prosePattern, cap])
@@ -102,7 +108,6 @@ public actor MobileAnswerRetrieval: AnswerRetrieving {
     private static func literalEvidence(
         _ db: Database, terms: [String], excluding ids: [String], limit: Int
     ) throws -> [AnswerEvidence] {
-        let prose = "selection || note || coalesce(body, '') || coalesce(ocrText, '')"
         let text =
             "title || char(10) || selection || char(10) || note || char(10) || coalesce(body, '') || char(10) || coalesce(ocrText, '')"
         let matches = terms.map { _ in "instr(lower(\(text)), lower(?)) > 0" }.joined(
@@ -115,7 +120,7 @@ public actor MobileAnswerRetrieval: AnswerRetrieving {
             db,
             sql: """
                 SELECT id, title, selection, note, body, ocrText FROM mobile_captures
-                WHERE \(matches) AND length(\(prose)) > 0\(exclusions)
+                WHERE \(matches) AND (\(substantiveProseSQL))\(exclusions)
                 ORDER BY createdAt DESC, localID DESC LIMIT ?
                 """, arguments: arguments)
         return rows.map { row in
