@@ -125,76 +125,132 @@ extension Store {
         }
     }
 
-    /// Atomically installs the planned fixed vocabulary, resets automatic assignments, and
-    /// starts the full-library pass. A concurrent request is consumed only by this write.
+    /// Resets automatic assignments in bounded writes, then installs the vocabulary and
+    /// consumes the request. An interrupted reset leaves the request pending for a fresh plan.
     @discardableResult
     func prepareRetagging(
-        tags: [String], now: Date = Date(), expectedGeneration: TagGenerationSnapshot? = nil
+        tags: [String], now: Date = Date(), expectedGeneration: TagGenerationSnapshot? = nil,
+        batchSize: Int = 100
     ) throws -> Int {
-        try write { db in
-            try checkTagGeneration(expectedGeneration, in: db)
-            let requested =
-                try Bool.fetchOne(
-                    db,
-                    sql: "SELECT retag_requested FROM \(Schema.taxonomy) WHERE id = 1") ?? false
-            guard requested else { return 0 }
-
-            let before = try Capture.fetchAll(db).filter { capture in
-                if syncClient != nil {
-                    let id = try StoreSync.identity(db, capture: capture)
-                    return try !syncTags(capture, in: db).generated.isEmpty
-                        || capture.tagsVersion > 0
-                        || StoreSync.visible(db, id: id)?.generated.taggingProcessed == true
-                }
-                return capture.tagsVersion > 0
+        var expected = try expectedGeneration ?? tagGenerationSnapshot()
+        try reader.read { try checkTagGeneration(expected, in: $0) }
+        guard expected.retagRequested else { return 0 }
+        let limit = max(1, min(batchSize, 100))
+        var lastID: Int64 = 0
+        var count = 0
+        while true {
+            let ids = try reader.read { db in
+                try Int64.fetchAll(
+                    db, sql: "SELECT id FROM \(Schema.captures) WHERE id > ? ORDER BY id LIMIT ?",
+                    arguments: [lastID, limit])
             }
-            let count = before.count
-            var edits: [(captureID: UUID, edit: CaptureEdit)] = []
-            for capture in before {
-                var updated = capture
-                let manual = try syncTags(capture, in: db).manual
-                updated.tags = manual.isEmpty ? nil : manual.joined(separator: " ")
-                updated.tagsVersion =
-                    syncClient != nil || manual.isEmpty ? 0 : Capture.pinnedTagsVersion
-                updated.updatedAt = now
-                try updated.update(db)
-                if syncClient != nil {
-                    edits.append(
-                        (
-                            try StoreSync.identity(db, capture: capture),
-                            CaptureEdit(
-                                metadata: CaptureMetadataPatch(updatedAt: now),
-                                generatedPatch: GeneratedContentPatch(
-                                    tags: [], taggingProcessing: .pending))
-                        ))
-                }
-            }
-            try syncClient?.enqueue(in: db, edits: edits)
-            let queued =
-                try Int.fetchOne(
+            guard let last = ids.last else { break }
+            try write { db in
+                try checkTagGeneration(expected, in: db)
+                let placeholders = ids.map { _ in "?" }.joined(separator: ",")
+                let sharedColumns =
+                    syncClient == nil
+                    ? ""
+                    : """
+                    , i.global_id,
+                    json_extract(CAST(v.payload AS TEXT), '$.manualTags') AS manual_tags,
+                    json_extract(CAST(v.payload AS TEXT), '$.generated.tags') AS generated_tags,
+                    json_extract(CAST(v.payload AS TEXT), '$.generated.taggingProcessed') AS processed
+                    """
+                let sharedJoins =
+                    syncClient == nil
+                    ? ""
+                    : """
+                    LEFT JOIN sync_capture_ids i ON i.local_id = c.id
+                    LEFT JOIN sync_aliases a ON a.id = i.global_id
+                    LEFT JOIN sync_visible v ON v.id = COALESCE(a.canonical, i.global_id)
+                    """
+                let rows = try Row.fetchAll(
                     db,
                     sql: """
-                        SELECT COUNT(*) FROM \(Schema.captures)
-                        WHERE tags_version = 0
-                        """) ?? 0
+                        SELECT c.id, c.tags, c.tags_version \(sharedColumns)
+                        FROM \(Schema.captures) c \(sharedJoins)
+                        WHERE c.id IN (\(placeholders)) ORDER BY c.id
+                        """, arguments: StatementArguments(ids))
+                var edits: [(captureID: UUID, edit: CaptureEdit)] = []
+                for row in rows {
+                    let id: Int64 = row["id"]
+                    let version: Int = row["tags_version"]
+                    let joined: String? = row["tags"]
+                    var manual =
+                        version == Capture.pinnedTagsVersion
+                        ? (joined ?? "").split(separator: " ").map(String.init) : []
+                    var generated =
+                        version == Capture.pinnedTagsVersion
+                        ? [] : (joined ?? "").split(separator: " ").map(String.init)
+                    var processed = false
+                    if syncClient != nil {
+                        if let json: String = row["manual_tags"] {
+                            manual = try JSONDecoder().decode([String].self, from: Data(json.utf8))
+                        }
+                        if let json: String = row["generated_tags"] {
+                            generated = try JSONDecoder().decode(
+                                [String].self, from: Data(json.utf8))
+                        }
+                        processed = (row["processed"] as Bool?) == true
+                    }
+                    guard
+                        syncClient == nil
+                            ? version > 0
+                            : !generated.isEmpty || version > 0 || processed
+                    else { continue }
+                    try db.execute(
+                        sql: """
+                            UPDATE \(Schema.captures)
+                            SET tags = ?, tags_version = ?, updated_at = ? WHERE id = ?
+                            """,
+                        arguments: [
+                            manual.isEmpty ? nil : manual.joined(separator: " "),
+                            syncClient != nil || manual.isEmpty ? 0 : Capture.pinnedTagsVersion,
+                            now, id,
+                        ])
+                    if syncClient != nil {
+                        guard let raw: String = row["global_id"],
+                            let captureID = UUID(uuidString: raw)
+                        else { throw SyncError.invalidOperation }
+                        edits.append(
+                            (
+                                captureID,
+                                CaptureEdit(
+                                    metadata: CaptureMetadataPatch(updatedAt: now),
+                                    generatedPatch: GeneratedContentPatch(
+                                        tags: [], taggingProcessing: .pending))
+                            ))
+                    }
+                    count += 1
+                }
+                try syncClient?.enqueue(in: db, edits: edits)
+                expected.sequence =
+                    syncClient == nil
+                    ? nil
+                    : try Int64.fetchOne(db, sql: "SELECT sequence FROM sync_meta")
+                try checkTagGeneration(expected, in: db)
+            }
+            lastID = last
+        }
+        try write { db in
+            try checkTagGeneration(expected, in: db)
+            let queued =
+                try Int.fetchOne(
+                    db, sql: "SELECT COUNT(*) FROM \(Schema.captures) WHERE tags_version = 0") ?? 0
             try db.execute(
                 sql: """
                     UPDATE \(Schema.taxonomy)
-                    SET version = version + 1,
-                        tags = :tags,
-                        tagged_since_consolidation = 0,
-                        retag_requested = 0,
-                        retag_in_progress = :inProgress,
-                        updated_at = :now
-                    WHERE id = 1
+                    SET version = version + 1, tags = :tags,
+                        tagged_since_consolidation = 0, retag_requested = 0,
+                        retag_in_progress = :inProgress, updated_at = :now WHERE id = 1
                     """,
                 arguments: [
                     "tags": tags.joined(separator: " "),
-                    "inProgress": queued > 0 && !tags.isEmpty,
-                    "now": now,
+                    "inProgress": queued > 0 && !tags.isEmpty, "now": now,
                 ])
-            return count
         }
+        return count
     }
 
     /// Captures the tagging pass still owes tags, oldest first. Rows mid-enrichment are

@@ -10,6 +10,132 @@ import Testing
 
 @Suite("Agent generation freshness")
 struct AgentGenerationTests {
+    @Test func fullRetagResetBoundsWritesAndPreservesLargeContent() async throws {
+        let fixture = try await GenerationFixture(kind: .text, count: 101, tagged: true)
+        defer { fixture.clean() }
+        try fixture.store.requestRetagging()
+        let snapshot = try fixture.store.tagGenerationSnapshot()
+        let observer = RetagBatchObserver()
+        fixture.store.dbPool.add(transactionObserver: observer)
+        let queries = Mutex([String]())
+        try await fixture.store.dbPool.writeWithoutTransaction { db in
+            db.trace { event in
+                if case .statement(let statement) = event {
+                    let sql = statement.sql.replacingOccurrences(of: "\"", with: "").uppercased()
+                    if sql.hasPrefix("SELECT") && sql.contains("FROM CAPTURES") {
+                        queries.withLock { $0.append(sql) }
+                    }
+                }
+            }
+        }
+        let reset = try fixture.store.prepareRetagging(tags: ["new"], expectedGeneration: snapshot)
+        #expect(reset == 101)
+        #expect(observer.batches.withLock { $0 == [100, 1] })
+        #expect(
+            queries.withLock {
+                !$0.contains { $0.contains("SELECT * FROM CAPTURES") && !$0.contains("WHERE") }
+            })
+        let metadataQueries = queries.withLock {
+            $0.filter { $0.contains("SELECT C.ID, C.TAGS, C.TAGS_VERSION") }
+        }
+        #expect(metadataQueries.count == 2)
+        #expect(metadataQueries.allSatisfy { !$0.contains("BODY") && !$0.contains("OCR") })
+        #expect(try !fixture.store.retaggingRequested())
+        #expect(try fixture.store.taxonomy().tags == ["new"])
+        #expect(try fixture.store.taxonomy().version == snapshot.taxonomy.version + 1)
+        #expect(try fixture.pending().count == 101)
+        #expect(
+            try await fixture.store.reader.read { db in
+                try Capture.fetchAll(db).allSatisfy {
+                    $0.tagList == ["manual"] && $0.tagsVersion == 0
+                        && $0.body == String(repeating: "body", count: 4096)
+                        && $0.ocrText == String(repeating: "ocr", count: 4096)
+                }
+            })
+    }
+
+    @Test(arguments: [false, true])
+    func interruptedRetagResetRetainsRequestAndRetries(taxonomyChange: Bool) async throws {
+        let fixture = try await GenerationFixture(kind: .text, count: 5, tagged: true)
+        defer { fixture.clean() }
+        try fixture.store.saveTaxonomy(Taxonomy(tags: ["old"], updatedAt: .distantPast))
+        try fixture.store.requestRetagging()
+        let captures = try await fixture.store.reader.read {
+            try Capture.fetchAll($0, sql: "SELECT * FROM captures ORDER BY id")
+        }
+        let snapshot = try fixture.store.tagGenerationSnapshot()
+        let peer = try Store(paths: fixture.store.paths, syncBinding: fixture.wire.binding)
+        let observer = GenerationInterleaver(
+            peer: peer, id: captures[2].id!, taxonomyChange: taxonomyChange)
+        fixture.store.dbPool.add(transactionObserver: observer)
+        #expect(throws: GenerationGateError.self) {
+            try fixture.store.prepareRetagging(
+                tags: ["new"], expectedGeneration: snapshot, batchSize: 2)
+        }
+        #expect(observer.result.withLock { $0 == "injected" })
+        let current = try await fixture.store.reader.read {
+            try Capture.fetchAll($0, sql: "SELECT * FROM captures ORDER BY id")
+        }
+        #expect(current.prefix(2).allSatisfy { $0.tagList == ["manual"] })
+        #expect(current.suffix(3).allSatisfy { $0.tagList == ["manual", "old"] })
+        #expect(try fixture.store.retaggingRequested())
+        #expect(try fixture.store.taxonomy().tags == ["old"])
+        #expect(try fixture.store.taxonomy().version == snapshot.taxonomy.version)
+        let fresh = try fixture.store.tagGenerationSnapshot()
+        #expect(
+            try fixture.store.prepareRetagging(
+                tags: ["fresh"], expectedGeneration: fresh, batchSize: 2) == 3)
+        #expect(try !fixture.store.retaggingRequested())
+        #expect(try fixture.store.taxonomy().tags == ["fresh"])
+        #expect(try fixture.store.taxonomy().version == snapshot.taxonomy.version + 1)
+        #expect(try fixture.store.taxonomy().taggingEnabled == !taxonomyChange)
+        #expect(
+            try await fixture.store.reader.read {
+                try Capture.fetchAll($0).allSatisfy { $0.tagList == ["manual"] }
+            })
+        if !taxonomyChange {
+            #expect(
+                try await fixture.store.reader.read {
+                    try Capture.fetchOne($0, key: captures[2].id!)?.note == "Independent input"
+                })
+        }
+    }
+
+    @Test func retagResetIncludesProcessedEmptyGeneratedTags() async throws {
+        let fixture = try await GenerationFixture(kind: .text)
+        defer { fixture.clean() }
+        try fixture.editRemote(
+            .init(
+                generatedPatch: .init(
+                    tags: [], taggingProcessing: .processed(inputFingerprint: "old-input"))))
+        #expect((await fixture.runtime.sync()).pullSucceeded)
+        #expect(try fixture.capture().tagsVersion == 0)
+        try fixture.store.requestRetagging()
+        #expect(try fixture.store.prepareRetagging(tags: ["new"]) == 1)
+        let operations = try fixture.pending()
+        #expect(operations.count == 1)
+        if case .edit(let edit) = operations.first?.mutation {
+            #expect(edit.generatedPatch?.tags == [])
+            #expect(edit.generatedPatch?.taggingProcessing == .pending)
+        } else {
+            Issue.record("Expected a generated reset")
+        }
+    }
+
+    @Test func retagResetChecksSnapshotBeforeNoRequestReturn() async throws {
+        let fixture = try await GenerationFixture(kind: .text)
+        defer { fixture.clean() }
+        let snapshot = try fixture.store.tagGenerationSnapshot()
+        #expect(!snapshot.retagRequested)
+        try fixture.store.requestRetagging()
+        #expect(throws: GenerationGateError.self) {
+            try fixture.store.prepareRetagging(tags: ["stale"], expectedGeneration: snapshot)
+        }
+        #expect(try fixture.store.retaggingRequested())
+        #expect(try fixture.pending().isEmpty)
+        #expect(try fixture.store.taxonomy().tags == snapshot.taxonomy.tags)
+    }
+
     @Test func offlineOrdinaryStepFailureIsRequeuedBeforeFailurePublication() async throws {
         let fixture = try await GenerationFixture()
         defer { fixture.clean() }
@@ -238,14 +364,32 @@ struct AgentGenerationTests {
     }
 }
 
+private final class RetagBatchObserver: TransactionObserver {
+    let batches = Mutex([Int]())
+    private var count = 0
+    func observes(eventsOfKind eventKind: DatabaseEventKind) -> Bool {
+        eventKind.tableName == "sync_outbox"
+    }
+    func databaseDidChange(with event: DatabaseEvent) {
+        if event.kind == .insert { count += 1 }
+    }
+    func databaseDidCommit(_ db: Database) {
+        if count > 0 { batches.withLock { $0.append(count) } }
+        count = 0
+    }
+    func databaseDidRollback(_ db: Database) { count = 0 }
+}
+
 private final class GenerationInterleaver: TransactionObserver {
     let peer: Store
     let id: Int64
+    let taxonomyChange: Bool
     let result = Mutex("waiting")
     private var changed = false
-    init(peer: Store, id: Int64) {
+    init(peer: Store, id: Int64, taxonomyChange: Bool = false) {
         self.peer = peer
         self.id = id
+        self.taxonomyChange = taxonomyChange
     }
     func observes(eventsOfKind eventKind: DatabaseEventKind) -> Bool {
         eventKind.tableName == "captures"
@@ -255,7 +399,11 @@ private final class GenerationInterleaver: TransactionObserver {
         guard changed, result.withLock({ $0 == "waiting" }) else { return }
         result.withLock { $0 = "injecting" }
         do {
-            _ = try peer.updateNote(id: id, note: "Independent input")
+            if taxonomyChange {
+                try peer.setTaggingEnabled(false)
+            } else {
+                _ = try peer.updateNote(id: id, note: "Independent input")
+            }
             result.withLock { $0 = "injected" }
         } catch {
             result.withLock { $0 = "failed: \(error)" }
@@ -273,7 +421,7 @@ private struct GenerationFixture: Sendable {
     let remote: UUID
     let captureID: UUID
 
-    init(kind: CaptureSource.Kind = .link, count: Int = 1) async throws {
+    init(kind: CaptureSource.Kind = .link, count: Int = 1, tagged: Bool = false) async throws {
         root = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("capd-generation-\(UUID())")
         let paths = StoragePaths(root: root.appendingPathComponent("library"))
@@ -295,8 +443,22 @@ private struct GenerationFixture: Sendable {
             ids.append(record.id)
             _ = try server.apply(
                 SyncOperation(
-                    deviceID: remote, sequence: Int64(index + 1), captureID: record.id,
+                    deviceID: remote, sequence: Int64(tagged ? index * 2 + 1 : index + 1),
+                    captureID: record.id,
                     baseRevision: 0, mutation: .create(record)))
+            if tagged {
+                _ = try server.apply(
+                    SyncOperation(
+                        deviceID: remote, sequence: Int64(index * 2 + 2), captureID: record.id,
+                        baseRevision: Int64(index * 2 + 1),
+                        mutation: .edit(
+                            CaptureEdit(
+                                addTags: ["manual"],
+                                generated: GeneratedContent(
+                                    body: String(repeating: "body", count: 4096),
+                                    ocrText: String(repeating: "ocr", count: 4096), tags: ["old"])))
+                    ))
+            }
         }
         captureID = ids[0]
         let enrollment = try SyncEnrollment(
