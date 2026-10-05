@@ -209,7 +209,6 @@ struct StoreSyncTests {
                 #expect(try client.captures().first?.noteConflicts.count == 2)
             }
             let originalRecords = try client.captures()
-            let digest = SHA256.hash(data: try JSONEncoder().encode(originalRecords)).description
             #expect(throws: SyncHTTPError.resourceLimit) {
                 if kind == "intermediate" {
                     try store.dbPool.write { db in
@@ -242,9 +241,7 @@ struct StoreSyncTests {
             let queued = try client.pendingOperations()
             let count = queued.count
             #expect(count == 0)
-            #expect(
-                SHA256.hash(data: try JSONEncoder().encode(client.captures())).description == digest
-            )
+            #expect(try client.captures() == originalRecords)
             if let operation = queued.first {
                 let principal = SyncPrincipal(
                     serviceID: binding.serviceID, libraryID: binding.libraryID,
