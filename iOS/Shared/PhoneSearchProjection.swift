@@ -9,9 +9,14 @@ enum PhoneSearchProjection {
 
     /// The session owner supplies the canonical record and library identity after saving.
     static func capture(_ canonical: MobileCapture, libraryID: UUID) -> SearchCapture {
-        SearchCapture(
+        let derivedTitle = String(
+            canonical.selection.trimmingCharacters(in: .whitespacesAndNewlines).prefix(80))
+        let title =
+            canonical.kind == .text && canonical.title == derivedTitle
+            ? "Saved text" : canonical.title
+        return SearchCapture(
             reference: CaptureReference(libraryID: libraryID, captureID: canonical.id),
-            title: canonical.title,
+            title: title,
             text: canonical.manualTags.prefix(32).map { String($0.prefix(80)) }.joined(
                 separator: " "),
             keywords: canonical.manualTags, revision: canonical.revision)

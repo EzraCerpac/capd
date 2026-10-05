@@ -562,16 +562,16 @@ extension SearchEnvironment {
         showHUD: @escaping @MainActor (HUDContent) -> Void
     ) -> SearchEnvironment {
         let answers = LibraryAnswerService(search: searchService)
-        let querySearch: @Sendable () throws -> SearchService = {
-            if let queryStore { return SearchService(store: try queryStore()) }
-            return searchService
-        }
+        let queryReader = Result { try queryStore?() ?? store }
+        let querySearch =
+            queryStore == nil
+            ? .success(searchService) : queryReader.map { SearchService(store: $0) }
         return SearchEnvironment(
-            search: { try querySearch().search($0) },
-            totalCount: { try querySearch().totalCaptureCount() },
-            tags: { try (queryStore?() ?? store).tagUsage().map(\.tag) },
+            search: { try querySearch.get().search($0) },
+            totalCount: { try querySearch.get().totalCaptureCount() },
+            tags: { try queryReader.get().tagUsage().map(\.tag) },
             answerAvailability: { answers.availability() },
-            answer: { try await LibraryAnswerService(search: querySearch()).answer($0) },
+            answer: { try await LibraryAnswerService(search: querySearch.get()).answer($0) },
             setRating: { id, rating in
                 _ = try store.updateRating(id: id, rating: rating)
             },
@@ -580,7 +580,7 @@ extension SearchEnvironment {
                 _ = try store.scheduleReminder(id: id, at: date)
             },
             openCapture: { id in
-                guard let capture = try? querySearch().capture(id: id) else { return }
+                guard let capture = try? querySearch.get().capture(id: id) else { return }
                 if let rawURL = capture.url, let url = URL(string: rawURL) {
                     openURL(url)
                 } else if let path = capture.assetPath {

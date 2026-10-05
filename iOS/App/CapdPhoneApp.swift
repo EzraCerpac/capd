@@ -141,7 +141,8 @@ final class LibraryModel {
             let library = try store?.search() ?? []
             capturesByID = Dictionary(uniqueKeysWithValues: library.map { ($0.id, $0) })
             captures = query.isEmpty ? library : try store?.search(query) ?? []
-            let libraryChanged = revision != loadedLibraryRevision
+            let libraryChanged =
+                revision != loadedLibraryRevision
                 || librarySession?.token != loadedLibrarySessionToken
             loadedLibraryRevision = revision
             loadedLibrarySessionToken = librarySession?.token

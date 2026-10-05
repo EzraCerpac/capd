@@ -23,7 +23,7 @@ struct MacDiscoveryAliasTests {
             source: CaptureSource(kind: .text, title: "Canonical capture", selection: "Synthetic"))
         record.revision = 7
         record.manualTags = ["canonical"]
-        try store.dbPool.write { db in
+        let expectedLocalID = try store.dbPool.write { db in
             try db.execute(
                 sql: "INSERT INTO sync_visible (id, payload) VALUES (?, ?)",
                 arguments: [record.id.uuidString, try JSONEncoder().encode(record)])
@@ -31,20 +31,22 @@ struct MacDiscoveryAliasTests {
                 sql: "INSERT INTO sync_aliases (id, canonical) VALUES (?, ?)",
                 arguments: [alias.uuidString, record.id.uuidString])
             var capture = Capture(
-                kind: .text, title: "Canonical capture", selection: "Synthetic", createdAt: Date())
+                kind: .text, title: "Stale alias title", selection: "Synthetic", createdAt: Date())
             try capture.insert(db)
             try db.execute(
                 sql: "INSERT INTO sync_capture_ids (local_id, global_id) VALUES (?, ?)",
                 arguments: [capture.id, alias.uuidString])
             if includeCanonicalRow {
                 var second = Capture(
-                    kind: .text, title: "Canonical capture", selection: "Synthetic",
+                    kind: .text, title: "Stale local title", selection: "Synthetic",
                     createdAt: Date())
                 try second.insert(db)
                 try db.execute(
                     sql: "INSERT INTO sync_capture_ids (local_id, global_id) VALUES (?, ?)",
                     arguments: [second.id, record.id.uuidString])
+                return second.id
             }
+            return capture.id
         }
         let before = try store.dbPool.read {
             try String.fetchAll($0, sql: "SELECT global_id FROM sync_capture_ids ORDER BY local_id")
@@ -54,11 +56,76 @@ struct MacDiscoveryAliasTests {
         #expect(snapshot.captures.map(\.id) == [record.id])
         #expect(snapshot.captures.first?.manualTags == ["canonical"])
         #expect(snapshot.captures.first?.revision == 7)
+        #expect(snapshot.captures.first?.title == "Canonical capture")
+        #expect(snapshot.captures.first?.localID == expectedLocalID)
         #expect(try store.syncClient!.pendingOperations().isEmpty)
         #expect(
             try store.dbPool.read {
                 try String.fetchAll(
                     $0, sql: "SELECT global_id FROM sync_capture_ids ORDER BY local_id")
             } == before)
+    }
+
+    @Test(arguments: [1000, 1001])
+    func limitCountsCanonicalCapturesInsteadOfRetainedAliases(canonicalCount: Int) throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let paths = StoragePaths(root: root)
+        let binding = SyncLibraryBinding(libraryID: UUID(), serviceID: UUID())
+        let deviceID = UUID()
+        let store = try Store(paths: paths, syncBinding: binding, deviceID: deviceID)
+        let enrollment = try SyncEnrollment(
+            endpoint: URL(string: "https://sync.example.invalid/v1/sync")!,
+            binding: binding, deviceID: deviceID)
+        try MacSyncConfiguration(enrollment: enrollment).install(paths: paths)
+        let first = UUID()
+        try store.dbPool.write { db in
+            let alias = UUID()
+            try db.execute(
+                sql: "INSERT INTO sync_aliases (id, canonical) VALUES (?, ?)",
+                arguments: [alias.uuidString, first.uuidString])
+            var retained = Capture(kind: .text, title: "Retained alias", createdAt: Date())
+            try retained.insert(db)
+            try db.execute(
+                sql: "INSERT INTO sync_capture_ids (local_id, global_id) VALUES (?, ?)",
+                arguments: [retained.id, alias.uuidString])
+            for index in 0..<canonicalCount {
+                let record = SharedCapture(
+                    id: index == 0 ? first : UUID(),
+                    source: CaptureSource(kind: .text, title: "Canonical \(index)"))
+                try db.execute(
+                    sql: "INSERT INTO sync_visible (id, payload) VALUES (?, ?)",
+                    arguments: [record.id.uuidString, try JSONEncoder().encode(record)])
+                var capture = Capture(kind: .text, title: "Canonical \(index)", createdAt: Date())
+                try capture.insert(db)
+                try db.execute(
+                    sql: "INSERT INTO sync_capture_ids (local_id, global_id) VALUES (?, ?)",
+                    arguments: [capture.id, record.id.uuidString])
+            }
+        }
+        if canonicalCount == 1000 {
+            let snapshot = try MacDiscoverySnapshot.load(paths: paths, localLibraryID: UUID())
+            #expect(snapshot.captures.count == 1000)
+            #expect(snapshot.captures.first?.title == "Canonical 0")
+        } else {
+            #expect(throws: MacDiscoveryError.self) {
+                try MacDiscoverySnapshot.load(paths: paths, localLibraryID: UUID())
+            }
+        }
+    }
+
+    @Test(arguments: [true, false])
+    func untitledLinksIndexOnlyTheHost(hasHost: Bool) throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let paths = StoragePaths(root: root)
+        let store = try Store(paths: paths)
+        var capture = Capture(
+            kind: .link,
+            url: "https://example.invalid/private/path?q=private-token#private-fragment",
+            host: hasHost ? "example.invalid" : nil, createdAt: Date())
+        try store.dbPool.write { try capture.insert($0) }
+        let snapshot = try MacDiscoverySnapshot.load(paths: paths, localLibraryID: UUID())
+        #expect(snapshot.captures.first?.title == "example.invalid")
     }
 }
