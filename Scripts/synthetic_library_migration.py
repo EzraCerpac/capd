@@ -18,6 +18,9 @@ import uuid
 MARKER = ".capd-synthetic-fixture"
 MARKER_BYTES = b"synthetic-capd-library-v1\n"
 FORMAT = "capd-synthetic-backup-v1"
+MAXIMUM_SHARED_FRAME_BYTES = 16_777_216
+# Reserve more than the shared single-record envelopes and counter/date encoding growth.
+MAXIMUM_IMPORTED_CAPTURE_BYTES = MAXIMUM_SHARED_FRAME_BYTES - 65_536
 
 
 class PreparationError(Exception):
@@ -223,7 +226,10 @@ def legacy_snapshot(row, root):
         blob = {"path": path, "digest": digest(asset), "byteCount": asset.stat().st_size}
     elif row.get("kind") == "image":
         raise PreparationError("legacy image has no asset")
-    tags = (row.get("tags") or "").split()
+    tags = row.get("tags")
+    if tags is not None and not isinstance(tags, str):
+        raise PreparationError("legacy tags must be a string or null")
+    tags = (tags or "").split()
     return {"legacyRow": row, "blob": blob,
             "manualTags": tags if row.get("tags_version") == -1 else [],
             "generatedTags": [] if row.get("tags_version") == -1 else tags}
@@ -334,11 +340,29 @@ def shared_date(value):
     return (date - epoch).total_seconds()
 
 
+def _validate_imported_capture(record):
+    for container, fields in (
+        (record["source"], ("contentHash", "url", "host", "title", "selection")),
+        (record["generated"], ("body", "ocrText")),
+        (record["metadata"], ("sourceAppBundleID",)),
+        (record, ("note",)),
+    ):
+        if any(container.get(field) is not None and not isinstance(container[field], str) for field in fields):
+            raise PreparationError("shared text fields must be strings or null")
+    for tags in (record["manualTags"], record["generated"]["tags"]):
+        if not isinstance(tags, list) or any(not isinstance(tag, str) for tag in tags):
+            raise PreparationError("shared tags must be arrays of strings")
+    # ASCII JSON bounds Swift string encoding after accounting for its escaped slashes.
+    # This deliberately refuses a small margin of otherwise admissible shared records.
+    if len(encode(record).replace(b"/", b"\\/")) > MAXIMUM_IMPORTED_CAPTURE_BYTES:
+        raise PreparationError("capture exceeds the shared response budget")
+
+
 def imported_capture(identity, payload, import_id):
     row = payload["legacyRow"]
     seen_count = row["seen_count"]
     rating = row.get("rating", 3)
-    if row["kind"] not in ("link", "text", "image") or not isinstance(seen_count, int) or seen_count < 1 or rating not in range(1, 6):
+    if row["kind"] not in ("link", "text", "image") or type(seen_count) is not int or not 1 <= seen_count <= 2 ** 63 - 1 or type(rating) is not int or rating not in range(1, 6):
         raise PreparationError("invalid legacy capture metadata")
     source = {"kind": row["kind"]}
     for shared, legacy in (("contentHash", "content_hash"), ("url", "url"), ("host", "host"),
@@ -350,6 +374,10 @@ def imported_capture(identity, payload, import_id):
         if blob["byteCount"] > 8_388_608:
             raise PreparationError("image exceeds the shared blob limit")
         source["blob"] = {key: blob[key] for key in ("digest", "byteCount")}
+        if row["kind"] == "image":
+            if source.get("contentHash") not in (None, blob["digest"]):
+                raise PreparationError("image fingerprint differs from verified bytes")
+            source["contentHash"] = blob["digest"]
     elif row["kind"] == "image":
         raise PreparationError("image needs verified bytes")
     generated = {"tags": payload["generatedTags"]}
@@ -374,6 +402,7 @@ def imported_capture(identity, payload, import_id):
     record["metadata"] = metadata
     if row.get("note") is not None:
         record["note"] = row["note"]
+    _validate_imported_capture(record)
     return record
 
 
