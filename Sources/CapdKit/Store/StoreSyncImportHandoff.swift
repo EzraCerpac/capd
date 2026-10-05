@@ -66,6 +66,7 @@ public struct StoreSyncImportHandoff: Sendable {
             guard let id = capture.id, let uuid = identities[id], let record = records[uuid],
                 !record.deleted, record.revision == 1, record.noteConflicts.isEmpty
             else { throw SyncError.invalidOperation }
+            try record.validateHistorical()
             let blob = try StoreSync.reference(for: capture, paths: paths)
             guard (blob?.byteCount ?? 0) <= 8_388_608 else { throw SyncError.invalidBlob }
             let local = StoreSync.snapshot(capture, id: uuid, blob: blob)
