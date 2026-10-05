@@ -5,6 +5,243 @@ import Testing
 @testable import CapdSync
 
 struct ClientResponseValidationTests {
+    @Test(arguments: ["recapture", "edit", "delete", "restore", "duplicate"])
+    func definiteNextReceiptMustMatchCompleteMutation(mutation: String) throws {
+        let f = try ResponseFixture()
+        defer { f.clean() }
+        let original = f.capture("complete transition")
+        try f.client.enqueue(captureID: original.id, mutation: .create(original))
+        try f.client.push(to: f.server)
+        if mutation == "restore" {
+            try f.client.enqueue(captureID: original.id, mutation: .delete)
+            try f.client.push(to: f.server)
+        }
+        let operation: SyncOperation
+        switch mutation {
+        case "edit":
+            operation = try f.client.enqueue(
+                captureID: original.id, mutation: .edit(CaptureEdit(rating: 5)))
+        case "delete": operation = try f.client.enqueue(captureID: original.id, mutation: .delete)
+        case "restore": operation = try f.client.enqueue(captureID: original.id, mutation: .restore)
+        case "duplicate":
+            let duplicate = SharedCapture(source: original.source)
+            operation = try f.client.enqueue(captureID: duplicate.id, mutation: .create(duplicate))
+        default: operation = try f.client.enqueue(captureID: original.id, mutation: .recapture)
+        }
+        let before = try f.client.captures(includeDeleted: true)
+        let legitimate = try f.server.apply(operation)
+        var changed = try #require(legitimate.capture)
+        if mutation == "edit" {
+            changed.seenCount += 1
+        } else {
+            changed.generated.body = "Unrequested"
+        }
+        let forged = SyncReceipt(operationID: operation.id, outcome: .accepted, capture: changed)
+        #expect(throws: SyncError.invalidOperation) {
+            try f.client.push(to: ResponseTransport(server: f.server, receipt: forged))
+        }
+        #expect(try f.client.pendingOperations() == [operation])
+        #expect(try f.client.captures(includeDeleted: true) == before)
+        #expect(try f.client.push(to: f.server) == [legitimate])
+    }
+
+    @Test(arguments: ["rating", "tags", "note", "generated", "metadata"])
+    func observedSameRevisionRetryMustEqualFeedRecord(field: String) throws {
+        let f = try ResponseFixture()
+        defer { f.clean() }
+        let original = f.capture("observed equality")
+        try f.client.enqueue(captureID: original.id, mutation: .create(original))
+        try f.client.push(to: f.server)
+        let operation = try f.client.enqueue(captureID: original.id, mutation: .recapture)
+        let legitimate = try f.server.apply(operation)
+        try f.client.pull(from: f.server)
+        let before = try f.client.captures()
+        var changed = try #require(legitimate.capture)
+        switch field {
+        case "rating": changed.rating = 5
+        case "tags": changed.manualTags = ["Unrequested"]
+        case "note": changed.note = "Unrequested"
+        case "generated": changed.generated.body = "Unrequested"
+        default: changed.metadata = CaptureMetadata(sourceAppBundleID: "unrequested")
+        }
+        let forged = SyncReceipt(operationID: operation.id, outcome: .accepted, capture: changed)
+        #expect(throws: SyncError.invalidOperation) {
+            try f.client.push(to: ResponseTransport(server: f.server, receipt: forged))
+        }
+        #expect(try f.client.pendingOperations() == [operation])
+        #expect(try f.client.captures() == before)
+        #expect(try f.client.push(to: f.server) == [legitimate])
+    }
+
+    @Test(
+        arguments: [
+            "count", "rating", "noteRevision", "negativeNoteRevision", "image", "blob", "generated",
+        ], [false, true])
+    func invalidInboundCaptureIsRejectedBeforeCaching(field: String, baseline: Bool) throws {
+        let f = try ResponseFixture()
+        defer { f.clean() }
+        let blob = try f.server.blobs.put(Data("invariant asset".utf8))
+        var invalid = SharedCapture(source: CaptureSource(kind: .image, blob: blob))
+        invalid.revision = 1
+        switch field {
+        case "count": invalid.seenCount = 0
+        case "rating": invalid.rating = 6
+        case "noteRevision": invalid.noteRevision = 2
+        case "negativeNoteRevision": invalid.noteRevision = -1
+        case "image": invalid.source.blob = nil
+        case "blob": invalid.source.blob = BlobReference(digest: "invalid", byteCount: 1)
+        default: invalid.generated.bodyIsThin = true
+        }
+        let probe = DownloadProbe()
+        let page = FeedPage(
+            cursor: 1,
+            changes: [
+                FeedChange(
+                    cursor: 1, operationID: UUID(), deviceID: UUID(), sequence: 1,
+                    requestedCaptureID: invalid.id, capture: invalid)
+            ])
+        let transport = ResponseTransport(
+            server: f.server,
+            snapshot: baseline
+                ? Baseline(cursor: 1, captures: [invalid], deviceSequences: [:]) : nil,
+            page: baseline ? nil : page, onDownload: { probe.record() })
+        let expectedError: SyncError = field == "blob" ? .invalidBlob : .invalidOperation
+        #expect(throws: expectedError) { try f.client.pull(from: transport) }
+        #expect(try f.client.cursor() == 0)
+        #expect(try f.client.captures(includeDeleted: true).isEmpty)
+        #expect(probe.count == 0)
+        #expect(
+            !FileManager.default.fileExists(
+                atPath: f.client.blobs.directory.appendingPathComponent(blob.digest).path))
+    }
+
+    @Test(
+        arguments: ["createdAt", "kind", "hash", "url", "host", "blob", "title", "selection"],
+        [false, true])
+    func remoteReplacementPreservesKnownIdentity(field: String, baseline: Bool) throws {
+        let f = try ResponseFixture()
+        defer { f.clean() }
+        var original = f.capture("remote identity")
+        original.source.title = "Known title"
+        try f.client.enqueue(captureID: original.id, mutation: .create(original))
+        try f.client.push(to: f.server)
+        try f.client.pull(from: f.server)
+        let before = try f.client.captures()
+        let current = try #require(before.first)
+        let blob = try f.server.blobs.put(Data("substituted asset".utf8))
+        var source = current.source
+        switch field {
+        case "kind":
+            source.kind = .image
+            source.blob = blob
+        case "hash": source.contentHash = "Unrelated"
+        case "url": source.url = "https://unrelated.invalid"
+        case "host": source.host = "unrelated.invalid"
+        case "blob": source.blob = blob
+        case "title": source.title = nil
+        case "selection": source.selection = nil
+        default: break
+        }
+        var substituted = SharedCapture(
+            id: current.id, source: source,
+            createdAt: current.createdAt.addingTimeInterval(field == "createdAt" ? 1 : 0))
+        substituted.revision = 2
+        let probe = DownloadProbe()
+        let page = FeedPage(
+            cursor: 2,
+            changes: [
+                FeedChange(
+                    cursor: 2, operationID: UUID(), deviceID: UUID(), sequence: 1,
+                    requestedCaptureID: original.id, capture: substituted)
+            ])
+        let transport = ResponseTransport(
+            server: f.server,
+            snapshot: baseline
+                ? Baseline(cursor: 2, captures: [substituted], deviceSequences: [:]) : nil,
+            page: baseline ? nil : page, onDownload: { probe.record() })
+        #expect(throws: SyncError.invalidOperation) { try f.client.pull(from: transport) }
+        #expect(try f.client.cursor() == 1)
+        #expect(try f.client.captures() == before)
+        #expect(probe.count == 0)
+    }
+
+    @Test func samePageIdentitySubstitutionIsRejectedBeforeCaching() throws {
+        let f = try ResponseFixture()
+        defer { f.clean() }
+        var first = f.capture("new page identity")
+        first.revision = 1
+        let blob = try f.server.blobs.put(Data("same page substitute".utf8))
+        var substituted = SharedCapture(
+            id: first.id, source: CaptureSource(kind: .image, blob: blob),
+            createdAt: first.createdAt)
+        substituted.revision = 2
+        let device = UUID()
+        let page = FeedPage(
+            cursor: 2,
+            changes: [first, substituted].map {
+                FeedChange(
+                    cursor: $0.revision, operationID: UUID(), deviceID: device,
+                    sequence: $0.revision, requestedCaptureID: first.id, capture: $0)
+            })
+        let probe = DownloadProbe()
+        #expect(throws: SyncError.invalidOperation) {
+            try f.client.pull(
+                from: ResponseTransport(
+                    server: f.server, page: page, onDownload: { probe.record() }))
+        }
+        #expect(try f.client.cursor() == 0)
+        #expect(try f.client.captures().isEmpty)
+        #expect(probe.count == 0)
+    }
+
+    @Test func causalQueuedNotesStillProduceCompleteAcceptedTransitions() throws {
+        let f = try ResponseFixture()
+        defer { f.clean() }
+        let original = f.capture("queued note")
+        try f.client.enqueue(captureID: original.id, mutation: .create(original))
+        try f.client.push(to: f.server)
+        try f.client.enqueue(
+            captureID: original.id, mutation: .edit(CaptureEdit(note: NoteEdit("First"))))
+        try f.client.enqueue(captureID: original.id, mutation: .edit(CaptureEdit(rating: 4)))
+        try f.client.enqueue(
+            captureID: original.id, mutation: .edit(CaptureEdit(note: NoteEdit("Second"))))
+        #expect(
+            try f.client.push(to: f.server).map(\.outcome) == [.accepted, .accepted, .accepted])
+        #expect(try f.client.captures().first?.note == "Second")
+        #expect(try f.client.captures().first?.noteConflicts.isEmpty == true)
+    }
+
+    @Test func unicodeEquivalentFingerprintsAgreeAcrossClientAuthorityAndStaging() throws {
+        let binding = SyncLibraryBinding(libraryID: UUID(), serviceID: UUID())
+        let f = try ResponseFixture(binding: binding)
+        defer { f.clean() }
+        let transport = BoundResponseTransport(
+            transport: ResponseTransport(server: f.server), binding: binding,
+            deviceID: f.client.deviceID)
+        let first = SharedCapture(source: CaptureSource(kind: .text, contentHash: "café"))
+        let duplicate = SharedCapture(
+            source: CaptureSource(kind: .text, contentHash: "cafe\u{301}"))
+        #expect(first.source.contentHash == duplicate.source.contentHash)
+        #expect(Set([first.source.contentHash!, duplicate.source.contentHash!]).count == 1)
+        try f.client.enqueue(captureID: first.id, mutation: .create(first))
+        try f.client.enqueue(captureID: duplicate.id, mutation: .create(duplicate))
+        #expect(try f.client.captures().count == 1)
+        #expect(try f.client.captures().first?.seenCount == 2)
+        #expect(try f.client.push(to: transport).map { $0.capture?.id } == [first.id, first.id])
+        #expect(try f.client.pendingOperations().isEmpty)
+        let stagedFirst = SharedCapture(source: CaptureSource(kind: .text, contentHash: "résumé"))
+        let stagedDuplicate = SharedCapture(
+            source: CaptureSource(kind: .text, contentHash: "re\u{301}sume\u{301}"))
+        let snapshot = ContentSnapshotImport(
+            snapshotID: UUID(), targetBinding: binding, sourceDeviceID: UUID(),
+            captures: [stagedFirst, stagedDuplicate])
+        let preview = try f.server.previewContentSnapshotImport(snapshot)
+        #expect(Set(preview.items.map(\.canonicalCaptureID)).count == 1)
+        #expect(Set(preview.items.map(\.disposition)) == [.insert, .merge])
+        _ = try f.server.importContentSnapshot(snapshot, preview: preview)
+        #expect(try f.server.baseline().captures.count == 2)
+    }
+
     @Test(arguments: [100, Int.max], [false, true])
     func nextRevisionCountCannotInflate(count: Int, duplicateCreate: Bool) throws {
         let f = try ResponseFixture()
@@ -526,6 +763,7 @@ private struct ResponseTransport: SyncTransport {
     var receipt: SyncReceipt? = nil
     var snapshot: Baseline? = nil
     var page: FeedPage? = nil
+    var onDownload: (@Sendable () -> Void)? = nil
 
     func apply(_ operation: SyncOperation) throws -> SyncReceipt {
         if let receipt { return receipt }
@@ -547,7 +785,17 @@ private struct ResponseTransport: SyncTransport {
         try server.upload(blob, offset: offset, chunk: chunk, final: final)
     }
 
-    func download(_ blob: BlobReference) throws -> Data { try server.download(blob) }
+    func download(_ blob: BlobReference) throws -> Data {
+        onDownload?()
+        return try server.download(blob)
+    }
+}
+
+private final class DownloadProbe: @unchecked Sendable {
+    private let lock = NSLock()
+    private var downloads = 0
+    var count: Int { lock.withLock { downloads } }
+    func record() { lock.withLock { downloads += 1 } }
 }
 
 private struct ResponseFixture {

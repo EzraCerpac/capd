@@ -248,6 +248,15 @@ enum SyncDatabase {
                 """, arguments: [id.uuidString, canonical.uuidString])
     }
 
+    static func validateHistorical(_ record: SharedCapture) throws {
+        guard record.revision >= 0, record.seenCount >= 1, (1...5).contains(record.rating),
+            record.noteRevision >= 0, record.noteRevision <= record.revision,
+            record.source.kind != .image || record.source.blob != nil
+        else { throw SyncError.invalidOperation }
+        try record.source.blob?.validate()
+        try record.generated.validateTaggingProcessing()
+    }
+
     static func validate(_ operation: SyncOperation) throws {
         guard operation.sequence > 0, operation.baseRevision >= 0 else {
             throw SyncError.invalidOperation
