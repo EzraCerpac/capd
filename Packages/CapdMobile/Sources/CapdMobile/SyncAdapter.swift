@@ -190,6 +190,8 @@ public actor MobileSyncCoordinator {
                     } catch {
                         iconIssue = WebsiteIconSyncIssue(error: error)
                     }
+                } else if store.libraryBinding != nil {
+                    iconIssue = .unsupportedServer
                 }
             } else {
                 return SyncResult.unconfigured
