@@ -85,6 +85,76 @@ struct LibraryAnswerServiceTests {
         }
     }
 
+    @Test(
+        "Sources changed during awaited generation require a new answer",
+        arguments: ["edit", "delete", "revision", "unchanged"])
+    func revalidatesSources(change: String) async throws {
+        try await withAnswerStore { store in
+            let id = try insert(
+                Capture(
+                    kind: .text, title: "Hiking", selection: "Pack water and a warm jacket.",
+                    createdAt: Date()),
+                into: store)
+            _ = try insert(
+                Capture(
+                    kind: .text, title: "Hiking backup", selection: "Carry a map while hiking.",
+                    createdAt: Date(timeIntervalSince1970: 1)),
+                into: store)
+            let model = StubAnswerModel { _, sources in
+                #expect(sources.count == 2)
+                await Task.yield()
+                try await store.dbPool.write { db in
+                    switch change {
+                    case "edit":
+                        try db.execute(
+                            sql: "UPDATE captures SET selection = ? WHERE id = ?",
+                            arguments: ["Changed while answering", id])
+                    case "delete":
+                        try db.execute(sql: "DELETE FROM captures WHERE id = ?", arguments: [id])
+                    case "revision":
+                        try db.execute(
+                            sql: "UPDATE captures SET updated_at = ? WHERE id = ?",
+                            arguments: [Date(timeIntervalSince1970: 1), id])
+                    default: break
+                    }
+                }
+                return LibraryAnswerDraft(statements: [
+                    .init(text: "Bring water, a warm layer, and a map.", sourceNumbers: [1, 2])
+                ])
+            }
+            let service = LibraryAnswerService(search: SearchService(store: store), model: model)
+            if change == "unchanged" {
+                let answer = try await service.answer("hiking")
+                #expect(answer.sources.map(\.captureID).contains(id))
+                #expect(answer.sources.count == 2)
+            } else {
+                await #expect(throws: LibraryAnswerError.evidenceChanged) {
+                    try await service.answer("hiking")
+                }
+            }
+        }
+    }
+
+    @Test("A canceled model completion never publishes an answer")
+    func canceledGeneration() async throws {
+        try await withAnswerStore { store in
+            _ = try insert(
+                Capture(
+                    kind: .text, title: "Hiking", selection: "Pack water and a warm jacket.",
+                    createdAt: Date()),
+                into: store)
+            let model = StubAnswerModel { _, _ in
+                withUnsafeCurrentTask { $0?.cancel() }
+                return LibraryAnswerDraft(statements: [
+                    .init(text: "Bring water.", sourceNumbers: [1])
+                ])
+            }
+            let service = LibraryAnswerService(search: SearchService(store: store), model: model)
+            let task = Task { try await service.answer("hiking") }
+            await #expect(throws: CancellationError.self) { try await task.value }
+        }
+    }
+
     @Test("A question mark prefix is syntax, not part of retrieval")
     func questionPrefix() {
         #expect(
