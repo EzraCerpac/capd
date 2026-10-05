@@ -138,6 +138,36 @@ struct RetrievalLanguageAndMergeTests {
         #expect(excerpt.utf8.count <= GroundedAnswerService.excerptLimit)
     }
 
+    @Test func highestWeightCompletePassageSurvivesWhenNoPairFits() async throws {
+        let quote = "Orchids need filtered light to bloom."
+        let combined = String(repeating: "x", count: 800 - quote.utf8.count - 1) + " " + quote
+        let reader = QueryPassageRetriever(passages: [
+            "orchid light": combined,
+            "orchid": "orchid " + String(repeating: "a", count: 293),
+            "light": "light " + String(repeating: "b", count: 294),
+        ])
+        let answer = try await GroundedAnswerService(
+            retriever: reader, model: PassageQuoteModel(quote: quote)
+        ).answer("orchid light")
+        #expect(answer.sources.first?.source.excerpt == combined)
+        #expect(answer.sources.first?.source.excerpt.utf8.count == 800)
+    }
+
+    @Test func lateSpanishTopicRemainsInBoundedRetrievalQueries() async throws {
+        let question = "¿Podrías explicar toda la información que guardé acerca de las orquídeas?"
+        let quote = "Las orquídeas necesitan luz indirecta."
+        let terms = GroundedAnswerService.searchTerms(question)
+        #expect(terms.contains("orquídeas"))
+        #expect(terms.count <= 8)
+        #expect(Set(terms).count == terms.count)
+        let reader = QueryPassageRetriever(passages: ["orquídeas": quote])
+        let answer = try await GroundedAnswerService(
+            retriever: reader, model: PassageQuoteModel(quote: quote)
+        ).answer(question)
+        #expect(await reader.queries.contains("orquídeas"))
+        #expect(answer.statements.first?.citations.first?.quote == quote)
+    }
+
     @Test(arguments: [false, true])
     func citationsCannotBridgeDistinctFieldOrQueryPassages(separateQueries: Bool) async throws {
         let selection = "orchid overview."

@@ -259,3 +259,113 @@ func localAnswerRetrievalFindsLiteralWordsInsideContinuousSavedProse(query: Stri
     #expect(try mobile.search() == before)
     #expect(try mobile.pending() == pending)
 }
+
+@Test(arguments: ["水やり", "浇水"])
+func localAnswerCenteredMultibyteExcerptsRetainMatchedQuotesWithinByteBudget(query: String)
+    async throws
+{
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(
+        "capd-answer-byte-centered-\(UUID())")
+    defer { try? FileManager.default.removeItem(at: root) }
+    let url = root.appendingPathComponent("mobile.sqlite")
+    let mobile = try MobileStore(url: url)
+    let quote = "\(query)の記録には毎週少量の水を与えます"
+    let context = "これは保存した文章の前置きです"
+    let prose =
+        String(repeating: context, count: 150) + quote
+        + String(repeating: context, count: 150)
+    let saved = MobileCapture(kind: .text, title: "Saved observations", selection: prose)
+    try mobile.save(saved)
+    let pending = try mobile.pending()
+    let reader = try MobileAnswerRetrieval(databaseURL: url)
+    let evidence = try #require(try await reader.search(query, limit: 1).first)
+    #expect(evidence.excerpt.utf8.count <= GroundedAnswerService.excerptLimit)
+    #expect(evidence.excerpt.contains(quote))
+    let answer = try await GroundedAnswerService(
+        retriever: reader, model: LiteralEvidenceQuoteModel(quote: quote)
+    ).answer(query)
+    #expect(answer.sources.first?.source.excerpt.contains(quote) == true)
+    #expect(answer.statements.first?.citations.first?.quote == quote)
+    #expect(try mobile.pending() == pending)
+}
+
+@Test(arguments: [false, true])
+func localAnswerTitleFallbackSkipsWhitespaceOnlyEarlierFields(literal: Bool) async throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(
+        "capd-answer-whitespace-fallback-\(UUID())")
+    defer { try? FileManager.default.removeItem(at: root) }
+    let url = root.appendingPathComponent("mobile.sqlite")
+    let mobile = try MobileStore(url: url)
+    let query = literal ? "温室" : "orchid"
+    let quote = "Saved observations describe a river crossing."
+    let saved = MobileCapture(
+        kind: .text, title: literal ? "保存した温室の管理" : "Orchid guide",
+        selection: " \t\n ", note: "\t \u{3000}")
+    try mobile.save(saved)
+    let database = try DatabaseQueue(path: url.path)
+    try await database.write { db in
+        try db.execute(
+            sql: "UPDATE mobile_captures SET body=? WHERE id=?",
+            arguments: [quote, saved.id.uuidString])
+    }
+    let pending = try mobile.pending()
+    let reader = try MobileAnswerRetrieval(databaseURL: url)
+    let evidence = try #require(try await reader.search(query, limit: 1).first)
+    #expect(evidence.excerpt == quote)
+    let answer = try await GroundedAnswerService(
+        retriever: reader, model: LiteralEvidenceQuoteModel(quote: quote)
+    ).answer(query)
+    #expect(answer.sources.first?.source.id == saved.id.uuidString)
+    #expect(try mobile.pending() == pending)
+}
+
+@Test func localAnswerMatchingFieldsUseSnippetsWithoutFullColumnHighlightCalls() async throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(
+        "capd-answer-bounded-matches-\(UUID())")
+    defer { try? FileManager.default.removeItem(at: root) }
+    let url = root.appendingPathComponent("mobile.sqlite")
+    let mobile = try MobileStore(url: url)
+    let quote = "Orchids grow in the saved passage."
+    let prose =
+        String(repeating: "Synthetic introductory context. ", count: 512) + quote
+        + String(repeating: "Synthetic concluding context. ", count: 512)
+    let saved = MobileCapture(kind: .text, title: "Saved observations", selection: prose)
+    try mobile.save(saved)
+    let trace = AnswerQueryTrace()
+    var config = Configuration()
+    config.readonly = true
+    config.prepareDatabase { db in
+        db.trace { trace.append($0.description) }
+    }
+    let database = try DatabasePool(path: url.path, configuration: config)
+    let reader = MobileAnswerRetrieval(database: database)
+    let evidence = try #require(try await reader.search("orchid", limit: 1).first)
+    #expect(evidence.excerpt.contains(quote))
+    #expect(evidence.excerpt.utf8.count <= GroundedAnswerService.excerptLimit)
+    #expect(!trace.usesFullColumnHighlight)
+}
+
+@Test func localAnswerSnippetMarkersDoNotAlterSavedControlCharacters() async throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(
+        "capd-answer-verbatim-markers-\(UUID())")
+    defer { try? FileManager.default.removeItem(at: root) }
+    let url = root.appendingPathComponent("mobile.sqlite")
+    let mobile = try MobileStore(url: url)
+    let quote = "Saved \u{1}orchid care uses filtered light."
+    try mobile.save(MobileCapture(kind: .text, title: "Saved observations", selection: quote))
+    let reader = try MobileAnswerRetrieval(databaseURL: url)
+    #expect(try await reader.search("orchid", limit: 1).first?.excerpt == quote)
+    let answer = try await GroundedAnswerService(
+        retriever: reader, model: LiteralEvidenceQuoteModel(quote: quote)
+    ).answer("orchid")
+    #expect(answer.statements.first?.citations.first?.quote == quote)
+}
+
+private final class AnswerQueryTrace: @unchecked Sendable {
+    private let lock = NSLock()
+    private var statements: [String] = []
+    var usesFullColumnHighlight: Bool {
+        lock.withLock { statements.contains { $0.lowercased().contains("highlight(") } }
+    }
+    func append(_ statement: String) { lock.withLock { statements.append(statement) } }
+}

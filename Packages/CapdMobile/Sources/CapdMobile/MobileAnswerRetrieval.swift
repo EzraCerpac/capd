@@ -59,30 +59,20 @@ public actor MobileAnswerRetrieval: AnswerRetrieving {
                 db,
                 sql: """
                     SELECT mobile_captures.id, mobile_captures.title,
-                        CASE WHEN highlight(mobile_captures_fts, 1, '', '|') != mobile_captures.selection
-                            THEN snippet(mobile_captures_fts, 1, '', '', '', 64) END AS selectionExcerpt,
+                        snippet(mobile_captures_fts, 1, '', '', '', 64) AS selectionExcerpt,
                         snippet(mobile_captures_fts, 1, char(1), '', '', 64) AS selectionHighlighted,
-                        CASE WHEN highlight(mobile_captures_fts, 2, '', '|') != mobile_captures.note
-                            THEN snippet(mobile_captures_fts, 2, '', '', '', 64) END AS noteExcerpt,
+                        snippet(mobile_captures_fts, 2, '', '', '', 64) AS noteExcerpt,
                         snippet(mobile_captures_fts, 2, char(1), '', '', 64) AS noteHighlighted,
-                        CASE WHEN highlight(mobile_captures_fts, 5, '', '|') != coalesce(mobile_captures.body, '')
-                            THEN snippet(mobile_captures_fts, 5, '', '', '', 64) END AS bodyExcerpt,
+                        snippet(mobile_captures_fts, 5, '', '', '', 64) AS bodyExcerpt,
                         snippet(mobile_captures_fts, 5, char(1), '', '', 64) AS bodyHighlighted,
-                        CASE WHEN highlight(mobile_captures_fts, 6, '', '|') != coalesce(mobile_captures.ocrText, '')
-                            THEN snippet(mobile_captures_fts, 6, '', '', '', 64) END AS ocrTextExcerpt,
-                        snippet(mobile_captures_fts, 6, char(1), '', '', 64) AS ocrTextHighlighted,
-                        snippet(mobile_captures_fts,
-                            CASE
-                                WHEN length(mobile_captures.selection) > 0 THEN 1
-                                WHEN length(mobile_captures.note) > 0 THEN 2
-                                WHEN length(coalesce(mobile_captures.body, '')) > 0 THEN 5
-                                ELSE 6
-                            END, '', '', '', 64) AS fallbackExcerpt
+                        snippet(mobile_captures_fts, 6, '', '', '', 64) AS ocrTextExcerpt,
+                        snippet(mobile_captures_fts, 6, char(1), '', '', 64) AS ocrTextHighlighted
                     FROM mobile_captures_fts
                     JOIN mobile_captures ON mobile_captures.localID = mobile_captures_fts.rowid
                     WHERE mobile_captures_fts MATCH ?
-                        AND length(mobile_captures.selection || mobile_captures.note ||
-                            coalesce(mobile_captures.body, '') || coalesce(mobile_captures.ocrText, '')) > 0
+                        AND (length(mobile_captures.selection) > 0 OR length(mobile_captures.note) > 0
+                            OR length(coalesce(mobile_captures.body, '')) > 0
+                            OR length(coalesce(mobile_captures.ocrText, '')) > 0)
                     ORDER BY bm25(mobile_captures_fts), mobile_captures.createdAt DESC,
                         mobile_captures.localID DESC LIMIT ?
                     """, arguments: [prosePattern, cap])
@@ -143,39 +133,72 @@ public actor MobileAnswerRetrieval: AnswerRetrieving {
             }
             let excerpt =
                 fields.isEmpty
-                ? String(
-                    (prose.first { !$0.isEmpty } ?? "").prefix(GroundedAnswerService.excerptLimit))
+                ? Self.fallbackExcerpt(prose)
                 : Self.joinedExcerpt(fields)
             return AnswerEvidence(id: row["id"], title: row["title"], excerpt: excerpt)
         }
     }
 
     private static func excerpt(_ row: Row) -> String {
-        let fields = ["selection", "note", "body", "ocrText"].compactMap {
-            field -> (
-                text: String, matchOffset: Int
-            )? in
-            guard let text: String = row["\(field)Excerpt"] else { return nil }
-            let highlighted: String = row["\(field)Highlighted"]
+        let names = ["selection", "note", "body", "ocrText"]
+        let prose = names.map { (row["\($0)Excerpt"] as String?) ?? "" }
+        let fields = names.compactMap { field -> (text: String, matchOffset: Int)? in
+            let text = (row["\(field)Excerpt"] as String?) ?? ""
+            let highlighted = (row["\(field)Highlighted"] as String?) ?? ""
+            guard text != highlighted else { return nil }
             return (text: text, matchOffset: zip(text, highlighted).prefix { $0 == $1 }.count)
         }
-        guard !fields.isEmpty else {
-            return String(
-                (row["fallbackExcerpt"] as String).prefix(GroundedAnswerService.excerptLimit))
-        }
-        return joinedExcerpt(fields)
+        return fields.isEmpty ? fallbackExcerpt(prose) : joinedExcerpt(fields)
+    }
+
+    private static func fallbackExcerpt(_ prose: [String]) -> String {
+        let text =
+            prose.lazy.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .first { !$0.isEmpty } ?? ""
+        return centeredExcerpt(text, matchOffset: 0, byteLimit: GroundedAnswerService.excerptLimit)
     }
 
     private static func joinedExcerpt(_ fields: [(text: String, matchOffset: Int)]) -> String {
         let separator = "\n\n"
-        var remaining = GroundedAnswerService.excerptLimit - separator.count * (fields.count - 1)
+        var remaining =
+            GroundedAnswerService.excerptLimit - separator.utf8.count * (fields.count - 1)
         let excerpts = fields.enumerated().map { index, field in
             let limit = remaining / (fields.count - index)
-            let start = max(0, min(field.matchOffset - limit / 2, field.text.count - limit))
-            let excerpt = String(field.text.dropFirst(start).prefix(limit))
-            remaining -= excerpt.count
+            let excerpt = centeredExcerpt(
+                field.text, matchOffset: field.matchOffset, byteLimit: limit)
+            remaining -= excerpt.utf8.count
             return excerpt
         }
         return excerpts.joined(separator: separator)
+    }
+
+    private static func centeredExcerpt(_ text: String, matchOffset: Int, byteLimit: Int) -> String
+    {
+        let match = text.index(text.startIndex, offsetBy: min(matchOffset, text.count))
+        var start = match
+        var end = match
+        var bytes = 0
+        while start > text.startIndex {
+            let previous = text.index(before: start)
+            let cost = text[previous..<start].utf8.count
+            guard bytes + cost <= byteLimit / 2 else { break }
+            start = previous
+            bytes += cost
+        }
+        while end < text.endIndex {
+            let next = text.index(after: end)
+            let cost = text[end..<next].utf8.count
+            guard bytes + cost <= byteLimit else { break }
+            end = next
+            bytes += cost
+        }
+        while start > text.startIndex {
+            let previous = text.index(before: start)
+            let cost = text[previous..<start].utf8.count
+            guard bytes + cost <= byteLimit else { break }
+            start = previous
+            bytes += cost
+        }
+        return String(text[start..<end])
     }
 }
