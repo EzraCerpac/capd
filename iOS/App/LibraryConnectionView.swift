@@ -151,7 +151,8 @@ struct LibraryConnectionView: View {
                             }
                         }
                         .disabled(
-                            connection.busy || !authorized || credential.isEmpty
+                            connection.busy || !authorized
+                                || (credential.isEmpty && !connection.hasPendingCredentialRecovery)
                                 || (!archiveOriginal && preparation.captureCount > 0
                                     && (!reviewed || !connection.hasReceipt
                                         || reviewHash.isEmpty || receiptHash.isEmpty))

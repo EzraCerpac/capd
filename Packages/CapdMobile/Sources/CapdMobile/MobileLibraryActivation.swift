@@ -145,30 +145,63 @@ public struct MobileLibraryActivation: Sendable {
         return preparation
     }
 
-    /// Read and validate the retained preparation so activation can resume after app termination.
+    /// Decode the newest valid preparation among eight candidates; incomplete backups remain archived.
     public func preparations() throws -> [MobileLibraryPreparation] {
         let base = root.appendingPathComponent("ConnectionBackups")
         guard FileManager.default.fileExists(atPath: base.path) else { return [] }
-        return try FileManager.default.contentsOfDirectory(
+        let candidates = try FileManager.default.contentsOfDirectory(
             at: base, includingPropertiesForKeys: nil
-        )
-        .compactMap { directory in
+        ).compactMap { directory -> (URL, Date)? in
             guard UUID(uuidString: directory.lastPathComponent) != nil else { return nil }
-            guard
-                FileManager.default.fileExists(
-                    atPath: directory.appendingPathComponent("preparation.json").path)
-                // An interrupted preparation is retained but never offered for activation.
+            let file = directory.appendingPathComponent("preparation.json")
+            guard let values = try? file.resourceValues(forKeys: [.contentModificationDateKey])
             else { return nil }
-            let value = try JSONDecoder().decode(
-                MobileLibraryPreparation.self,
-                from: Self.readBounded(
-                    directory.appendingPathComponent("preparation.json"),
-                    maximum: 32 * 1_024 * 1_024))
-            guard value.backupID.uuidString == directory.lastPathComponent else {
-                throw MobileActivationError.invalidConfiguration
-            }
-            return value
-        }.sorted { $0.createdAt < $1.createdAt }
+            return (file, values.contentModificationDate ?? .distantPast)
+        }.sorted {
+            $0.1 == $1.1 ? $0.0.path > $1.0.path : $0.1 > $1.1
+        }
+        for (file, _) in candidates.prefix(8) {
+            guard
+                let value = try? JSONDecoder().decode(
+                    MobileLibraryPreparation.self,
+                    from: Self.readBounded(file, maximum: 32 * 1_024 * 1_024)),
+                value.version == 1,
+                value.backupID.uuidString == file.deletingLastPathComponent().lastPathComponent
+            else { continue }
+            return [value]
+        }
+        return []
+    }
+
+    /// Nonsecret journal availability; the stored credential is verified only during explicit activation.
+    public func hasPendingCredentialRecovery(for preparation: MobileLibraryPreparation) throws
+        -> Bool
+    {
+        try credentialAttempt(for: preparation) != nil
+    }
+
+    private struct CredentialAttempt: Codable {
+        let backupID: UUID
+        let enrollment: SyncEnrollment
+        let manifestDigest: String
+        let sourceStateDigest: String
+        let credentialDigest: String
+    }
+
+    private func credentialAttempt(for preparation: MobileLibraryPreparation) throws
+        -> CredentialAttempt?
+    {
+        let file = preparation.directory(in: root).appendingPathComponent(
+            "activation-credential.json")
+        guard FileManager.default.fileExists(atPath: file.path) else { return nil }
+        let attempt = try JSONDecoder().decode(
+            CredentialAttempt.self, from: Self.readBounded(file, maximum: 8 * 1_024))
+        guard attempt.backupID == preparation.backupID,
+            attempt.enrollment == preparation.enrollment,
+            attempt.manifestDigest == preparation.manifestDigest,
+            attempt.sourceStateDigest == preparation.sourceStateDigest
+        else { throw MobileActivationError.invalidConfiguration }
+        return attempt
     }
 
     public func validate(_ handoff: MobileReviewedImport, for preparation: MobileLibraryPreparation)
@@ -292,8 +325,17 @@ public struct MobileLibraryActivation: Sendable {
             throw SyncBindingError.mismatch
         }
         // Validate the credential in isolated memory; no Keychain write until preflight succeeds.
+        var activationCredential = credential
+        if let attempt = try credentialAttempt(for: preparation),
+            let stored = try? credentials.read(for: enrollment)
+        {
+            guard BlobReference(data: Data(stored.utf8)).digest == attempt.credentialDigest else {
+                throw SyncConnectionError.invalidCredential
+            }
+            activationCredential = stored
+        }
         let temporary = MemorySyncCredentialStore()
-        try temporary.save(credential, for: enrollment)
+        try temporary.save(activationCredential, for: enrollment)
         let readCredential: @Sendable () throws -> String = { try temporary.read(for: enrollment) }
         let baseline = try await remote.importBaseline(
             credential: readCredential,
@@ -335,6 +377,8 @@ public struct MobileLibraryActivation: Sendable {
                 to: preparation.directory(in: root).appendingPathComponent("import-receipt.json"),
                 options: .atomic)
         }
+        let attemptFile = preparation.directory(in: root).appendingPathComponent(
+            "activation-credential.json")
         var credentialWritten = false
         var published = false
         do {
@@ -343,8 +387,16 @@ public struct MobileLibraryActivation: Sendable {
             guard let creator = credentials as? any SyncCredentialCreationStore else {
                 throw SyncConnectionError.credentialUnavailable
             }
-            credentialWritten = try creator.insertIfAbsent(credential, for: enrollment)
-            guard try credentials.read(for: enrollment) == credential else {
+            let attempt = CredentialAttempt(
+                backupID: preparation.backupID, enrollment: enrollment,
+                manifestDigest: preparation.manifestDigest,
+                sourceStateDigest: preparation.sourceStateDigest,
+                credentialDigest: BlobReference(data: Data(activationCredential.utf8)).digest)
+            try Self.encode(attempt).write(
+                to: attemptFile,
+                options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
+            credentialWritten = try creator.insertIfAbsent(activationCredential, for: enrollment)
+            guard try credentials.read(for: enrollment) == activationCredential else {
                 throw SyncConnectionError.credentialUnavailable
             }
             published = true  // Atomic write could succeed before reporting an I/O failure.
@@ -360,6 +412,7 @@ public struct MobileLibraryActivation: Sendable {
             guard try MobileLibraryAccess.selected(in: root) == next else {
                 throw MobileActivationError.invalidConfiguration
             }
+            try? FileManager.default.removeItem(at: attemptFile)
             return next
         } catch {
             if published {
@@ -371,6 +424,7 @@ public struct MobileLibraryActivation: Sendable {
                 do { try credentials.remove(for: enrollment) } catch {
                     throw MobileActivationError.credentialCleanupRequired
                 }
+                try? FileManager.default.removeItem(at: attemptFile)
             }
             throw error
         }
@@ -391,6 +445,7 @@ public struct MobileLibraryActivation: Sendable {
             } else {
                 guard !record.deleted, record.source.kind == item.source.source.kind,
                     record.source.contentHash == item.source.source.contentHash,
+                    record.source.kind != .image || record.source.blob == item.source.source.blob,
                     record.seenCount >= item.proposedSeenCount,
                     Set(record.manualTags).isSuperset(of: item.source.manualTags)
                 else { throw MobileActivationError.missingImport }

@@ -84,7 +84,11 @@ private struct ActivationFixture {
         let receipt = try server.importContentSnapshot(preparation.snapshot, preview: preview)
         let review = MobileSnapshotReview(
             version: 1, authorityDirectory: "/synthetic/authority",
-            snapshotSHA256: preparation.manifestFileDigest, assets: [], preview: preview)
+            snapshotSHA256: preparation.manifestFileDigest,
+            assets: preparation.snapshot.captures.compactMap(\.source.blob).sorted {
+                $0.digest < $1.digest
+            },
+            preview: preview)
         let r = try encoded(review)
         let c = try encoded(receipt)
         return try MobileReviewedImport(
@@ -451,7 +455,7 @@ func emptyLibraryConnectsWithoutInventingSnapshotImportAndAliasesReturnCanonical
     // Rollback owns only newly created credentials; it must retain a prior identical attempt.
     #expect(try f.credentials.read(for: prep.enrollment) == "synthetic-activation-only")
     _ = try await f.activation.activate(
-        prep, handoff: handoff, credential: "synthetic-activation-only",
+        prep, handoff: handoff, credential: "",
         transport: ActivationRemote(server, prep.enrollment))
 }
 
@@ -801,4 +805,250 @@ func activationWithoutReviewedImportUsesSummaryPreflights(archiveOriginal: Bool)
     #expect(limits.count >= 2)
     #expect(limits.first == 100)
     #expect(limits.last == 100)
+}
+
+@Test(arguments: [false, true])
+func activationRejectsChangedReviewedImageBlob(changed: Bool) async throws {
+    let f = ActivationFixture()
+    defer { f.clean() }
+    let app = try MobileLibrarySession.open(root: f.root, role: .app, credentials: f.credentials)
+    let old = try SyncServer(
+        databaseURL: f.root.appendingPathComponent("image.sqlite"),
+        blobDirectory: f.root.appendingPathComponent("image-assets"))
+    let bytes = Data("reviewed synthetic image".utf8)
+    let blob = BlobReference(data: bytes)
+    try old.upload(blob, offset: 0, chunk: bytes, final: true)
+    let image = SharedCapture(
+        source: CaptureSource(kind: .image, contentHash: blob.digest, blob: blob))
+    _ = try old.apply(
+        SyncOperation(
+            deviceID: UUID(), sequence: 1, captureID: image.id, baseRevision: 0,
+            mutation: .create(image)))
+    try app.store.pull(from: old)
+    let prep = try f.activation.prepare(endpoint: f.endpoint, binding: f.binding)
+    let server = try f.authority()
+    try server.upload(blob, offset: 0, chunk: bytes, final: true)
+    let handoff = try f.handoff(prep, server: server)
+    if changed {
+        let replacement = Data("different synthetic image".utf8)
+        let otherBlob = BlobReference(data: replacement)
+        try server.upload(otherBlob, offset: 0, chunk: replacement, final: true)
+        var record = try #require(server.baseline().captures.first)
+        record.source.blob = otherBlob
+        let db = try DatabaseQueue(path: f.root.appendingPathComponent("new-authority.sqlite").path)
+        let changedRecord = record
+        try await db.write { try SyncDatabase.save($0, changedRecord) }
+        await #expect(throws: MobileActivationError.missingImport) {
+            try await f.activation.activate(
+                prep, handoff: handoff, credential: "synthetic-activation-only",
+                transport: ActivationRemote(server, prep.enrollment))
+        }
+        #expect(try MobileLibraryAccess.selected(in: f.root) == .legacy)
+        #expect(throws: SyncConnectionError.credentialUnavailable) {
+            try f.credentials.read(for: prep.enrollment)
+        }
+    } else {
+        _ = try await f.activation.activate(
+            prep, handoff: handoff, credential: "synthetic-activation-only",
+            transport: ActivationRemote(server, prep.enrollment))
+        let session = try MobileLibrarySession.open(
+            root: f.root, role: .app, credentials: f.credentials)
+        let record = try #require(
+            session.store.contentSnapshotImport(snapshotID: UUID(), targetBinding: f.binding)
+                .captures.first)
+        #expect(record.source.blob == blob)
+    }
+}
+
+@Test(arguments: [false, true])
+func activationDiscoveryLoadsOnlyNewestRetainedPreparation(corruptOlder: Bool) throws {
+    let f = ActivationFixture()
+    defer { f.clean() }
+    _ = try f.populated()
+    let older = try f.activation.prepare(endpoint: f.endpoint, binding: f.binding)
+    let newest = try f.activation.prepare(endpoint: f.endpoint, binding: f.binding)
+    let olderFile = older.directory(in: f.root).appendingPathComponent("preparation.json")
+    if corruptOlder { try Data("incomplete prior preparation".utf8).write(to: olderFile) }
+    try FileManager.default.setAttributes(
+        [.modificationDate: Date(timeIntervalSince1970: 1)], ofItemAtPath: olderFile.path)
+    #expect(try f.activation.preparations() == [newest])
+}
+
+@Test(arguments: ["", "newly-generated-synthetic-credential"])
+func activationResumesJournaledCredentialAfterPrepublicationTermination(credential: String)
+    async throws
+{
+    let f = ActivationFixture()
+    defer { f.clean() }
+    _ = try f.populated()
+    let prep = try f.activation.prepare(endpoint: f.endpoint, binding: f.binding)
+    let server = try f.authority()
+    let handoff = try f.handoff(prep, server: server)
+    let credentials = InterruptedInsertionCredentials(store: f.credentials)
+    let first = MobileLibraryActivation(root: f.root, credentials: credentials)
+    await #expect(throws: SyncHTTPError.unavailable) {
+        try await first.activate(
+            prep, handoff: handoff, credential: "synthetic-activation-only",
+            transport: ActivationRemote(server, prep.enrollment))
+    }
+    #expect(try f.credentials.read(for: prep.enrollment) == "synthetic-activation-only")
+    #expect(try MobileLibraryAccess.selected(in: f.root) == .legacy)
+    let reopened = MobileLibraryActivation(root: f.root, credentials: credentials)
+    let reads = credentials.readCount
+    #expect(try reopened.hasPendingCredentialRecovery(for: prep))
+    #expect(credentials.readCount == reads)
+    _ = try await reopened.activate(
+        prep, handoff: handoff, credential: credential,
+        transport: ActivationRemote(server, prep.enrollment))
+    #expect(try f.credentials.read(for: prep.enrollment) == "synthetic-activation-only")
+    #expect(try MobileLibraryAccess.selected(in: f.root).enrollment == prep.enrollment)
+    #expect(try !reopened.hasPendingCredentialRecovery(for: prep))
+}
+
+private final class InterruptedInsertionCredentials: SyncCredentialCreationStore,
+    @unchecked Sendable
+{
+    let store: MemorySyncCredentialStore
+    private let lock = NSLock()
+    private var interrupted = false
+    private var reads = 0
+    var readCount: Int { lock.withLock { reads } }
+    init(store: MemorySyncCredentialStore) { self.store = store }
+    func read(for enrollment: SyncEnrollment) throws -> String {
+        lock.withLock { reads += 1 }
+        return try store.read(for: enrollment)
+    }
+    func save(_ credential: String, for enrollment: SyncEnrollment) throws {
+        try store.save(credential, for: enrollment)
+    }
+    func remove(for enrollment: SyncEnrollment) throws { try store.remove(for: enrollment) }
+    func insertIfAbsent(_ credential: String, for enrollment: SyncEnrollment) throws -> Bool {
+        let created = try store.insertIfAbsent(credential, for: enrollment)
+        let interrupt = lock.withLock {
+            if interrupted { return false }
+            interrupted = true
+            return true
+        }
+        if interrupt { throw SyncHTTPError.unavailable }
+        return created
+    }
+}
+
+@Test(arguments: [
+    "backupID", "enrollment", "manifestDigest", "sourceStateDigest", "credentialDigest",
+])
+func activationRefusesTamperedCredentialRecoveryScope(field: String) async throws {
+    let f = ActivationFixture()
+    defer { f.clean() }
+    _ = try f.populated()
+    let prep = try f.activation.prepare(endpoint: f.endpoint, binding: f.binding)
+    let server = try f.authority()
+    let handoff = try f.handoff(prep, server: server)
+    try f.credentials.save("synthetic-activation-only", for: prep.enrollment)
+    var journal = try #require(
+        JSONSerialization.jsonObject(with: activationJournal(prep)) as? [String: Any])
+    if field == "enrollment" {
+        var enrollment = try #require(journal[field] as? [String: Any])
+        enrollment["deviceID"] = UUID().uuidString
+        journal[field] = enrollment
+    } else {
+        journal[field] = field == "backupID" ? UUID().uuidString : String(repeating: "0", count: 64)
+    }
+    try JSONSerialization.data(withJSONObject: journal, options: .sortedKeys).write(
+        to: prep.directory(in: f.root).appendingPathComponent("activation-credential.json"),
+        options: .atomic)
+    await #expect(throws: (any Error).self) {
+        try await f.activation.activate(
+            prep, handoff: handoff, credential: "synthetic-activation-only",
+            transport: ActivationRemote(server, prep.enrollment))
+    }
+    #expect(try f.credentials.read(for: prep.enrollment) == "synthetic-activation-only")
+    #expect(try MobileLibraryAccess.selected(in: f.root) == .legacy)
+}
+
+@Test func activationDiscoverySkipsCorruptLatestAndBreaksTimestampTiesDeterministically() throws {
+    let f = ActivationFixture()
+    defer { f.clean() }
+    _ = try f.populated()
+    let first = try f.activation.prepare(endpoint: f.endpoint, binding: f.binding)
+    let second = try f.activation.prepare(endpoint: f.endpoint, binding: f.binding)
+    let third = try f.activation.prepare(endpoint: f.endpoint, binding: f.binding)
+    let date = Date(timeIntervalSince1970: 1)
+    for prep in [first, second] {
+        try FileManager.default.setAttributes(
+            [.modificationDate: date],
+            ofItemAtPath: prep.directory(in: f.root).appendingPathComponent("preparation.json").path
+        )
+    }
+    try Data("incomplete latest preparation".utf8).write(
+        to: third.directory(in: f.root).appendingPathComponent("preparation.json"))
+    let expected = [first, second].max { $0.backupID.uuidString < $1.backupID.uuidString }
+    #expect(try f.activation.preparations().first == expected)
+    #expect(try f.activation.preparations().count == 1)
+}
+
+@Test func activationJournalsCredentialBeforeAtomicInsertion() async throws {
+    let f = ActivationFixture()
+    defer { f.clean() }
+    _ = try MobileLibrarySession.open(root: f.root, role: .app, credentials: f.credentials)
+    let prep = try f.activation.prepare(endpoint: f.endpoint, binding: f.binding)
+    let server = try f.authority()
+    let credentials = JournalCheckingCredentials(
+        store: f.credentials,
+        journal: prep.directory(in: f.root).appendingPathComponent("activation-credential.json"))
+    let activation = MobileLibraryActivation(root: f.root, credentials: credentials)
+    _ = try await activation.activate(
+        prep, handoff: nil, credential: "synthetic-activation-only",
+        transport: ActivationRemote(server, prep.enrollment))
+    #expect(try f.credentials.read(for: prep.enrollment) == "synthetic-activation-only")
+}
+
+private struct JournalCheckingCredentials: SyncCredentialCreationStore {
+    let store: MemorySyncCredentialStore
+    let journal: URL
+    func read(for enrollment: SyncEnrollment) throws -> String { try store.read(for: enrollment) }
+    func save(_ credential: String, for enrollment: SyncEnrollment) throws {
+        try store.save(credential, for: enrollment)
+    }
+    func remove(for enrollment: SyncEnrollment) throws { try store.remove(for: enrollment) }
+    func insertIfAbsent(_ credential: String, for enrollment: SyncEnrollment) throws -> Bool {
+        let digest = BlobReference(data: Data(credential.utf8)).digest
+        let bytes = try Data(contentsOf: journal)
+        let object = try #require(JSONSerialization.jsonObject(with: bytes) as? [String: Any])
+        #expect(bytes.range(of: Data(credential.utf8)) == nil)
+        guard object["credentialDigest"] as? String == digest else {
+            throw SyncConnectionError.invalidCredential
+        }
+        return try store.insertIfAbsent(credential, for: enrollment)
+    }
+}
+
+private func activationJournal(_ preparation: MobileLibraryPreparation) throws -> Data {
+    let scope = try #require(
+        JSONSerialization.jsonObject(with: encoded(preparation.enrollment)) as? [String: Any])
+    return try JSONSerialization.data(
+        withJSONObject: [
+            "backupID": preparation.backupID.uuidString,
+            "enrollment": scope,
+            "manifestDigest": preparation.manifestDigest,
+            "sourceStateDigest": preparation.sourceStateDigest,
+            "credentialDigest": BlobReference(data: Data("synthetic-activation-only".utf8)).digest,
+        ], options: .sortedKeys)
+}
+
+@Test func activationDiscoveryBoundsCorruptCandidateFallback() throws {
+    let f = ActivationFixture()
+    defer { f.clean() }
+    _ = try f.populated()
+    let prep = try f.activation.prepare(endpoint: f.endpoint, binding: f.binding)
+    try FileManager.default.setAttributes(
+        [.modificationDate: Date(timeIntervalSince1970: 1)],
+        ofItemAtPath: prep.directory(in: f.root).appendingPathComponent("preparation.json").path)
+    for _ in 0..<9 {
+        let directory = f.root.appendingPathComponent("ConnectionBackups/\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        try Data("incomplete newer preparation".utf8).write(
+            to: directory.appendingPathComponent("preparation.json"))
+    }
+    #expect(try f.activation.preparations().isEmpty)
 }
