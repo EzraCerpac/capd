@@ -82,7 +82,7 @@ private let supportedDraft = AnswerDraft(statements: [
     let citations: [AnswerDraft.Citation] = [
         .init(number: 1, quote: "a warm jacket."),
         .init(number: 1, quote: "Pack water"),
-        .init(number: 1, quote: "Pack\nwater"),
+        .init(number: 1, quote: "\nPack water\t"),
         .init(number: 2, quote: "Pack water"),
         .init(number: 1, quote: "a warm jacket."),
     ]
@@ -277,13 +277,13 @@ func sourceTitlesHaveIndependentUnicodeByteBounds(title: String) async throws {
     #expect(await reader.limits.allSatisfy { $0 == 12 })
 }
 
-@Test func quotedWhitespaceIsNormalizedButWordsCannotChange() async throws {
+@Test func quoteOuterWhitespaceIsTrimmedButWordsCannotChange() async throws {
     let model = Model(
         draft: .init(statements: [
             .init(
                 text: "Bring layers.",
                 citations: [
-                    .init(number: 1, quote: "water\n and a warm jacket.")
+                    .init(number: 1, quote: "\nwater and a warm jacket.\t")
                 ])
         ]))
     let result = try await GroundedAnswerService(retriever: Retriever(), model: model).answer(

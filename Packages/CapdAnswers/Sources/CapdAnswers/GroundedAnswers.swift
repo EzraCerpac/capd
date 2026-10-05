@@ -218,7 +218,7 @@ public struct GroundedAnswerService: Sendable {
             else { return nil }
             var citations: [AnswerDraft.Citation] = []
             for citation in statement.citations {
-                let quote = Self.normalized(citation.quote)
+                let quote = citation.quote.trimmingCharacters(in: .whitespacesAndNewlines)
                 // Reject the whole statement if any purported source or verbatim support
                 // is invented. This verifies source membership and quotes, not entailment.
                 guard let source = byNumber[citation.number], !quote.isEmpty, quote.count <= 240,
@@ -300,7 +300,8 @@ public struct GroundedAnswerService: Sendable {
 
     private static func passages(_ excerpt: String, weight: Double) -> [Passage] {
         excerpt.components(separatedBy: "\n\n").compactMap {
-            let fragment = normalized(boundedPrefix($0, byteLimit: excerptLimit))
+            let fragment = boundedPrefix($0, byteLimit: excerptLimit).trimmingCharacters(
+                in: .whitespacesAndNewlines)
             return fragment.isEmpty
                 ? nil
                 : Passage(text: fragment, weight: weight, isTruncated: $0.utf8.count > excerptLimit)
@@ -348,9 +349,5 @@ public struct GroundedAnswerService: Sendable {
         }
         return selected.sorted { $0.offset < $1.offset }.map(\.element.text).joined(
             separator: separator)
-    }
-
-    static func normalized(_ text: String) -> String {
-        text.split(whereSeparator: \.isWhitespace).joined(separator: " ")
     }
 }
