@@ -115,6 +115,8 @@ enum SnapshotImport {
         var fingerprints: [Fingerprint: UUID] = [:]
         let authorityCursor = try Int64.fetchOne(
             db, sql: "SELECT cursor FROM sync_meta WHERE id=1")!
+        guard authorityCursor < Int64.max else { throw ContentSnapshotImportError.stalePreview }
+        var insertedCount = 0
         var items: [ContentSnapshotItemPreview] = []
         for incoming in snapshot.captures {
             let requested = try SyncDatabase.canonical(db, incoming.id)
@@ -144,31 +146,10 @@ enum SnapshotImport {
                         ? .insert : (tombstone ? .preserveTombstone : .merge),
                     differingFields: existing.map { differences($0, incoming) } ?? [],
                     proposedSeenCount: count, countIsExact: false))
-            if var current = existing {
-                if tombstone && !current.deleted {
-                    guard authorityCursor < Int64.max else {
-                        throw ContentSnapshotImportError.stalePreview
-                    }
-                    current.deleted = true
-                    current.revision = authorityCursor + 1
-                } else if !tombstone {
-                    current.seenCount = count
-                    current.manualTags = Array(Set(current.manualTags).union(incoming.manualTags))
-                        .sorted()
-                    for variant in incomingNotes(incoming)
-                    where !knownNotes(current).contains(variant.value) {
-                        if current.noteConflicts.isEmpty {
-                            current.noteConflicts.append(
-                                NoteVariant(
-                                    operationID: current.noteOperationID, value: current.note))
-                        }
-                        current.noteConflicts.append(variant)
-                    }
-                }
-                records[canonical] = current
-            } else {
-                records[canonical] = incoming
-            }
+            if existing == nil { insertedCount += 1 }
+            records[canonical] = prepareCapture(
+                existing: existing, incoming: incoming, cursor: authorityCursor + 1,
+                receiptID: incoming.noteOperationID, importNote: { $0 })
             if let fingerprint = Fingerprint(incoming.source),
                 fingerprints[fingerprint].map({ canonical.uuidString < $0.uuidString }) ?? true
             {
@@ -179,6 +160,11 @@ enum SnapshotImport {
         guard bytes.count <= SyncHTTPHandler.maximumBodyBytes else {
             throw ContentSnapshotImportError.invalidSnapshot
         }
+        try validateBaselineSize(
+            db, captures: records.values, cursor: authorityCursor + 1,
+            totalCaptureCount: try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM sync_records")!
+                + insertedCount,
+            snapshot: snapshot)
         return ContentSnapshotImportPreview(
             snapshotID: snapshot.snapshotID, digest: BlobReference(data: bytes).digest,
             targetBinding: snapshot.targetBinding, sourceDeviceID: snapshot.sourceDeviceID,
@@ -219,58 +205,25 @@ enum SnapshotImport {
             let incoming = item.source
             let receiptID = UUID()
             var importedNotes: [ContentSnapshotImportedNote] = []
-            if var current = try SyncDatabase.record(db, id: item.canonicalCaptureID) {
-                if item.disposition == .merge {
-                    current.seenCount = max(current.seenCount, incoming.seenCount)
-                    current.manualTags = Array(Set(current.manualTags).union(incoming.manualTags))
-                        .sorted()
-                    for variant in incomingNotes(incoming)
-                    where !knownNotes(current).contains(variant.value) {
-                        let newID = UUID()
-                        if current.noteConflicts.isEmpty {
-                            current.noteConflicts.append(
-                                NoteVariant(
-                                    operationID: current.noteOperationID, value: current.note))
-                        }
-                        current.noteConflicts.append(
-                            NoteVariant(
-                                operationID: newID, value: variant.value,
-                                unknownFields: variant.unknownFields))
-                        importedNotes.append(
-                            ContentSnapshotImportedNote(
-                                sourceOperationID: variant.operationID, importedVariantID: newID,
-                                value: variant.value))
-                    }
-                    if !importedNotes.isEmpty { current.noteRevision = cursor }
-                    current.revision = cursor
-                    try SyncDatabase.save(db, current)
-                } else if item.disposition == .preserveTombstone && !current.deleted {
-                    current.deleted = true
-                    current.revision = cursor
-                    try SyncDatabase.save(db, current)
-                }
-            } else {
-                var imported = incoming
-                imported.revision = cursor
-                imported.noteRevision =
-                    imported.note == nil && imported.noteConflicts.isEmpty ? 0 : cursor
-                imported.noteOperationID = receiptID
+            let current = try SyncDatabase.record(db, id: item.canonicalCaptureID)
+            if current == nil {
                 importedNotes.append(
                     ContentSnapshotImportedNote(
                         sourceOperationID: incoming.noteOperationID, importedVariantID: receiptID,
                         value: incoming.note))
-                imported.noteConflicts = incoming.noteConflicts.map { variant in
-                    let id = UUID()
-                    importedNotes.append(
-                        ContentSnapshotImportedNote(
-                            sourceOperationID: variant.operationID, importedVariantID: id,
-                            value: variant.value))
-                    return NoteVariant(
-                        operationID: id, value: variant.value, unknownFields: variant.unknownFields)
-                }
-                imported.manualTags = Array(Set(imported.manualTags)).sorted()
-                try SyncDatabase.save(db, imported)
             }
+            let prepared = prepareCapture(
+                existing: current, incoming: incoming, cursor: cursor, receiptID: receiptID
+            ) { variant in
+                let id = UUID()
+                importedNotes.append(
+                    ContentSnapshotImportedNote(
+                        sourceOperationID: variant.operationID, importedVariantID: id,
+                        value: variant.value))
+                return NoteVariant(
+                    operationID: id, value: variant.value, unknownFields: variant.unknownFields)
+            }
+            if current != prepared { try SyncDatabase.save(db, prepared) }
             if incoming.id != item.canonicalCaptureID {
                 try SyncDatabase.alias(db, incoming.id, to: item.canonicalCaptureID)
             }
@@ -297,6 +250,68 @@ enum SnapshotImport {
             sql: "INSERT INTO sync_content_snapshot_imports (id,payload) VALUES (?,?)",
             arguments: [snapshot.snapshotID.uuidString, try SyncDatabase.encode(retained)])
         return receipt
+    }
+
+    private static func prepareCapture(
+        existing: SharedCapture?, incoming: SharedCapture, cursor: Int64, receiptID: UUID,
+        importNote: (NoteVariant) -> NoteVariant
+    ) -> SharedCapture {
+        guard var current = existing else {
+            var imported = incoming
+            imported.revision = cursor
+            imported.noteRevision =
+                imported.note == nil && imported.noteConflicts.isEmpty ? 0 : cursor
+            imported.noteOperationID = receiptID
+            imported.noteConflicts = incoming.noteConflicts.map(importNote)
+            imported.manualTags = Array(Set(imported.manualTags)).sorted()
+            return imported
+        }
+        if current.deleted || incoming.deleted {
+            if !current.deleted {
+                current.deleted = true
+                current.revision = cursor
+            }
+            return current
+        }
+        current.seenCount = max(current.seenCount, incoming.seenCount)
+        current.manualTags = Array(Set(current.manualTags).union(incoming.manualTags)).sorted()
+        for variant in incomingNotes(incoming) where !knownNotes(current).contains(variant.value) {
+            if current.noteConflicts.isEmpty {
+                current.noteConflicts.append(
+                    NoteVariant(operationID: current.noteOperationID, value: current.note))
+            }
+            current.noteConflicts.append(importNote(variant))
+            current.noteRevision = cursor
+        }
+        current.revision = cursor
+        return current
+    }
+
+    private static func validateBaselineSize(
+        _ db: Database, captures: Dictionary<UUID, SharedCapture>.Values, cursor: Int64,
+        totalCaptureCount: Int, snapshot: ContentSnapshotImport
+    ) throws {
+        let sequences = try Dictionary(
+            uniqueKeysWithValues: Row.fetchAll(db, sql: "SELECT id, sequence FROM sync_devices")
+                .map { row in
+                    (UUID(uuidString: row["id"] as String)!, row["sequence"] as Int64)
+                })
+        let principal = SyncPrincipal(
+            serviceID: snapshot.targetBinding.serviceID,
+            libraryID: snapshot.targetBinding.libraryID, deviceID: snapshot.sourceDeviceID)
+        for capture in captures {
+            let reply = SyncHTTPReply(
+                version: 1, principal: principal,
+                result: .baseline(
+                    Baseline(
+                        cursor: cursor, captures: [capture], deviceSequences: sequences,
+                        totalCaptureCount: totalCaptureCount)),
+                metadataContractVersion: 1, generatedProcessingContractVersion: 1,
+                extractionQualityContractVersion: 1)
+            guard try SyncDatabase.encode(reply).count <= SyncHTTPHandler.maximumBodyBytes else {
+                throw SyncHTTPError.resourceLimit
+            }
+        }
     }
 
     private static func validate(_ snapshot: ContentSnapshotImport, binding: SyncLibraryBinding?)

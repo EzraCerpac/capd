@@ -6,6 +6,103 @@ import Testing
 
 @Suite("Explicit content snapshot imports")
 struct ContentSnapshotImportTests {
+    @Test func oversizedTagUnionRejectsImportWithoutChangingAuthority() throws {
+        let f = try SnapshotFixture()
+        defer { f.clean() }
+        var original = f.capture(id: f.duplicateID, hash: "duplicate")
+        original.manualTags = [String(repeating: "a", count: 9 * 1_048_576)]
+        var incoming = f.capture(id: f.phoneDuplicateID, hash: "duplicate")
+        incoming.manualTags = [String(repeating: "b", count: 9 * 1_048_576)]
+        let snapshot = f.snapshot([incoming])
+        let preview = try f.server.previewContentSnapshotImport(snapshot)
+        try f.server.apply(f.operation(original))
+        let importPreview = ContentSnapshotImportPreview(
+            snapshotID: snapshot.snapshotID, digest: preview.digest,
+            targetBinding: snapshot.targetBinding, sourceDeviceID: snapshot.sourceDeviceID,
+            authorityCursor: 1, authorityFloor: 0, feedRowsToExpire: 1,
+            countPolicy: snapshot.countPolicy,
+            items: [
+                ContentSnapshotItemPreview(
+                    source: incoming, authority: try f.server.baseline().captures.first,
+                    canonicalCaptureID: original.id, disposition: .merge,
+                    differingFields: [.manualTags], proposedSeenCount: 1, countIsExact: false)
+            ])
+        #expect(try SyncDatabase.encode(original).count < SyncHTTPHandler.maximumBodyBytes)
+        #expect(try SyncDatabase.encode(snapshot).count < SyncHTTPHandler.maximumBodyBytes)
+        var merged = original
+        merged.manualTags += incoming.manualTags
+        #expect(try SyncDatabase.encode(merged).count > SyncHTTPHandler.maximumBodyBytes)
+        let published = try f.server.blobs.put(Data("existing asset".utf8))
+        let partialData = Data("pending asset".utf8)
+        let partial = BlobReference(data: partialData)
+        try f.server.upload(partial, offset: 0, chunk: partialData.prefix(3), final: false)
+        let before = try f.logicalState()
+        let blobFiles = try FileManager.default.contentsOfDirectory(
+            atPath: f.server.blobs.directory.path)
+        #expect(throws: SyncHTTPError.resourceLimit) {
+            try f.server.previewContentSnapshotImport(snapshot)
+        }
+        #expect(throws: SyncHTTPError.resourceLimit) {
+            try f.server.importContentSnapshot(snapshot, preview: importPreview)
+        }
+        #expect(try f.logicalState() == before)
+        #expect(try f.tableExists("sync_content_snapshot_imports") == false)
+        #expect(try f.tableExists("sync_content_snapshot_expired_feed") == false)
+        #expect(try f.server.retainedContentSnapshotImport(snapshot.snapshotID) == nil)
+        #expect(
+            try FileManager.default.contentsOfDirectory(atPath: f.server.blobs.directory.path)
+                == blobFiles)
+        #expect(try f.server.blobs.read(published) == Data("existing asset".utf8))
+        #expect(
+            try Data(
+                contentsOf: f.server.blobs.directory.appendingPathComponent(
+                    partial.digest + ".partial"))
+                == partialData.prefix(3))
+        #expect(try f.transport(f.seedDevice).baseline().captures.count == 1)
+    }
+
+    @Test func tagMergeFitsOnlyWhenCompleteBaselineReplyFits() throws {
+        let f = try SnapshotFixture()
+        defer { f.clean() }
+        var original = f.capture(id: f.duplicateID, hash: "duplicate")
+        original.manualTags = ["Authority tag"]
+        let receipt = try f.server.apply(f.operation(original))
+        var merged = try #require(receipt.capture)
+        merged.revision += 1
+        merged.manualTags.append("")
+        let baseline = try f.server.baseline()
+        let overhead = try f.baselineReplyBytes(
+            merged, cursor: merged.revision, sequences: baseline.deviceSequences)
+        var incoming = f.capture(id: f.phoneDuplicateID, hash: "duplicate")
+        incoming.manualTags = [
+            String(repeating: "b", count: SyncHTTPHandler.maximumBodyBytes - overhead + 1)
+        ]
+        merged.manualTags[1] = incoming.manualTags[0]
+        #expect(try SyncDatabase.encode(merged).count < SyncHTTPHandler.maximumBodyBytes)
+        #expect(
+            try f.baselineReplyBytes(
+                merged, cursor: merged.revision, sequences: baseline.deviceSequences)
+                == SyncHTTPHandler.maximumBodyBytes + 1)
+        let tooLarge = f.snapshot([incoming])
+        #expect(try SyncDatabase.encode(tooLarge).count < SyncHTTPHandler.maximumBodyBytes)
+        let before = try f.logicalState()
+        #expect(throws: SyncHTTPError.resourceLimit) {
+            try f.server.previewContentSnapshotImport(tooLarge)
+        }
+        #expect(try f.logicalState() == before)
+        incoming.manualTags[0].removeLast()
+        let fits = f.snapshot([incoming])
+        let preview = try f.server.previewContentSnapshotImport(fits)
+        let imported = try f.server.importContentSnapshot(fits, preview: preview)
+        let recovered = try f.transport(f.seedDevice).baseline()
+        #expect(recovered.cursor == imported.authorityCursor)
+        #expect(recovered.captures.first?.manualTags == ["Authority tag", incoming.manualTags[0]])
+        #expect(
+            try f.baselineReplyBytes(
+                recovered.captures[0], cursor: recovered.cursor,
+                sequences: recovered.deviceSequences) == SyncHTTPHandler.maximumBodyBytes)
+    }
+
     @Test func previewPreservesConflictsAndImportsCountAsLowerBoundWithHonestNewReceipts() throws {
         let f = try SnapshotFixture()
         defer { f.clean() }
@@ -456,6 +553,25 @@ private struct SnapshotFixture {
             }
             return try Data.fetchAll(db, sql: "SELECT payload FROM sync_feed ORDER BY cursor")
         }
+    }
+
+    func baselineReplyBytes(_ capture: SharedCapture, cursor: Int64, sequences: [UUID: Int64])
+        throws
+        -> Int
+    {
+        try SyncDatabase.encode(
+            SyncHTTPReply(
+                version: 1,
+                principal: SyncPrincipal(
+                    serviceID: binding.serviceID, libraryID: binding.libraryID,
+                    deviceID: seedDevice),
+                result: .baseline(
+                    Baseline(
+                        cursor: cursor, captures: [capture], deviceSequences: sequences,
+                        totalCaptureCount: 1)),
+                metadataContractVersion: 1, generatedProcessingContractVersion: 1,
+                extractionQualityContractVersion: 1)
+        ).count
     }
 
     func outbox(_ name: String) throws -> [Data] {
