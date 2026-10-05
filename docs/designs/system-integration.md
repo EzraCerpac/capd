@@ -58,6 +58,24 @@ trimmed source selection with “Saved text.” Title origin is not stored, so a
 explicit title matching that prefix is conservatively redacted too. Source text
 and stored titles remain unchanged.
 
+Mac discovery selects identity, title, manual tags, a bounded text-selection
+prefix, revision, and host or URL only when needed for an untitled capture's
+fallback. Native rows omit body, OCR, notes, and enrichment payloads. Bound
+source fields and manual tags come from SQL JSON extraction rather than decoding
+complete shared captures in Swift. Before any JSON parsing, referenced canonical
+payloads are limited to 16 MiB each and 64 MiB together. Retained titles and hosts
+are limited to 4 KiB, manual-tag data to 16 KiB, each projected record to 32 KiB,
+and projected metadata to 8 MiB together. URLs needed for host fallback are kept
+exactly within that record budget; unused URLs, hosts, and generated tags are
+excluded. Text selections return at most 4 KiB; a shortened prefix must contain
+more than 80 trimmed graphemes to prove the derived-title boundary. An ambiguous
+prefix or oversized projection fails closed. The 1,000-record limit counts live
+canonical captures, preserving retained aliases and preferring directly canonical
+local rows. Missing or ambiguous identities fail closed. These budgets bound
+returned metadata and JSON parsing; SQL counting and alias grouping can still
+scan the library and do not establish a timing guarantee. Discovery does not
+change source data or mappings.
+
 Identifier batches resolve from one validated Mac snapshot. The unbound local
 library UUID follows the database file's filesystem device, inode, and creation
 time, persisted in preferences and checked for every snapshot. Database
