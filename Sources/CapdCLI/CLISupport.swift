@@ -2,6 +2,7 @@ import ArgumentParser
 import CapdKit
 import Darwin
 import Foundation
+import Synchronization
 
 /// A failure carrying one of the CLI's documented exit codes:
 /// 0 ok, 1 no results, 2 bad usage, 3 store unavailable, 4 agent not running.
@@ -29,12 +30,77 @@ func printToStderr(_ line: String) {
     FileHandle.standardError.write(Data((line + "\n").utf8))
 }
 
-func openStore() throws -> Store {
+func openStore(readOnly: Bool = false) throws -> Store {
+    if !readOnly {
+        let session = try openLibrarySession()
+        CLISyncSessions.remember(session)
+        return session.store
+    }
     do {
-        return try Store(paths: .live)
+        return try MacLibrarySession.readOnlyStore(paths: .live)
     } catch {
         throw CLIError(message: "The capture store is unavailable: \(describe(error))", code: 3)
     }
+}
+
+func openLibrarySession() throws -> MacLibrarySession {
+    do {
+        return try MacLibrarySession.open(paths: .live)
+    } catch {
+        throw CLIError(message: "The capture store is unavailable: \(describe(error))", code: 3)
+    }
+}
+
+enum CLISyncSessions {
+    private static let sessions = Mutex<[String: MacLibrarySession]>([:])
+
+    static func remember(_ session: MacLibrarySession) {
+        sessions.withLock { $0[session.store.paths.root.path] = session }
+    }
+
+    static func flush() {
+        let values = sessions.withLock { values in
+            let result = Array(values.values)
+            values.removeAll()
+            return result
+        }
+        for session in values {
+            guard let runtime = session.runtime else { continue }
+            let status = blocking { await flush(runtime, within: .seconds(5)) }
+            if let issue = status.issue { printToStderr(issue) }
+        }
+    }
+
+    static func flush(_ runtime: MacSyncRuntime, within timeout: Duration) async -> MacSyncStatus {
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: timeout)
+        var status = await runtime.sync(within: timeout)
+        while status.phase == .busy {
+            let remaining = clock.now.duration(to: deadline)
+            guard remaining > .zero else { break }
+            do { try await Task.sleep(for: min(.milliseconds(50), remaining)) } catch { break }
+            let remainingAfterSleep = clock.now.duration(to: deadline)
+            guard remainingAfterSleep > .zero else { break }
+            status = await runtime.sync(within: remainingAfterSleep)
+        }
+        if status.phase == .busy {
+            status.issue =
+                "Another Capd process is synchronizing this library. Saved changes remain queued."
+        }
+        return status
+    }
+}
+
+func blocking<T: Sendable>(_ operation: @escaping @Sendable () async -> T) -> T {
+    let result = Mutex<T?>(nil)
+    let finished = DispatchSemaphore(value: 0)
+    Task.detached {
+        let value = await operation()
+        result.withLock { $0 = value }
+        finished.signal()
+    }
+    finished.wait()
+    return result.withLock { $0! }
 }
 
 func describe(_ error: any Error) -> String {

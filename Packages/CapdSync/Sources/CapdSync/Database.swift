@@ -290,6 +290,15 @@ enum SyncDatabase {
         }
     }
 
+    static func fillSourceContent(_ source: inout CaptureSource, from patch: SourceContentPatch) {
+        if source.title?.isEmpty ?? true, let title = patch.title, !title.isEmpty {
+            source.title = title
+        }
+        if source.selection?.isEmpty ?? true, let selection = patch.selection, !selection.isEmpty {
+            source.selection = selection
+        }
+    }
+
     static func edit(
         _ record: inout SharedCapture, _ edit: CaptureEdit,
         operation: SyncOperation, base: Int64, server: Bool
@@ -354,14 +363,7 @@ enum SyncDatabase {
             record.metadata = metadata
         }
         if let patch = edit.sourceContent {
-            if record.source.title?.isEmpty ?? true, let title = patch.title, !title.isEmpty {
-                record.source.title = title
-            }
-            if record.source.selection?.isEmpty ?? true, let selection = patch.selection,
-                !selection.isEmpty
-            {
-                record.source.selection = selection
-            }
+            fillSourceContent(&record.source, from: patch)
         }
         if let patch = edit.generatedPatch {
             if let body = patch.body {

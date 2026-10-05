@@ -13,6 +13,7 @@ let package = Package(
         .executable(name: "CapdShareExtension", targets: ["CapdShareExtension"]),
     ],
     dependencies: [
+        .package(path: "Packages/CapdSync"),
         .package(url: "https://github.com/groue/GRDB.swift", from: "7.11.1"),
         .package(url: "https://github.com/apple/swift-argument-parser", from: "1.8.2"),
         .package(url: "https://github.com/sindresorhus/KeyboardShortcuts", from: "3.0.1"),
@@ -24,6 +25,7 @@ let package = Package(
             name: "CapdKit",
             dependencies: [
                 .product(name: "GRDB", package: "GRDB.swift"),
+                .product(name: "CapdSync", package: "CapdSync"),
                 "SwiftSoup",
             ],
             resources: [.copy("Resources/Readability.js")]
@@ -77,6 +79,7 @@ let package = Package(
             name: "CapdKitTests",
             dependencies: [
                 "CapdKit",
+                .product(name: "CapdSync", package: "CapdSync"),
                 "CapdTestHost",
                 .product(name: "GRDB", package: "GRDB.swift"),
                 "SwiftSoup",

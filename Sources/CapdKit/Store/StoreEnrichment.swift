@@ -1,3 +1,4 @@
+import CapdSync
 import Foundation
 import GRDB
 
@@ -5,14 +6,14 @@ extension Store {
     /// The `WHERE` guard is the claim: of the processes sharing this file, only the one
     /// that flips `pending` to `fetching` may enrich the row.
     func claimForEnrichment(id: Int64, now: Date = Date()) throws -> Capture? {
-        try dbPool.write { db in
+        try write { db in
             try claim(db, id: id, now: now)
         }
     }
 
     /// Claims the oldest pending capture, so a draining process works in capture order.
     func claimNextForEnrichment(now: Date = Date()) throws -> Capture? {
-        try dbPool.write { db in
+        try write { db in
             let id = try Int64.fetchOne(
                 db,
                 sql: """
@@ -43,7 +44,13 @@ extension Store {
                 "id": id,
             ])
         guard db.changesCount == 1 else { return nil }
-        return try Capture.fetchOne(db, key: id)
+        guard var capture = try Capture.fetchOne(db, key: id) else { return nil }
+        if syncClient != nil, capture.kind == .link,
+            let shared = try StoreSync.visible(db, id: StoreSync.identity(db, capture: capture))
+        {
+            capture.claimedSyncBodyQuality = .init(isThin: shared.generated.bodyIsThin)
+        }
+        return capture
     }
 
     /// A nil field in `result` leaves its columns alone; the body columns move together
@@ -52,21 +59,41 @@ extension Store {
         id: Int64,
         result: StepResult,
         state: EnrichmentState,
-        now: Date = Date()
+        now: Date = Date(), expectedClaim: Capture? = nil
     ) throws -> Capture {
-        try dbPool.write { db in
+        try write { db in
             guard let current = try Capture.fetchOne(db, key: id) else {
                 throw EnrichmentError.captureNotFound(id)
+            }
+            if syncClient != nil, let expectedClaim {
+                guard current.enrichmentState == .fetching,
+                    current.lastAttemptAt == expectedClaim.lastAttemptAt,
+                    current.attemptCount == expectedClaim.attemptCount
+                else { return current }
             }
             guard current.enrichmentState.canTransition(to: state) else {
                 throw EnrichmentError.illegalTransition(from: current.enrichmentState, to: state)
             }
 
             var updated = current
-            if let ocrText = result.ocrText {
+            let shared: SharedCapture? =
+                if syncClient != nil, expectedClaim != nil, current.kind == .link {
+                    try StoreSync.visible(db, id: StoreSync.identity(db, capture: current))
+                } else { nil }
+            let changedSyncQuality =
+                expectedClaim?.claimedSyncBodyQuality.map {
+                    $0.isThin != shared?.generated.bodyIsThin
+                } ?? false
+            let preserveBody =
+                syncClient != nil && expectedClaim != nil
+                && (current.body != expectedClaim!.body || changedSyncQuality)
+            let preserveOCR =
+                syncClient != nil && expectedClaim != nil
+                && current.ocrText != expectedClaim!.ocrText
+            if let ocrText = result.ocrText, !preserveOCR {
                 updated.ocrText = ocrText
             }
-            if let extraction = result.bodyExtraction {
+            if let extraction = result.bodyExtraction, !preserveBody {
                 updated.body = extraction.body
                 updated.bodyStatus = extraction.status
                 updated.bodySource = extraction.source
@@ -77,8 +104,23 @@ extension Store {
                 }
             }
             updated.enrichmentState = state
+            if preserveBody && updated.kind == .link {
+                let isThin = updated.body?.isEmpty == true || shared?.generated.bodyIsThin == true
+                updated.enrichmentState =
+                    updated.body == nil ? .pending : isThin ? .thin : .ok
+                updated.bodyStatus =
+                    updated.body == nil ? .none : isThin ? .thin : .ok
+            } else if preserveOCR && updated.kind == .image {
+                updated.enrichmentState = updated.ocrText == nil ? .pending : .ok
+            }
             updated.updatedAt = now
             try updated.updateChanges(db, from: current)
+            if current.title != updated.title || current.body != updated.body
+                || current.ocrText != updated.ocrText
+                || (!preserveBody && current.bodyStatus != updated.bodyStatus)
+            {
+                try enqueueChanges(from: current, to: updated, in: db)
+            }
             return updated
         }
     }
@@ -105,7 +147,7 @@ extension Store {
         }
         guard stale > 0 else { return 0 }
 
-        return try dbPool.write { db in
+        return try write { db in
             try db.execute(
                 sql: """
                     UPDATE \(Schema.captures)

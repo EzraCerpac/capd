@@ -20,7 +20,7 @@ struct Mcp: ParsableCommand {
     /// executable into the test bundle, and an async entry point anywhere on that path
     /// makes SwiftPM's release-mode test runner execute capd's main instead of the tests.
     func run() throws {
-        let service = SearchService(store: try openStore())
+        let service = SearchService(store: try openStore(readOnly: true))
 
         let failure = Mutex<(any Error)?>(nil)
         let finished = DispatchSemaphore(value: 0)

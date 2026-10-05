@@ -15,29 +15,35 @@ public struct EnrichmentService: Sendable {
 
     let store: Store
     let steps: [any ProcessingStep]
+    private let generationGate: GenerationGate?
 
-    public init(store: Store, steps: [any ProcessingStep] = []) {
+    public init(
+        store: Store, steps: [any ProcessingStep] = [], generationGate: GenerationGate? = nil
+    ) {
         self.store = store
         self.steps = steps
+        self.generationGate = generationGate
     }
 
     /// Processes one capture. Returns nil when it is absent or not pending, so racing
     /// processes produce one winner and the losers treat it as a no-op.
     @discardableResult
     public func process(captureID: Int64) async throws -> Capture? {
+        let revision = try await generationGate?.begin()
         guard let claimed = try store.claimForEnrichment(id: captureID) else {
             return nil
         }
-        return try await enrich(claimed, id: captureID)
+        return try await enrich(claimed, id: captureID, revision: revision)
     }
 
     /// Claims and processes the oldest pending capture; nil means the queue is empty.
     @discardableResult
     public func processNext() async throws -> Capture? {
+        let revision = try await generationGate?.begin()
         guard let claimed = try store.claimNextForEnrichment(), let id = claimed.id else {
             return nil
         }
-        return try await enrich(claimed, id: id)
+        return try await enrich(claimed, id: id, revision: revision)
     }
 
     /// Returns abandoned claims to the queue: `fetching` rows older than `age` go back to
@@ -58,7 +64,7 @@ public struct EnrichmentService: Sendable {
         try store.pendingEnrichmentCount()
     }
 
-    private func enrich(_ claimed: Capture, id: Int64) async throws -> Capture {
+    private func enrich(_ claimed: Capture, id: Int64, revision: Int64?) async throws -> Capture {
         let context = ProcessingContext(paths: store.paths)
         var merged = StepResult()
         do {
@@ -66,16 +72,36 @@ public struct EnrichmentService: Sendable {
                 merged.merge(try await step.run(claimed, context: context))
             }
         } catch {
+            if generationGate != nil, error is CancellationError {
+                _ = try? store.completeEnrichment(
+                    id: id, result: StepResult(), state: .pending, expectedClaim: claimed)
+                throw error
+            }
+            try await validateCompletion(claimed, id: id, revision: revision)
             // The failure is recorded before rethrowing so the row never sticks in fetching.
-            _ = try store.completeEnrichment(id: id, result: StepResult(), state: .failed)
+            _ = try store.completeEnrichment(
+                id: id, result: StepResult(), state: .failed, expectedClaim: claimed)
             Log.pipeline.error("capture \(id) enrichment failed: \(String(describing: error))")
             throw error
         }
 
+        try await validateCompletion(claimed, id: id, revision: revision)
+
         let completed = try store.completeEnrichment(
-            id: id, result: merged, state: merged.enrichmentState)
+            id: id, result: merged, state: merged.enrichmentState, expectedClaim: claimed)
         Log.pipeline.info(
             "capture \(id) enriched: \(completed.enrichmentState.rawValue, privacy: .public)")
         return completed
+    }
+
+    private func validateCompletion(_ claimed: Capture, id: Int64, revision: Int64?) async throws {
+        guard let revision, let generationGate else { return }
+        do {
+            try await generationGate.validate(revision)
+        } catch {
+            _ = try? store.completeEnrichment(
+                id: id, result: StepResult(), state: .pending, expectedClaim: claimed)
+            throw error
+        }
     }
 }

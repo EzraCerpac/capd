@@ -18,6 +18,8 @@ final class AppState {
 
     private(set) var failedEnrichmentCount = 0
     private(set) var startupFailure: String?
+    private(set) var syncIssue: String?
+    private(set) var noteConflicts: [MacNoteConflict] = []
     private(set) var isDropTargeted = false
 
     @ObservationIgnored private var coordinator: CaptureCoordinator?
@@ -35,6 +37,8 @@ final class AppState {
     @ObservationIgnored private var badgeTask: Task<Void, Never>?
     @ObservationIgnored private var updateTask: Task<Void, Never>?
     @ObservationIgnored private var permissionTask: Task<Void, Never>?
+    @ObservationIgnored private var librarySession: MacLibrarySession?
+    @ObservationIgnored private var syncTask: Task<Void, Never>?
 
     enum MenuBarGlyph {
         case dropTarget
@@ -46,7 +50,9 @@ final class AppState {
         if isDropTargeted {
             return .dropTarget
         }
-        if failedEnrichmentCount > 0 || startupFailure != nil || permissions.axLost {
+        if failedEnrichmentCount > 0 || startupFailure != nil || syncIssue != nil
+            || permissions.axLost
+        {
             return .degraded
         }
         return .normal
@@ -139,12 +145,99 @@ final class AppState {
         }
     }
 
+    func showNoteConflicts() {
+        guard let session = librarySession else { return }
+        let snapshots = noteConflicts
+        NSApp.activate()
+        for (index, conflict) in snapshots.enumerated() {
+            let alert = NSAlert()
+            alert.messageText = "Resolve note: \(conflict.title)"
+            let variants = conflict.variants.enumerated().map { index, variant in
+                "Version \(index + 1):\n\(variant.value ?? "(Note removed)")"
+            }.joined(separator: "\n\n")
+            alert.informativeText =
+                "Review the versions and edit the merged note. A newer version may keep this note in conflict."
+            let accessory = NSView(frame: NSRect(x: 0, y: 0, width: 420, height: 370))
+            let variantScroll = NSScrollView(frame: NSRect(x: 0, y: 190, width: 420, height: 180))
+            variantScroll.hasVerticalScroller = true
+            variantScroll.borderType = .bezelBorder
+            let variantText = NSTextView(frame: variantScroll.bounds)
+            variantText.isEditable = false
+            variantText.isRichText = false
+            variantText.font = .systemFont(ofSize: NSFont.systemFontSize)
+            variantText.textContainer?.widthTracksTextView = true
+            variantText.autoresizingMask = [.width]
+            variantText.string = variants
+            variantText.setAccessibilityLabel("Note versions")
+            variantScroll.documentView = variantText
+            accessory.addSubview(variantScroll)
+            let label = NSTextField(labelWithString: "Merged note")
+            label.frame = NSRect(x: 0, y: 165, width: 420, height: 20)
+            accessory.addSubview(label)
+            let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: 420, height: 160))
+            scroll.hasVerticalScroller = true
+            scroll.borderType = .bezelBorder
+            let editor = NSTextView(frame: scroll.bounds)
+            editor.isRichText = false
+            editor.font = .systemFont(ofSize: NSFont.systemFontSize)
+            editor.textContainer?.widthTracksTextView = true
+            editor.autoresizingMask = [.width]
+            editor.string = conflict.variants.compactMap(\.value).joined(separator: "\n\n")
+            editor.setAccessibilityLabel("Merged note")
+            scroll.documentView = editor
+            accessory.addSubview(scroll)
+            alert.accessoryView = accessory
+            alert.addButton(withTitle: "Save Merged Note")
+            alert.addButton(withTitle: "Cancel")
+            if index + 1 < snapshots.count { alert.addButton(withTitle: "Next") }
+            alert.window.initialFirstResponder = editor
+            let response = alert.runModal()
+            if response == .alertSecondButtonReturn { return }
+            guard response == .alertFirstButtonReturn else { continue }
+            do {
+                try session.store.resolveNoteConflict(conflict, note: editor.string)
+                noteConflicts = try session.store.noteConflicts()
+                if let runtime = session.runtime {
+                    Task { [weak self] in
+                        let status = await runtime.sync(within: .seconds(5))
+                        self?.syncIssue = status.issue
+                        self?.noteConflicts = status.noteConflicts
+                    }
+                }
+            } catch {
+                let failure = NSAlert()
+                failure.alertStyle = .warning
+                failure.messageText = "Couldn’t save merged note"
+                failure.informativeText = error.localizedDescription
+                failure.runModal()
+                return
+            }
+        }
+    }
+
     private func start() throws {
-        let store = try Store(paths: .live)
+        let session = try MacLibrarySession.open(paths: .live)
+        librarySession = session
+        let store = session.store
+        if let runtime = session.runtime {
+            syncTask = Task { [weak self] in
+                while !Task.isCancelled {
+                    let status = await runtime.sync()
+                    self?.syncIssue = status.issue
+                    self?.noteConflicts = status.noteConflicts
+                    self?.reminderScheduler?.refresh()
+                    do {
+                        try await Task.sleep(for: status.issue == nil ? .seconds(5) : .seconds(30))
+                    } catch { return }
+                }
+            }
+        }
         let captureService = CaptureService(
             store: store,
             guards: [SecureInputGuard(probes: [SystemSecureInputProbe(), AXReader()])])
-        let enrichment = EnrichmentService(store: store, steps: [TabFirstBodyStep()])
+        let enrichment = EnrichmentService(
+            store: store, steps: [TabFirstBodyStep()],
+            generationGate: session.runtime.map { GenerationGate(runtime: $0) })
         let favicons = FaviconStore(paths: store.paths)
         let settings = self.settings
         let openURL: @MainActor (URL) -> Void = { [settings, contextSuppressions] url in

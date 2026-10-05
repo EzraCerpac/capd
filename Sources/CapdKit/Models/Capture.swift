@@ -91,6 +91,11 @@ public struct Capture: Codable, Sendable, Equatable, Identifiable {
     public var bodySource: BodySource?
     public var attemptCount: Int
     public var lastAttemptAt: Date?
+    var claimedSyncBodyQuality: SyncBodyQuality? = nil
+
+    struct SyncBodyQuality: Equatable, Sendable {
+        let isThin: Bool?
+    }
 
     /// Hash of the normalized URL, or of the content for captures with no URL.
     public var contentHash: String?

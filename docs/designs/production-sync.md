@@ -134,14 +134,13 @@ processes staging the same root. The current tests establish synthetic protocol 
 isolation behavior; they do not establish production performance, power-loss recovery
 or background iOS delivery.
 
-The Mac Store integration is also incomplete. Its fixture snapshot omits user-visible
-`seenCount`, `lastSeenAt`, `reminderAt` and `sourceAppBundleID`; image conversion defaults
-to no blob. Mixed generated/manual legacy tags use a union/pinned representation and
-cannot preserve both categories losslessly. Ordinary Mac capture, annotation, delete
-and enrichment paths do not atomically enqueue shared mutations. Local FTS and pipeline
-bookkeeping can remain local, but user-visible metadata requires an explicit shared
-schema/import decision. A live-library import and all ordinary mutation paths need
-validation before production activation.
+The Mac Store integration preserves shared metadata and verified assets during a
+reviewed copy-only migration. Ordinary capture, annotation, delete, enrichment and
+tagging writes enqueue their shared mutations in the same SQLite transaction as the
+local projection. Local FTS and pipeline bookkeeping remain local. Legacy mixed
+generated/manual tags still use a union/pinned representation, so their original
+provenance cannot be reconstructed losslessly. See `mac-store-sync.md` and
+`mac-sync-runtime.md` for the mutation boundary and activation requirements.
 
 ## Focused verification
 

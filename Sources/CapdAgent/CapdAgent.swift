@@ -43,7 +43,8 @@ struct CapdAgent {
     private static func runAgent() -> Never {
         do {
             let paths = try StoragePaths.live
-            let store = try Store(paths: paths)
+            let session = try MacLibrarySession.open(paths: paths)
+            let store = session.store
 
             guard AgentLock.acquire(at: paths.agentLockURL) != nil else {
                 logger.notice("another capd-agent holds the lock; exiting")
@@ -57,20 +58,24 @@ struct CapdAgent {
 
             let enrichment = EnrichmentService(
                 store: store,
-                steps: [FetchChildStep(agentExecutable: executable), OCRStep()])
+                steps: [FetchChildStep(agentExecutable: executable), OCRStep()],
+                generationGate: generationGate(session.runtime))
             let queue = EnrichmentQueue(
                 enrichment: enrichment, isOnMainsPower: PowerStatus.isOnMainsPower)
-            let tagging = TagService(store: store, tagger: FoundationModelTagger())
+            let tagging = TagService(
+                store: store, tagger: FoundationModelTagger(),
+                generationGate: generationGate(session.runtime))
 
             logger.info("capd-agent \(CapdKit.version, privacy: .public) started")
 
             Task {
                 var taggingRetry = TagRetryPolicy()
-                // At startup every `fetching` row was abandoned by a crash, except a
-                // capture the app is enriching this instant; stealing that one wastes a
-                // fetch but the state machine keeps both writers safe.
-                await sweep(enrichment: enrichment, olderThan: nil)
-                while true {
+                guard await startSync(session.runtime) else { return }
+                await sweep(
+                    enrichment: enrichment,
+                    olderThan: session.runtime == nil ? nil : EnrichmentService.staleClaimAge)
+                while !Task.isCancelled {
+                    guard await startSync(session.runtime) else { return }
                     await sweep(enrichment: enrichment, olderThan: EnrichmentService.staleClaimAge)
                     if ((try? enrichment.pendingCount()) ?? 0) > 0 {
                         await queue.drain()
@@ -79,6 +84,9 @@ struct CapdAgent {
                         do {
                             try await tag(with: tagging)
                             taggingRetry.recordSuccess()
+                        } catch is GenerationGateError {
+                        } catch is CancellationError {
+                            return
                         } catch {
                             let delay = taggingRetry.recordFailure()
                             let reason = String(describing: error)
@@ -96,6 +104,32 @@ struct CapdAgent {
             let reason = String(describing: error)
             logger.error("capd-agent failed to start: \(reason, privacy: .public)")
             exit(EXIT_FAILURE)
+        }
+    }
+
+    static func startSync(_ runtime: MacSyncRuntime?, retryDelay: Duration? = nil) async -> Bool {
+        guard let runtime else { return true }
+        while !Task.isCancelled {
+            let result = await runtime.sync()
+            if result.pullSucceeded {
+                return !Task.isCancelled
+            }
+            do {
+                try await Task.sleep(
+                    for: retryDelay
+                        ?? (result.phase == .offline || result.phase == .attention
+                            ? .seconds(30) : pollInterval))
+            } catch { return false }
+        }
+        return false
+    }
+
+    static func generationGate(_ runtime: MacSyncRuntime?) -> GenerationGate? {
+        guard let runtime else { return nil }
+        return GenerationGate {
+            let result = await runtime.sync()
+            guard result.pullSucceeded else { throw GenerationGateError.syncUnavailable }
+            return result.cursor
         }
     }
 

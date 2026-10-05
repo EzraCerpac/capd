@@ -16,7 +16,8 @@ git clone https://github.com/jamiedavenport/capd.git
 cd capd
 ./Scripts/bootstrap.sh
 swift build
-swift test --parallel
+swift build --build-system native --package-path Packages/CapdSyncServer --product capd-sync-server
+swift test --build-system native --parallel
 ```
 
 `bootstrap.sh` resolves Swift dependencies and configures the repository's Git
@@ -40,7 +41,8 @@ Format and test the project:
 ```sh
 swift format --in-place --recursive Sources Tests Package.swift
 swift format lint --strict --recursive --parallel Sources Tests Package.swift
-swift test --parallel
+swift build --build-system native --package-path Packages/CapdSyncServer --product capd-sync-server
+swift test --build-system native --parallel
 ```
 
 Use a [Conventional Commit](https://www.conventionalcommits.org/) message for
