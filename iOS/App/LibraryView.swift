@@ -100,10 +100,10 @@ struct LibraryView: View {
                     .accessibilityIdentifier("captureButton")
                 }
             }
-            .sheet(isPresented: $capturing) {
+            .sheet(isPresented: $capturing, onDismiss: consumeSystemAction) {
                 CaptureForm(model: model, initialText: stagedText).id(draftID)
             }
-            .sheet(isPresented: $showingSyncSettings) {
+            .sheet(isPresented: $showingSyncSettings, onDismiss: consumeSystemAction) {
                 SyncSettingsView(
                     state: model.syncState, retry: { model.retrySync() },
                     systemSearch: model.systemSearch, connection: model.connection)
@@ -121,6 +121,12 @@ struct LibraryView: View {
     }
 
     private func consumeSystemAction() {
+        if capturing || showingSyncSettings, let action = systemBridge.pendingAction {
+            switch action {
+            case .find, .open: return
+            case .stageText: break
+            }
+        }
         guard let action = systemBridge.consumeAction() else { return }
         switch action {
         case .find(let query):

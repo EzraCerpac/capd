@@ -16,6 +16,7 @@ final class PhoneSystemSearch {
     private var session: MobileLibrarySession?
     private var preparedLibraryID: UUID?
     private var preparedSessionToken: MobileLibrarySessionToken?
+    private var preparedRevision: MobileLibraryRevision?
     private var generation = 0
     private var paused = false
     private let defaults: UserDefaults
@@ -37,6 +38,7 @@ final class PhoneSystemSearch {
 
     func connect(_ bridge: CaptureSystemBridge) {
         self.bridge = bridge
+        if !enabled { invalidate(bridge) }
         schedule()
     }
 
@@ -49,7 +51,7 @@ final class PhoneSystemSearch {
     func setEnabled(_ value: Bool) {
         enabled = value
         defaults.set(value, forKey: "capd.system-search.enabled")
-        if !value { bridge?.invalidate() }
+        if !value, let bridge { invalidate(bridge) }
         schedule()
     }
 
@@ -59,19 +61,28 @@ final class PhoneSystemSearch {
         guard session != nil, bridge != nil, !paused else {
             throw SystemIntegrationError.unavailable
         }
+        try Task.checkCancellation()
         while true {
             let generation = generation
             await tail?.value
             try Task.checkCancellation()
             guard !paused else { throw SystemIntegrationError.unavailable }
-            if generation == self.generation { break }
+            guard generation == self.generation else { continue }
+            guard error == nil else { throw SystemIntegrationError.unavailable }
+            if enabled, let session {
+                let revision = try session.store.libraryRevision()
+                if preparedSessionToken != session.token || preparedRevision != revision {
+                    schedule()
+                    continue
+                }
+            }
+            break
         }
-        guard error == nil else { throw SystemIntegrationError.unavailable }
     }
 
     func suspendAndDrain() async {
         paused = true
-        bridge?.invalidate()
+        if let bridge { invalidate(bridge) }
         // OS callbacks are not cancellable: retain the lease until they complete.
         await tail?.value
     }
@@ -96,14 +107,14 @@ final class PhoneSystemSearch {
                 } else {
                     try await MobileSystemSearchJournal.withLease(root: MobileEnvironment.root()) {
                         @MainActor in
-                        bridge.invalidate(
-                            preservingDeferredRoute: self.enabled && !self.paused)
+                        self.invalidate(
+                            bridge, preservingDeferredRoute: self.enabled && !self.paused)
                         _ = try await self.cleanup(keeping: nil, bridge: bridge)
                     }
                 }
                 self.error = nil
             } catch {
-                bridge.invalidate(preservingDeferredRoute: self.enabled && !self.paused)
+                self.invalidate(bridge, preservingDeferredRoute: self.enabled && !self.paused)
                 self.coordinator = nil
                 self.error = "System search could not update. " + error.localizedDescription
             }
@@ -115,11 +126,12 @@ final class PhoneSystemSearch {
         let libraryID = session.token.binding?.libraryID ?? localID
         let journal = try await cleanup(keeping: enabled ? libraryID : nil, bridge: bridge)
         if preparedLibraryID != libraryID || preparedSessionToken != session.token {
-            bridge.invalidate(preservingDeferredRoute: true)
+            invalidate(bridge, preservingDeferredRoute: true)
             coordinator = nil
             preparedLibraryID = libraryID
             preparedSessionToken = session.token
         }
+        let revision = try session.store.libraryRevision()
         let snapshot = try session.store.systemSearchSnapshot()
         if enabled {
             let captures = snapshot.captures.map {
@@ -131,7 +143,7 @@ final class PhoneSystemSearch {
                     coordinator
                     ?? SpotlightCoordinator(
                         libraryID: libraryID, backend: backend())
-                bridge.invalidate(preservingDeferredRoute: enabled && !paused)
+                invalidate(bridge, preservingDeferredRoute: enabled && !paused)
                 try await index.reconcile([], enabled: false)
                 try journal.removed(libraryID)
                 coordinator = nil
@@ -148,13 +160,14 @@ final class PhoneSystemSearch {
             } else {
                 try await coordinator?.reconcile([], enabled: false)
                 try journal.removed(libraryID)
-                bridge.invalidate()
+                invalidate(bridge)
                 coordinator = nil
             }
         } else {
             try bridge.refresh(libraryID: libraryID, captures: [], systemSearchEnabled: false)
         }
         try session.store.acknowledgeSystemSearch(snapshot.revision)
+        preparedRevision = revision
     }
 
     private func cleanup(keeping libraryID: UUID?, bridge: CaptureSystemBridge) async throws
@@ -168,13 +181,28 @@ final class PhoneSystemSearch {
             defaults.removeObject(forKey: "capd.system-search.indexed-library-id")
         }
         for oldID in try journal.libraries() where oldID != libraryID {
-            bridge.invalidate(preservingDeferredRoute: enabled && !paused)
+            invalidate(bridge, preservingDeferredRoute: enabled && !paused)
             let old = SpotlightCoordinator(libraryID: oldID, backend: backend())
             try await old.reconcile([], enabled: false)
             try journal.removed(oldID)
             coordinator = nil
         }
         return journal
+    }
+
+    private func invalidate(
+        _ bridge: CaptureSystemBridge, preservingDeferredRoute: Bool = false
+    ) {
+        bridge.invalidate(preservingDeferredRoute: enabled && preservingDeferredRoute)
+        if !enabled {
+            do {
+                try bridge.refresh(
+                    libraryID: session?.token.binding?.libraryID ?? localID,
+                    captures: [], systemSearchEnabled: false)
+            } catch {
+                self.error = "System search could not update. " + error.localizedDescription
+            }
+        }
     }
 
     private func backend() -> CoreSpotlightBackend {
