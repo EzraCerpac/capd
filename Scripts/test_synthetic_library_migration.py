@@ -300,6 +300,70 @@ class MigrationTests(unittest.TestCase):
         with self.assertRaises(migration.PreparationError):
             migration.import_initial_mac(self.archive, authority, binding, str(uuid.uuid4()))
 
+    def test_nonstring_legacy_tags_refuse_without_partial_backfill(self):
+        self.db.execute("UPDATE captures SET tags=? WHERE id=81", (sqlite3.Binary(b"not portable tags"),))
+        self.db.commit()
+        before = migration.sql_signature(self.db)
+        with self.assertRaisesRegex(migration.PreparationError, "legacy tags"):
+            migration.backfill_legacy(self.source, "captures.sqlite")
+        self.assertEqual(before, migration.sql_signature(self.db))
+
+    def test_nonstring_shared_text_fields_refuse_before_authority_writes(self):
+        fields = ("content_hash", "url", "host", "title", "selection", "body", "ocr_text", "note", "source_app_bundle_id")
+        for field in ("content_hash", "url", "host", "selection"):
+            self.db.execute("ALTER TABLE captures ADD COLUMN " + field + " TEXT")
+        columns = [row[1] for row in self.db.execute("PRAGMA table_info(captures)")]
+        original = dict(zip(columns, self.db.execute("SELECT * FROM captures WHERE id=81").fetchone()))
+        for field in fields:
+            with self.subTest(field=field):
+                self.db.execute("UPDATE captures SET " + ",".join(name + "=?" for name in fields) + " WHERE id=81", [original[name] for name in fields])
+                self.db.execute("UPDATE captures SET " + field + "=? WHERE id=81", (sqlite3.Binary(b"not a portable string"),))
+                self.db.execute("DROP TABLE IF EXISTS sync_legacy_snapshot")
+                self.db.commit()
+                if self.archive.exists():
+                    shutil.rmtree(self.archive)
+                migration.backfill_legacy(self.source, "captures.sqlite")
+                migration.backup(self.source, self.archive)
+                authority, binding = self.authority()
+                before_assets = migration.inventory(authority / "assets")
+                with contextlib.closing(sqlite3.connect(authority / "server.sqlite")) as db:
+                    before_sql = migration.sql_signature(db)
+                try:
+                    with self.assertRaisesRegex(migration.PreparationError, "shared text fields"):
+                        migration.import_initial_mac(self.archive, authority, binding, str(uuid.uuid4()))
+                    with contextlib.closing(sqlite3.connect(authority / "server.sqlite")) as db:
+                        self.assertEqual(before_sql, migration.sql_signature(db))
+                    self.assertEqual(before_assets, migration.inventory(authority / "assets"))
+                finally:
+                    shutil.rmtree(authority)
+
+    def test_optional_null_shared_text_fields_import(self):
+        for field in ("content_hash", "url", "host", "selection"):
+            self.db.execute("ALTER TABLE captures ADD COLUMN " + field + " TEXT")
+        self.db.execute("UPDATE captures SET content_hash=NULL,url=NULL,host=NULL,title=NULL,selection=NULL,body=NULL,ocr_text=NULL,note=NULL,source_app_bundle_id=NULL WHERE id=81")
+        self.db.commit()
+        ids = migration.backfill_legacy(self.source, "captures.sqlite")
+        migration.backup(self.source, self.archive)
+        authority, binding = self.authority()
+        self.assertEqual(2, migration.import_initial_mac(self.archive, authority, binding, str(uuid.uuid4()))["count"])
+        with contextlib.closing(sqlite3.connect(authority / "server.sqlite")) as db:
+            record = json.loads(db.execute("SELECT payload FROM sync_records WHERE id=?", (ids[81],)).fetchone()[0])
+        self.assertEqual({"kind": "text"}, record["source"])
+        self.assertEqual({"tags": ["generated", "two"]}, record["generated"])
+        self.assertNotIn("note", record)
+        self.assertNotIn("sourceAppBundleID", record["metadata"])
+
+    def test_imported_record_rejects_nonportable_counters_and_tag_arrays(self):
+        invalid = (("seen_count", True), ("seen_count", 2 ** 63), ("rating", True), ("rating", 3.0),
+                   ("manualTags", [None]), ("generatedTags", [True]))
+        for field, value in invalid:
+            with self.subTest(field=field, value=value):
+                row = {"kind": "text", "seen_count": 1, "rating": 3, "created_at": "2026-01-02"}
+                payload = {"legacyRow": row, "blob": None, "manualTags": [], "generatedTags": []}
+                (payload if field in ("manualTags", "generatedTags") else row)[field] = value
+                with self.assertRaises(migration.PreparationError):
+                    migration.imported_capture(str(uuid.uuid4()), payload, uuid.uuid4())
+
     def test_image_import_derives_verified_identity_for_absent_or_null_hash(self):
         expected = migration.digest(self.source / "assets" / "nested" / "image.png")
         for stored in ("absent", None, expected):
@@ -393,6 +457,14 @@ class MigrationTests(unittest.TestCase):
             self.assertEqual(body, record["generated"]["body"])
             self.assertEqual((1, 1), db.execute("SELECT cursor,floor FROM sync_meta").fetchone())
         self.assertTrue(migration.import_initial_mac(self.archive, authority, binding, import_id)["replayed"])
+
+    def test_utf8_record_exceeding_shared_frame_refuses_before_import(self):
+        body = "🦆" * 4_194_304
+        self.assertEqual(16_777_216, len(body.encode("utf-8")))
+        row = {"kind": "text", "seen_count": 1, "created_at": "2026-01-02", "body": body}
+        payload = {"legacyRow": row, "blob": None, "manualTags": [], "generatedTags": []}
+        with self.assertRaisesRegex(migration.PreparationError, "shared response budget"):
+            migration.imported_capture(str(uuid.uuid4()), payload, uuid.uuid4())
 
     def test_oversized_escaped_legacy_fields_refuse_import_atomically(self):
         self.db.execute("ALTER TABLE captures ADD COLUMN selection TEXT")
