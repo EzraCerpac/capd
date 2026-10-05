@@ -145,6 +145,12 @@ enum WebsiteIconDatabase {
         let before = try records(db, visible: true)
         var records = Dictionary(uniqueKeysWithValues: try self.records(db).map { ($0.id, $0) })
         for operation in try operations(db) {
+            if try Bool.fetchOne(
+                db, sql: "SELECT EXISTS(SELECT 1 FROM sync_website_icon_observed WHERE id=?)",
+                arguments: [operation.id.uuidString])!
+            {
+                continue
+            }
             let old = records[operation.origin.id]
             switch operation.mutation {
             case .upsert(let content):

@@ -94,7 +94,9 @@ struct WebsiteIconTests {
         #expect(tombstone.deleted && tombstone.revision == 2 && tombstone.content?.blob == blob)
         #expect(try f.transport(f.a).applyWebsiteIcon(op) == receipt)
         try a.pullWebsiteIcons(from: f.transport(f.a))
+        #expect(try a.websiteIcon(originID: f.origin.id) == tombstone)
         let reopened = try f.client("a", device: f.a)
+        #expect(try reopened.websiteIcon(originID: f.origin.id) == tombstone)
         try reopened.pushWebsiteIcons(to: f.transport(f.a))
         #expect(try reopened.pendingWebsiteIconOperations().isEmpty)
         #expect(try reopened.websiteIcon(originID: f.origin.id) == tombstone)
@@ -534,6 +536,120 @@ struct WebsiteIconTests {
         #expect(receipt.websiteIconCursor == 3)
         #expect(try f.server.blobs.read(blob) == iconPNG)
         #expect(try f.server.websiteIconBaseline().records.first?.deleted == true)
+    }
+
+    @Test(arguments: [false, true])
+    func oversizedDeclaredBaselinePageIsRejectedBeforeAnotherRequest(asynchronous: Bool)
+        async throws
+    {
+        let f = try IconFixture()
+        defer { f.clean() }
+        let calls = IconCounter()
+        let content = WebsiteIconContent(
+            blob: BlobReference(data: iconPNG), fetchedAt: Date(timeIntervalSince1970: 1))
+        let records = [f.origin, WebsiteIconOrigin(url: "https://other.capd.dev")!].map {
+            WebsiteIconRecord(origin: $0, revision: 1, content: content)
+        }.sorted { $0.id < $1.id }
+        let execute: @Sendable (SyncHTTPRequest) throws -> SyncHTTPResponse = { request in
+            let action = try SyncDatabase.decode(SyncHTTPEnvelope.self, request.body).action
+            guard case .websiteIconBaselinePage = action else {
+                return f.handler(f.a).handle(request)
+            }
+            calls.increment()
+            let page = WebsiteIconBaseline(
+                cursor: 2, captureCursor: 0, records: calls.value == 1 ? records : [],
+                deviceSequences: [:], totalIconCount: 1)
+            let principal = SyncPrincipal(
+                serviceID: f.binding.serviceID, libraryID: f.binding.libraryID, deviceID: f.a)
+            return SyncHTTPResponse(
+                status: 200, headers: ["Content-Type": "application/json"],
+                body: try SyncDatabase.encode(
+                    SyncHTTPResponseBudget.replyPayload(
+                        .websiteIconBaseline(page), principal: principal)))
+        }
+        if asynchronous {
+            await #expect(throws: SyncError.invalidCursor) {
+                try await IconClosureAsyncTransport(
+                    binding: f.binding, deviceID: f.a, execute: execute
+                ).importWebsiteIconBaseline(credential: { f.a.uuidString })
+            }
+        } else {
+            #expect(throws: SyncError.invalidCursor) {
+                try SyncHTTPTransport(
+                    binding: f.binding, deviceID: f.a, credential: { f.a.uuidString },
+                    execute: execute
+                ).websiteIconBaseline()
+            }
+        }
+        #expect(calls.value == 1)
+    }
+
+    @Test(arguments: [false, true])
+    func completeBaselineSpansPagesWithStableCaptureCursor(asynchronous: Bool) async throws {
+        let f = try IconFixture()
+        defer { f.clean() }
+        let blob = try f.server.blobs.put(iconPNG)
+        let origins = (0..<102).map { WebsiteIconOrigin(url: "https://site\($0).capd.dev")! }
+        let icons = origins.map {
+            WebsiteIconRecord(
+                origin: $0, revision: 0,
+                content: WebsiteIconContent(blob: blob, fetchedAt: Date(timeIntervalSince1970: 1)))
+        }
+        let captures = origins.map {
+            SharedCapture(
+                source: CaptureSource(kind: .link, contentHash: $0.id, url: $0.canonicalHTTPSOrigin)
+            )
+        }
+        let snapshot = ContentSnapshotImport(
+            snapshotID: UUID(), targetBinding: f.binding, sourceDeviceID: f.a, captures: captures,
+            websiteIcons: icons)
+        _ = try f.server.importContentSnapshot(
+            snapshot, preview: f.server.previewContentSnapshotImport(snapshot))
+        let baseline: WebsiteIconBaseline
+        if asynchronous {
+            baseline = try await f.asyncTransport(f.a).importWebsiteIconBaseline(
+                expectedCaptureCursor: 1, credential: { f.a.uuidString })
+        } else {
+            baseline = try f.transport(f.a).websiteIconBaseline()
+        }
+        #expect(baseline.records.count == 102)
+        #expect(baseline.totalIconCount == 102)
+        #expect(baseline.captureCursor == 1)
+        #expect(baseline.cursor == 102)
+        #expect(Set(baseline.records.map(\.id)) == Set(origins.map(\.id)))
+    }
+
+    @Test func observedAcknowledgementCannotOverrideNewerReplacementBeforeRetry() throws {
+        let f = try IconFixture()
+        defer { f.clean() }
+        let a = try f.client("a", device: f.a)
+        let b = try f.client("b", device: f.b)
+        let capture = f.capture()
+        try a.enqueue(captureID: capture.id, mutation: .create(capture))
+        try a.push(to: f.transport(f.a))
+        let blob = try a.blobs.put(iconPNG)
+        let operation = try a.enqueueWebsiteIcon(
+            origin: f.origin,
+            mutation: .upsert(
+                WebsiteIconContent(blob: blob, fetchedAt: Date(timeIntervalSince1970: 1))))
+        try f.transport(f.a).uploadWebsiteIcon(blob, offset: 0, chunk: iconPNG, final: true)
+        _ = try f.transport(f.a).applyWebsiteIcon(operation)
+        try b.pullWebsiteIcons(from: f.transport(f.b))
+        try b.enqueueWebsiteIcon(
+            origin: f.origin,
+            mutation: .upsert(
+                WebsiteIconContent(blob: blob, fetchedAt: Date(timeIntervalSince1970: 2))))
+        try b.pushWebsiteIcons(to: f.transport(f.b))
+        let replacement = try #require(try f.server.websiteIconBaseline().records.first)
+        try a.pullWebsiteIcons(from: f.transport(f.a))
+        #expect(try a.websiteIcon(originID: f.origin.id) == replacement)
+        #expect(try a.pendingWebsiteIconOperations() == [operation])
+        let reopened = try f.client("a", device: f.a)
+        #expect(try reopened.websiteIcon(originID: f.origin.id) == replacement)
+        #expect(try reopened.pendingWebsiteIconOperations() == [operation])
+        try reopened.pushWebsiteIcons(to: f.transport(f.a))
+        #expect(try reopened.websiteIcon(originID: f.origin.id) == replacement)
+        #expect(try f.server.websiteIconBaseline().records == [replacement])
     }
 
 }

@@ -31,7 +31,8 @@ extension SyncHTTPTransport {
                         after: records.last?.id, limit: 100, expectedCursor: first?.cursor,
                         expectedCaptureCursor: first?.captureCursor))
             else { throw SyncHTTPError.invalidResponse }
-            try WebsiteIconValidation.page(page, after: records.last?.id, first: first)
+            try WebsiteIconValidation.page(
+                page, after: records.last?.id, first: first, accumulatedCount: records.count)
             if first == nil { first = page }
             records += page.records
             if records.count == page.totalIconCount { break }
@@ -96,7 +97,8 @@ extension AsyncHTTPActions {
                         after: records.last?.id, limit: 100, expectedCursor: first?.cursor,
                         expectedCaptureCursor: first?.captureCursor ?? expectedCaptureCursor))
             else { throw SyncHTTPError.invalidResponse }
-            try WebsiteIconValidation.page(page, after: records.last?.id, first: first)
+            try WebsiteIconValidation.page(
+                page, after: records.last?.id, first: first, accumulatedCount: records.count)
             guard expectedCaptureCursor == nil || page.captureCursor == expectedCaptureCursor else {
                 throw SyncError.invalidCursor
             }
@@ -112,11 +114,16 @@ extension AsyncHTTPActions {
 }
 
 enum WebsiteIconValidation {
-    static func page(_ page: WebsiteIconBaseline, after: String?, first: WebsiteIconBaseline?)
+    static func page(
+        _ page: WebsiteIconBaseline, after: String?, first: WebsiteIconBaseline?,
+        accumulatedCount: Int
+    )
         throws
     {
         guard page.cursor >= 0, page.captureCursor >= 0, page.totalIconCount >= 0,
-            page.totalIconCount <= 4096, page.records.count <= 100,
+            page.totalIconCount <= 4096, accumulatedCount >= 0,
+            accumulatedCount <= page.totalIconCount,
+            page.records.count == min(100, page.totalIconCount - accumulatedCount),
             page.deviceSequences.count <= 4096,
             page.deviceSequences.values.allSatisfy({ $0 >= 0 }),
             first == nil
