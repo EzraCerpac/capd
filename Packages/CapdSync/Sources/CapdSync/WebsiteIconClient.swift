@@ -99,9 +99,9 @@ extension SyncClient {
         guard db.isInsideTransaction else { throw SyncTransactionError.requiresTransaction }
         try SyncDatabase.checkBinding(db, binding)
         guard
-            baseline.captureCursor
-                == (try Int64.fetchOne(db, sql: "SELECT cursor FROM sync_meta")!),
-            blobs.binding == binding,
+            baseline.captureCursor == (try Int64.fetchOne(db, sql: "SELECT cursor FROM sync_meta")!)
+        else { throw SyncError.invalidCursor }
+        guard blobs.binding == binding,
             try String.fetchOne(db, sql: "SELECT role FROM sync_meta") == "client",
             try String.fetchOne(db, sql: "SELECT device FROM sync_meta") == deviceID.uuidString
         else { throw SyncError.wrongDevice }
@@ -174,13 +174,46 @@ extension SyncClient {
             case .tombstone: guard record.deleted else { throw SyncHTTPError.invalidResponse }
             }
         case .stale:
-            guard let record = receipt.record, record.revision != operation.baseRevision else {
+            guard let record = receipt.record, record.revision > operation.baseRevision else {
                 throw SyncHTTPError.invalidResponse
             }
         case .unreferenced:
             guard case .upsert = operation.mutation,
                 (receipt.record?.revision ?? 0) == operation.baseRevision
             else { throw SyncHTTPError.invalidResponse }
+        }
+    }
+
+    func validateWebsiteIconReceiptBeforeCaching(
+        _ receipt: WebsiteIconReceipt, operation: WebsiteIconOperation
+    ) throws {
+        try read { db in
+            try validateWebsiteIconReceipt(receipt, operation: operation)
+            if let record = receipt.record,
+                let current = try WebsiteIconDatabase.record(db, id: record.id),
+                current.revision == record.revision, current != record
+            {
+                throw SyncHTTPError.invalidResponse
+            }
+        }
+    }
+
+    func validateWebsiteIconChange(_ change: WebsiteIconFeedChange, in db: Database) throws {
+        if let current = try WebsiteIconDatabase.record(db, id: change.record.id),
+            current.revision == change.record.revision, current != change.record
+        {
+            throw SyncError.invalidCursor
+        }
+        guard change.deviceID == deviceID else { return }
+        for operation in try WebsiteIconDatabase.operations(db)
+        where operation.sequence == change.sequence {
+            guard operation.id == change.operationID else {
+                throw SyncError.recoverySequenceCollision
+            }
+            try validateWebsiteIconReceipt(
+                WebsiteIconReceipt(
+                    operationID: operation.id, outcome: .accepted, record: change.record),
+                operation: operation)
         }
     }
 
@@ -254,7 +287,7 @@ extension SyncClient {
                 }
             }
             let receipt = try transport.applyWebsiteIcon(operation)
-            try validateWebsiteIconReceipt(receipt, operation: operation)
+            try validateWebsiteIconReceiptBeforeCaching(receipt, operation: operation)
             try cacheWebsiteIcon(receipt.record, fetch: transport.downloadWebsiteIcon)
             try acknowledgeWebsiteIcon(receipt, operation: operation)
         }
@@ -282,6 +315,7 @@ extension SyncClient {
         guard page.cursor == expected else { throw SyncError.invalidCursor }
         try read { db in
             for change in page.changes {
+                try validateWebsiteIconChange(change, in: db)
                 if let current = try WebsiteIconDatabase.record(db, id: change.record.id),
                     current.revision == change.record.revision, current != change.record
                 {
@@ -311,6 +345,7 @@ extension SyncClient {
             else { throw SyncError.invalidCursor }
             var expected = cursor
             for change in page.changes {
+                try validateWebsiteIconChange(change, in: db)
                 expected += 1
                 guard change.cursor == expected else { throw SyncError.invalidCursor }
                 let current = try WebsiteIconDatabase.record(db, id: change.record.id)

@@ -31,7 +31,7 @@ extension SyncClient {
                 case .websiteIconReceipt(let receipt) = try await actions.request(
                     .applyWebsiteIcon(operation))
             else { throw SyncHTTPError.invalidResponse }
-            try validateWebsiteIconReceipt(receipt, operation: operation)
+            try validateWebsiteIconReceiptBeforeCaching(receipt, operation: operation)
             try await cacheWebsiteIconAsync(
                 receipt.record, transport: transport, credential: credential)
             try Task.checkCancellation()

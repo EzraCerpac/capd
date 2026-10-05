@@ -291,6 +291,25 @@ public struct SyncHTTPHandler: Sendable {
         {
             return failure(.requestTooLarge, status: 413)
         }
+        if case .uploadWebsiteIcon(let blob, _, let chunk, _) = envelope.action,
+            !(1...262_144).contains(blob.byteCount) || chunk.count > Self.maximumChunkBytes
+        {
+            return failure(.requestTooLarge, status: 413)
+        }
+        if case .websiteIconChanges(_, let limit) = envelope.action,
+            !(1...Self.maximumPageSize).contains(limit)
+        {
+            return domainFailure(.invalidCursor)
+        }
+        if case .websiteIconBaselinePage(let after, let limit, _, _) = envelope.action {
+            guard (0...Self.maximumPageSize).contains(limit),
+                after == nil
+                    || (after!.utf8.count == 64
+                        && after!.utf8.allSatisfy {
+                            (48...57).contains($0) || (97...102).contains($0)
+                        })
+            else { return domainFailure(.invalidCursor) }
+        }
         if case .changes(_, let limit) = envelope.action,
             !(1...Self.maximumPageSize).contains(limit)
         {
@@ -376,8 +395,7 @@ public struct SyncHTTPHandler: Sendable {
                 guard blob.byteCount <= 262_144, chunk.count <= Self.maximumChunkBytes else {
                     throw SyncHTTPError.resourceLimit
                 }
-                try authority.upload(blob, offset: offset, chunk: chunk, final: final)
-                if final { try WebsiteIconPNG.validate(authority.download(blob)) }
+                try authority.uploadWebsiteIcon(blob, offset: offset, chunk: chunk, final: final)
                 result = .okay
             case .downloadWebsiteIcon(let blob):
                 guard blob.byteCount <= 262_144 else { throw SyncHTTPError.resourceLimit }

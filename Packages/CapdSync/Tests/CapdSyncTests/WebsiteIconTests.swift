@@ -22,7 +22,7 @@ struct WebsiteIconTests {
         "http://capd.dev", "https://user@capd.dev", "https://capd.dev:444", "https://127.0.0.1",
         "https://[::1]", "https://localhost", "https://a.local", "https://a.internal",
         "https://a.onion", "https://capd.dev.", "https://a..dev", "https://2130706433",
-        "https://0177.0.0.1", "https://a.invalid", "https://a.example",
+        "https://0177.0.0.1", "https://a.invalid", "https://a.example", "https://0x7f.0.0.0x1",
     ])
     func originRefusal(_ url: String) {
         #expect(WebsiteIconOrigin(url: url) == nil)
@@ -382,6 +382,158 @@ struct WebsiteIconTests {
             }
         }
         #expect(try a.pendingOperations().isEmpty)
+    }
+
+    @Test func poisonedUploadNeverPublishesAndSequenceRemainsUsable() throws {
+        let f = try IconFixture()
+        defer { f.clean() }
+        var bytes = iconPNG
+        bytes[40] ^= 1
+        let poisoned = BlobReference(data: bytes)
+        #expect(throws: SyncError.invalidBlob) {
+            try f.transport(f.a).uploadWebsiteIcon(poisoned, offset: 0, chunk: bytes, final: true)
+        }
+        #expect(throws: SyncError.blobMissing) { try f.server.blobs.read(poisoned) }
+        #expect(
+            !FileManager.default.fileExists(
+                atPath: f.server.blobs.directory.appendingPathComponent(
+                    poisoned.digest + ".partial"
+                ).path))
+        let valid = BlobReference(data: iconPNG)
+        try f.transport(f.a).uploadWebsiteIcon(
+            valid, offset: 0, chunk: iconPNG.prefix(60), final: false)
+        try f.transport(f.a).uploadWebsiteIcon(valid, offset: 0, chunk: iconPNG, final: true)
+        #expect(try f.server.blobs.read(valid) == iconPNG)
+        let op = WebsiteIconOperation(
+            deviceID: f.a, sequence: 1, origin: f.origin, baseRevision: 0, mutation: .tombstone)
+        #expect(try f.transport(f.a).applyWebsiteIcon(op).outcome == .accepted)
+        #expect(try f.server.baseline().cursor == 0)
+    }
+
+    @Test func automaticTombstoneFailureRollsCaptureAndIconHistoryBackTogether() throws {
+        let f = try IconFixture()
+        defer { f.clean() }
+        let a = try f.client("a", device: f.a)
+        let capture = f.capture()
+        try a.enqueue(captureID: capture.id, mutation: .create(capture))
+        try a.push(to: f.transport(f.a))
+        let blob = try a.blobs.put(iconPNG)
+        try a.enqueueWebsiteIcon(
+            origin: f.origin, mutation: .upsert(WebsiteIconContent(blob: blob)))
+        try a.pushWebsiteIcons(to: f.transport(f.a))
+        let captureBaseline = try f.server.baseline()
+        let iconBaseline = try f.server.websiteIconBaseline()
+        try f.server.writer.write {
+            try $0.execute(
+                sql:
+                    "CREATE TRIGGER reject_icon_tombstone BEFORE INSERT ON sync_website_icon_feed WHEN NEW.cursor=2 BEGIN SELECT RAISE(ABORT,'synthetic rollback'); END"
+            )
+        }
+        let operation = try a.enqueue(captureID: capture.id, mutation: .delete)
+        #expect(throws: SyncHTTPError.unavailable) { try a.push(to: f.transport(f.a)) }
+        #expect(try f.server.baseline() == captureBaseline)
+        #expect(try f.server.websiteIconBaseline() == iconBaseline)
+        #expect(try a.pendingOperations() == [operation])
+        try f.server.writer.write { try $0.execute(sql: "DROP TRIGGER reject_icon_tombstone") }
+        try a.push(to: f.transport(f.a))
+        #expect(try f.server.baseline().deviceSequences[f.a] == 2)
+        #expect(try f.server.websiteIconBaseline().records.first?.deleted == true)
+    }
+
+    @Test func ownSequenceCollisionAndForgedPrincipalPreservePendingState() throws {
+        let f = try IconFixture()
+        defer { f.clean() }
+        let a = try f.client("a", device: f.a)
+        let blob = try a.blobs.put(iconPNG)
+        let operation = try a.enqueueWebsiteIcon(
+            origin: f.origin, mutation: .upsert(WebsiteIconContent(blob: blob)))
+        let record = WebsiteIconRecord(
+            origin: f.origin, revision: 1, content: WebsiteIconContent(blob: blob))
+        let change = WebsiteIconFeedChange(
+            cursor: 1, record: record, operationID: UUID(), deviceID: f.a,
+            sequence: operation.sequence)
+        #expect(throws: SyncError.recoverySequenceCollision) {
+            try a.validateWebsiteIconPage(
+                WebsiteIconFeedPage(cursor: 1, changes: [change]), cursor: 0)
+        }
+        let forged = SyncHTTPTransport(
+            binding: f.binding, deviceID: f.a, credential: { f.a.uuidString },
+            execute: { request in
+                let response = f.handler(f.a).handle(request)
+                let reply = try SyncDatabase.decode(SyncHTTPReply.self, response.body)
+                let bad = SyncPrincipal(
+                    serviceID: f.binding.serviceID, libraryID: UUID(), deviceID: f.a)
+                return SyncHTTPResponse(
+                    status: response.status, headers: response.headers,
+                    body: try SyncDatabase.encode(
+                        SyncHTTPReply(
+                            version: 1, principal: bad, result: reply.result,
+                            metadataContractVersion: 1, websiteIconContractVersion: 1)))
+            })
+        #expect(throws: SyncHTTPError.invalidResponse) { try a.pushWebsiteIcons(to: forged) }
+        #expect(try a.pendingWebsiteIconOperations() == [operation])
+        #expect(try a.websiteIconCursor() == 0)
+        #expect(try f.server.websiteIconBaseline().deviceSequences.isEmpty)
+    }
+
+    @Test func unboundIconStatePreventsEnrollmentButPristineNamespaceDoesNot() throws {
+        let f = try IconFixture()
+        defer { f.clean() }
+        let path = f.root.appendingPathComponent("unbound.sqlite")
+        let assets = f.root.appendingPathComponent("unbound-assets")
+        let device = UUID()
+        let unbound = try SyncClient(databaseURL: path, blobDirectory: assets, deviceID: device)
+        try unbound.writer.write { try WebsiteIconDatabase.prepare($0) }
+        let enrolled = try SyncClient(
+            databaseURL: path, blobDirectory: assets, deviceID: device, binding: f.binding)
+        #expect(enrolled.binding == f.binding)
+        let other = f.root.appendingPathComponent("nonempty.sqlite")
+        let otherAssets = f.root.appendingPathComponent("nonempty-assets")
+        let used = try SyncClient(databaseURL: other, blobDirectory: otherAssets, deviceID: device)
+        try used.writer.write { db in
+            try WebsiteIconDatabase.prepare(db)
+            try WebsiteIconDatabase.save(
+                db, WebsiteIconRecord(origin: f.origin, revision: 1, deleted: true, content: nil))
+        }
+        #expect(throws: SyncBindingError.enrollmentRequiresEmptyLibrary) {
+            try SyncClient(
+                databaseURL: other, blobDirectory: otherAssets, deviceID: device, binding: f.binding
+            )
+        }
+    }
+
+    @Test func snapshotDeletionRetainsBytesAndTargetReviewBecomesStaleOnIconChange() throws {
+        let f = try IconFixture()
+        defer { f.clean() }
+        let a = try f.client("a", device: f.a)
+        let capture = f.capture()
+        try a.enqueue(captureID: capture.id, mutation: .create(capture))
+        try a.push(to: f.transport(f.a))
+        let blob = try a.blobs.put(iconPNG)
+        try a.enqueueWebsiteIcon(
+            origin: f.origin, mutation: .upsert(WebsiteIconContent(blob: blob)))
+        try a.pushWebsiteIcons(to: f.transport(f.a))
+        var deleted = capture
+        deleted.deleted = true
+        let snapshot = ContentSnapshotImport(
+            snapshotID: UUID(), targetBinding: f.binding, sourceDeviceID: f.b, captures: [deleted],
+            websiteIcons: [])
+        let preview = try f.server.previewContentSnapshotImport(snapshot)
+        #expect(preview.websiteIcons?.first?.deleted == true)
+        try a.enqueueWebsiteIcon(
+            origin: f.origin,
+            mutation: .upsert(
+                WebsiteIconContent(blob: blob, fetchedAt: Date(timeIntervalSince1970: 7))))
+        try a.pushWebsiteIcons(to: f.transport(f.a))
+        #expect(throws: ContentSnapshotImportError.stalePreview) {
+            try f.server.importContentSnapshot(snapshot, preview: preview)
+        }
+        let fresh = try f.server.previewContentSnapshotImport(snapshot)
+        let receipt = try f.server.importContentSnapshot(snapshot, preview: fresh)
+        #expect(receipt.websiteIcons == fresh.websiteIcons)
+        #expect(receipt.websiteIconCursor == 3)
+        #expect(try f.server.blobs.read(blob) == iconPNG)
+        #expect(try f.server.websiteIconBaseline().records.first?.deleted == true)
     }
 
 }

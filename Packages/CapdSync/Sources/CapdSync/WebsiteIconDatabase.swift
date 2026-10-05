@@ -4,7 +4,13 @@ import GRDB
 enum WebsiteIconDatabase {
     static let prefix = "sync_website_icon_"
 
-    static func exists(_ db: Database) throws -> Bool { try db.tableExists(prefix + "meta") }
+    static func exists(_ db: Database) throws -> Bool {
+        try Bool.fetchOne(
+            db,
+            sql:
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='sync_website_icon_meta')"
+        )!
+    }
 
     static func prepare(_ db: Database) throws {
         if try exists(db) { return }
@@ -57,7 +63,13 @@ enum WebsiteIconDatabase {
     }
 
     static func captureSaved(_ db: Database, _ capture: SharedCapture) throws {
-        guard try db.tableExists(prefix + "origins") else { return }
+        guard
+            try Bool.fetchOne(
+                db,
+                sql:
+                    "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='sync_website_icon_origins')"
+            )!
+        else { return }
         let previous = try String.fetchOne(
             db, sql: "SELECT origin FROM sync_website_icon_origins WHERE capture=?",
             arguments: [capture.id.uuidString])

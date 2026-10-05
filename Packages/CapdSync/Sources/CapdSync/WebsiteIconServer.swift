@@ -2,6 +2,17 @@ import Foundation
 import GRDB
 
 extension SyncServer {
+    public func uploadWebsiteIcon(_ blob: BlobReference, offset: Int, chunk: Data, final: Bool)
+        throws
+    {
+        try read { _ in }
+        guard (1...262_144).contains(blob.byteCount),
+            chunk.count <= SyncHTTPHandler.maximumChunkBytes
+        else { throw SyncHTTPError.resourceLimit }
+        try blobs.receive(
+            blob, offset: offset, chunk: chunk, final: final, validating: WebsiteIconPNG.validate)
+    }
+
     public func applyWebsiteIcon(_ operation: WebsiteIconOperation) throws -> WebsiteIconReceipt {
         try applyWebsiteIcon(operation, validating: { _ in })
     }
@@ -11,6 +22,17 @@ extension SyncServer {
     ) throws -> WebsiteIconReceipt {
         try write { db in
             try WebsiteIconDatabase.prepare(db)
+            if try Bool.fetchOne(
+                db,
+                sql:
+                    "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='sync_service_writers')"
+            )!,
+                try String.fetchOne(
+                    db, sql: "SELECT principal FROM sync_service_writers WHERE device=?",
+                    arguments: [operation.deviceID.uuidString]) != nil
+            {
+                throw SyncError.wrongDevice
+            }
             if let row = try Row.fetchOne(
                 db, sql: "SELECT operation,receipt FROM sync_website_icon_receipts WHERE id=?",
                 arguments: [operation.id.uuidString])
@@ -24,13 +46,6 @@ extension SyncServer {
                 return receipt
             }
             try operation.validate()
-            if try db.tableExists("sync_service_writers"),
-                try String.fetchOne(
-                    db, sql: "SELECT principal FROM sync_service_writers WHERE device=?",
-                    arguments: [operation.deviceID.uuidString]) != nil
-            {
-                throw SyncError.wrongDevice
-            }
             let deviceCount = try Int.fetchOne(
                 db, sql: "SELECT COUNT(*) FROM sync_website_icon_devices")!
             let knownDevice = try Bool.fetchOne(
@@ -141,6 +156,11 @@ extension SyncServer {
             guard expectedCursor == nil || expectedCursor == cursor,
                 expectedCaptureCursor == nil || expectedCaptureCursor == captureCursor
             else { throw SyncError.invalidCursor }
+            guard
+                try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM sync_website_icon_records")!
+                    <= 4096,
+                try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM sync_website_icon_devices")! <= 4096
+            else { throw SyncHTTPError.resourceLimit }
             let values = try Data.fetchAll(
                 db,
                 sql: "SELECT payload FROM sync_website_icon_records WHERE id>? ORDER BY id LIMIT ?",

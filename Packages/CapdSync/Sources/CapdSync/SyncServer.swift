@@ -93,6 +93,13 @@ public final class SyncServer: SyncTransport, Sendable {
                     db, sql: "SELECT EXISTS(SELECT 1 FROM sync_devices WHERE id=?)",
                     arguments: [deviceID.uuidString]) == false
             else { throw SyncError.wrongDevice }
+            if try WebsiteIconDatabase.exists(db),
+                try Bool.fetchOne(
+                    db, sql: "SELECT EXISTS(SELECT 1 FROM sync_website_icon_devices WHERE id=?)",
+                    arguments: [deviceID.uuidString])!
+            {
+                throw SyncError.wrongDevice
+            }
             try db.execute(
                 sql: "INSERT INTO sync_service_writers (device, principal) VALUES (?, ?)",
                 arguments: [deviceID.uuidString, principalID])
