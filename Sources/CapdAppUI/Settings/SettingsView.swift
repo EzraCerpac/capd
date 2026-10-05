@@ -53,6 +53,8 @@ package struct SettingsView: View {
                 row("Find titles and manual tags in system search") {
                     toggle($settings.systemSearchEnabled)
                 }
+                Text("Indexed entries receive a 30-day expiration and renew while capd is running.")
+                    .font(.caption).foregroundStyle(Theme.textSecondary)
                 if let issue = settings.systemSearchIssue {
                     Text(issue).font(.caption).foregroundStyle(Theme.textSecondary)
                 }

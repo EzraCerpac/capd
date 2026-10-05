@@ -26,8 +26,15 @@ after confirmed deletion. Session-generation changes rebuild the index. The shar
 extension writes a transactional revision marker; the app reconciles after it
 next opens or prepares an intent. Libraries that exceed 1,000 live captures or
 discovery metadata budgets retract their indexed domain and retain the repair
-record if deletion fails. Indexed items have no fixed expiration;
-reconciliation and consent withdrawal manage their removal.
+record if deletion fails. Each successful indexing write assigns a 30-day
+expiration. Unchanged items renew after 24 hours while the app is active, using
+a fresh bounded snapshot.
+Foreground maintenance checks hourly; foreground entry and intent preparation
+also check renewal age. Inactive, opted-out, or paused sessions do not run renewal
+maintenance. There is no guaranteed renewal while iOS suspends the app, and the
+configured expiration does not guarantee physical erasure by the OS. Explicit
+reconciliation and consent withdrawal still request immediate scoped removal;
+failed deletion retains its journal scope for retry.
 
 Strict `capd://find` and `capd://open` links and Spotlight activities resolve
 through the current host. The app connects its selected-session model before

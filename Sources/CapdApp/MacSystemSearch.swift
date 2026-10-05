@@ -12,6 +12,7 @@ final class MacSystemSearch: CaptureActionHost {
     private var indexedRevision: MacDiscoveryChangeMonitor.Revision?
     private let defaults: UserDefaults
     private let backend: any SpotlightBackend
+    private let now: @MainActor () -> Date
     private let dispatch: (CaptureAction, Int64?) throws -> Void
     private var coordinator: SpotlightCoordinator?
     private var tail: Task<Void, Never>?
@@ -25,6 +26,7 @@ final class MacSystemSearch: CaptureActionHost {
         loadSnapshot: @escaping (StoragePaths, UUID) throws -> MacDiscoverySnapshot = {
             try MacDiscoverySnapshot.load(paths: $0, localLibraryID: $1)
         },
+        now: @escaping @MainActor () -> Date = Date.init,
         dispatch: @escaping (CaptureAction, Int64?) throws -> Void
     ) {
         self.paths = paths
@@ -34,6 +36,7 @@ final class MacSystemSearch: CaptureActionHost {
         self.dispatch = dispatch
         systemSearchEnabled = enabled
         self.backend = backend ?? CoreSpotlightBackend(name: "dev.jxd.capd.mac.captures")
+        self.now = now
         cleanupKey = "capd.system-search.indexed-id." + paths.databaseURL.path
     }
 
@@ -111,7 +114,11 @@ final class MacSystemSearch: CaptureActionHost {
             guard let self else { return }
             do {
                 let revision = self.systemSearchEnabled ? try self.changes.revision() : nil
-                if let revision, revision == self.indexedRevision { return }
+                if let revision, revision == self.indexedRevision,
+                    let coordinator = self.coordinator, !coordinator.needsRenewal
+                {
+                    return
+                }
                 let current = self.systemSearchEnabled ? try self.snapshot() : nil
                 if let oldID = self.defaults.string(forKey: self.cleanupKey).flatMap(
                     UUID.init(uuidString:)),
@@ -125,7 +132,7 @@ final class MacSystemSearch: CaptureActionHost {
                 if let current, self.systemSearchEnabled {
                     if self.coordinator?.libraryID != current.libraryID {
                         self.coordinator = SpotlightCoordinator(
-                            libraryID: current.libraryID, backend: self.backend)
+                            libraryID: current.libraryID, backend: self.backend, now: self.now)
                     }
                     self.defaults.set(current.libraryID.uuidString, forKey: self.cleanupKey)
                     try await self.coordinator?.reconcile(

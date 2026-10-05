@@ -21,6 +21,7 @@ private final class MemoryIndex: SpotlightBackend {
     var items: [String: SearchCapture] = [:]
     var domains: [String: String] = [:]
     var calls: [String] = []
+    var batches: [[String]] = []
     var failReplace = false
     var partiallyAcceptReplace = false
     var pauseReplace = false
@@ -28,6 +29,7 @@ private final class MemoryIndex: SpotlightBackend {
     var continuation: CheckedContinuation<Void, Never>?
     func replace(_ captures: [SearchCapture], domain: String) async throws {
         calls.append("replace")
+        batches.append(captures.map(\.id))
         started = true
         if pauseReplace { await withCheckedContinuation { continuation = $0 } }
         if partiallyAcceptReplace, let first = captures.first {
@@ -55,6 +57,11 @@ private final class MemoryIndex: SpotlightBackend {
             domains.removeValue(forKey: id)
         }
     }
+}
+
+@MainActor
+private final class IndexClock {
+    var date = Date(timeIntervalSinceReferenceDate: 10_000)
 }
 
 struct CaptureRouteTests {
@@ -86,13 +93,19 @@ struct CaptureRouteTests {
     }
 
     @Test @MainActor func spotlightAttributesAndActivity() {
+        let before = Date().addingTimeInterval(30 * 24 * 60 * 60)
         let item = CoreSpotlightBackend.item(fixture(), domain: "synthetic.test")
+        let after = Date().addingTimeInterval(30 * 24 * 60 * 60)
         #expect(item.uniqueIdentifier == reference.id)
         #expect(item.domainIdentifier == "synthetic.test")
         #expect(item.attributeSet.title == "Synthetic capture")
         #expect(item.attributeSet.textContent == "synthetic indigo notebook")
         #expect(item.attributeSet.contentURL == CaptureRoute.open(reference).url)
-        #expect(item.expirationDate == Date.distantFuture)
+        #expect(item.expirationDate >= before && item.expirationDate <= after)
+        let date = Date(timeIntervalSinceReferenceDate: 10_000)
+        #expect(
+            CoreSpotlightBackend.item(fixture(), domain: "synthetic.test", now: date).expirationDate
+                == date.addingTimeInterval(30 * 24 * 60 * 60))
         let activity = NSUserActivity(activityType: CSSearchableItemActionType)
         activity.userInfo = [CSSearchableItemActivityIdentifier: reference.id]
         #expect(CaptureRoute(spotlightActivity: activity) == .open(reference))
@@ -103,6 +116,82 @@ struct CaptureRouteTests {
 
 @MainActor
 struct SpotlightCoordinatorTests {
+    @Test func unchangedEntriesRenewIndependentlyAfterOneDay() async throws {
+        let clock = IndexClock()
+        let backend = MemoryIndex()
+        let coordinator = SpotlightCoordinator(
+            libraryID: library, backend: backend, now: { clock.date })
+        let first = fixture()
+        var second = SearchCapture(
+            reference: CaptureReference(libraryID: library, captureID: UUID()), title: "Second")
+        try await coordinator.reconcile([first, second], enabled: true)
+        clock.date += 12 * 60 * 60
+        second.revision += 1
+        try await coordinator.reconcile([first, second], enabled: true)
+        #expect(backend.batches.last == [second.id])
+        clock.date += 12 * 60 * 60 - 1
+        #expect(!coordinator.needsRenewal)
+        try await coordinator.reconcile([first, second], enabled: true)
+        #expect(backend.batches.count == 2)
+        clock.date += 1
+        #expect(coordinator.needsRenewal)
+        try await coordinator.reconcile([first, second], enabled: true)
+        #expect(backend.batches.last == [first.id])
+        #expect(!coordinator.needsRenewal)
+        clock.date += 12 * 60 * 60
+        try await coordinator.reconcile([first, second], enabled: true)
+        #expect(backend.batches.last == [second.id])
+        clock.date -= 48 * 60 * 60
+        #expect(coordinator.needsRenewal)
+    }
+
+    @Test func failedRenewalRemainsDueAndRetriesFromACleanDomain() async throws {
+        let clock = IndexClock()
+        let backend = MemoryIndex()
+        let coordinator = SpotlightCoordinator(
+            libraryID: library, backend: backend, now: { clock.date })
+        try await coordinator.reconcile([fixture()], enabled: true)
+        clock.date += 24 * 60 * 60
+        backend.failReplace = true
+        await #expect(throws: SystemIntegrationError.unavailable) {
+            try await coordinator.reconcile([fixture()], enabled: true)
+        }
+        #expect(coordinator.needsRenewal)
+        backend.failReplace = false
+        try await coordinator.reconcile([fixture()], enabled: true)
+        #expect(backend.calls.filter { $0 == "deleteDomain" }.count == 2)
+        #expect(!coordinator.needsRenewal)
+    }
+
+    @Test func renewalCannotReviveRemovedItemsOrBypassSnapshotValidation() async throws {
+        let clock = IndexClock()
+        let backend = MemoryIndex()
+        let coordinator = SpotlightCoordinator(
+            libraryID: library, backend: backend, now: { clock.date })
+        let other = SearchCapture(
+            reference: CaptureReference(libraryID: library, captureID: UUID()), title: "Other")
+        try await coordinator.reconcile([fixture(), other], enabled: true)
+        clock.date += 24 * 60 * 60
+        let calls = backend.calls
+        await #expect(throws: SystemIntegrationError.invalidSnapshot) {
+            try await coordinator.reconcile(
+                [fixture(), fixture(text: "invalid duplicate")], enabled: true)
+        }
+        #expect(backend.calls == calls)
+        #expect(coordinator.needsRenewal)
+        try await coordinator.reconcile([fixture(deleted: true), other], enabled: true)
+        #expect(backend.batches.last == [other.id])
+        #expect(backend.items[reference.id] == nil)
+        try await coordinator.reconcile([], enabled: false)
+        clock.date += 40 * 24 * 60 * 60
+        #expect(!coordinator.needsRenewal)
+        #expect(backend.items.isEmpty)
+        let cold = SpotlightCoordinator(libraryID: library, backend: backend, now: { clock.date })
+        try await cold.reconcile([other], enabled: true)
+        #expect(backend.calls.suffix(2) == ["deleteDomain", "replace"])
+        #expect(!cold.needsRenewal)
+    }
+
     @Test func updatesDedupesAndDeletes() async throws {
         let backend = MemoryIndex()
         let coordinator = SpotlightCoordinator(

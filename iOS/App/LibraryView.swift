@@ -74,7 +74,10 @@ struct LibraryView: View {
                 prompt: "Search saved sources"
             )
             .onChange(of: model.query) { _, _ in model.reload() }
-            .onChange(of: scenePhase) { _, phase in model.sceneChanged(active: phase == .active) }
+            .onChange(of: scenePhase, initial: true) { _, phase in
+                model.systemSearch.setForeground(phase == .active)
+                model.sceneChanged(active: phase == .active)
+            }
             .task {
                 model.systemSearch.connect(systemBridge)
                 consumeSystemAction()

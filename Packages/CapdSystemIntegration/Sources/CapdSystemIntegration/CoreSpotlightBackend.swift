@@ -15,7 +15,9 @@ public final class CoreSpotlightBackend: SpotlightBackend {
         var protectionClass: FileProtectionType { index.protectionClass }
     #endif
 
-    public static func item(_ capture: SearchCapture, domain: String) -> CSSearchableItem {
+    public static func item(_ capture: SearchCapture, domain: String, now: Date = Date())
+        -> CSSearchableItem
+    {
         let attributes = CSSearchableItemAttributeSet(contentType: .text)
         attributes.title = String(capture.title.prefix(256))
         attributes.contentDescription = String(capture.text.prefix(256))
@@ -24,8 +26,7 @@ public final class CoreSpotlightBackend: SpotlightBackend {
         attributes.contentURL = CaptureRoute.open(capture.reference).url
         let item = CSSearchableItem(
             uniqueIdentifier: capture.id, domainIdentifier: domain, attributeSet: attributes)
-        // The coordinator retracts stale items and revoked domains explicitly.
-        item.expirationDate = .distantFuture
+        item.expirationDate = now.addingTimeInterval(30 * 24 * 60 * 60)
         return item
     }
 

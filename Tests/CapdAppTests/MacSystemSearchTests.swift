@@ -9,6 +9,66 @@ import Testing
 @MainActor
 @Suite(.serialized)
 struct MacSystemSearchTests {
+    @Test func dueRenewalBypassesOnlyTheUnchangedRevisionGate() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let suite = "capd-discovery-renewal-\(UUID())"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer {
+            defaults.removePersistentDomain(forName: suite)
+            try? FileManager.default.removeItem(at: root)
+        }
+        let paths = StoragePaths(root: root)
+        let store = try MacLibrarySession.open(paths: paths).store
+        _ = try CaptureService(store: store).ingest(CaptureRequest(text: "Synthetic saved source"))
+        let clock = DiscoveryClock()
+        let backend = DiscoveryMemoryIndex()
+        var loads = 0
+        var failNextLoad = false
+        var issue: String?
+        let host = MacSystemSearch(
+            paths: paths, enabled: true, defaults: defaults, backend: backend,
+            loadSnapshot: { paths, localID in
+                loads += 1
+                if failNextLoad {
+                    failNextLoad = false
+                    throw DiscoveryTestError.injected
+                }
+                return try MacDiscoverySnapshot.load(paths: paths, localLibraryID: localID)
+            }, now: { clock.date }, dispatch: { _, _ in })
+        host.reportIssue = { issue = $0 }
+        host.refresh()
+        await host.settle()
+        for _ in 0..<20 { host.refresh() }
+        await host.settle()
+        #expect(loads == 1 && backend.replacements == 1)
+        clock.date += 24 * 60 * 60
+        failNextLoad = true
+        host.refresh()
+        await host.settle()
+        #expect(loads == 2 && issue != nil && backend.items.isEmpty)
+        host.refresh()
+        await host.settle()
+        #expect(loads == 3 && backend.replacements == 2 && issue == nil)
+        clock.date += 24 * 60 * 60
+        host.refresh()
+        await host.settle()
+        #expect(loads == 4 && backend.replacements == 3)
+        host.setEnabled(false)
+        await host.settle()
+        clock.date += 40 * 24 * 60 * 60
+        for _ in 0..<20 { host.refresh() }
+        await host.settle()
+        #expect(loads == 4 && backend.replacements == 3 && backend.items.isEmpty)
+        let cold = MacSystemSearch(
+            paths: paths, enabled: true, defaults: defaults, backend: backend,
+            now: { clock.date }, dispatch: { _, _ in })
+        cold.refresh()
+        await cold.settle()
+        #expect(backend.replacements == 4 && backend.items.count == 1)
+        cold.setEnabled(false)
+        await cold.settle()
+    }
+
     @Test func freshReadOnlyQueriesRouteAndDeleteWithoutCapturing() async throws {
         let root = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent(
             "capd-discovery-\(UUID())")
@@ -397,13 +457,20 @@ struct MacSystemSearchTests {
 @MainActor
 private final class DiscoveryMemoryIndex: SpotlightBackend {
     var items: [String: SearchCapture] = [:]
+    var replacements = 0
     func replace(_ captures: [SearchCapture], domain: String) async throws {
+        replacements += 1
         for capture in captures { items[capture.id] = capture }
     }
     func delete(identifiers: [String]) async throws {
         for id in identifiers { items.removeValue(forKey: id) }
     }
     func delete(domain: String) async throws { items.removeAll() }
+}
+
+@MainActor
+private final class DiscoveryClock {
+    var date = Date(timeIntervalSinceReferenceDate: 10_000)
 }
 
 private enum DiscoveryTestError: Error { case injected }

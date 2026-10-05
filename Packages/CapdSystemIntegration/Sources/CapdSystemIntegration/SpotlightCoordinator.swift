@@ -9,20 +9,38 @@ public protocol SpotlightBackend: AnyObject {
 
 @MainActor
 public final class SpotlightCoordinator {
+    private struct IndexedCapture {
+        let capture: SearchCapture
+        let donatedAt: Date
+    }
+
     public let libraryID: UUID
     public let domain: String
     private let backend: any SpotlightBackend
-    private var indexed: [String: SearchCapture] = [:]
+    private var indexed: [String: IndexedCapture] = [:]
+    private let now: @MainActor () -> Date
     private var initialized = false
     private var consent = false
     private var tail: Task<Void, Never>?
 
     public init(
-        libraryID: UUID, namespace: String = "dev.jxd.capd.captures", backend: any SpotlightBackend
+        libraryID: UUID, namespace: String = "dev.jxd.capd.captures", backend: any SpotlightBackend,
+        now: @escaping @MainActor () -> Date = Date.init
     ) {
         self.libraryID = libraryID
         self.domain = "\(namespace).\(libraryID.uuidString.lowercased())"
         self.backend = backend
+        self.now = now
+    }
+
+    /// Host revision gates must still reconcile when unchanged items need renewal.
+    public var needsRenewal: Bool {
+        let date = now()
+        return consent && (!initialized || indexed.values.contains { due($0, at: date) })
+    }
+
+    private func due(_ item: IndexedCapture, at date: Date) -> Bool {
+        date < item.donatedAt || date.timeIntervalSince(item.donatedAt) >= 24 * 60 * 60
     }
 
     /// Reconciles a complete canonical library snapshot. Never pass a filtered search page.
@@ -81,7 +99,11 @@ public final class SpotlightCoordinator {
         }
         try Task.checkCancellation()
         guard consent else { return }
-        let changed = visible.values.filter { indexed[$0.id] != $0 }.sorted { $0.id < $1.id }
+        let donatedAt = now()
+        let changed = visible.values.filter {
+            guard let previous = indexed[$0.id] else { return true }
+            return previous.capture != $0 || due(previous, at: donatedAt)
+        }.sorted { $0.id < $1.id }
         if !changed.isEmpty {
             do {
                 try await backend.replace(changed, domain: domain)
@@ -89,7 +111,9 @@ public final class SpotlightCoordinator {
                 initialized = false
                 throw error
             }
-            for capture in changed { indexed[capture.id] = capture }
+            for capture in changed {
+                indexed[capture.id] = IndexedCapture(capture: capture, donatedAt: donatedAt)
+            }
         }
     }
 }

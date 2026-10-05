@@ -61,7 +61,7 @@ struct SyncSettingsView: View {
                         )
                         .accessibilityIdentifier("systemSearchEnabled")
                         Text(
-                            "Share saved titles and your manual tags with this device’s system search. Source text and notes are excluded. Shared captures appear after capd next opens. Turning this off removes capd’s indexed entries."
+                            "Share saved titles and your manual tags with this device’s system search. Source text and notes are excluded. Shared captures appear after capd next opens. Indexed entries receive a 30-day expiration and renew while capd is active. Turning this off requests removal; failures can be retried."
                         )
                         .font(.footnote)
                         if systemSearch.updating {

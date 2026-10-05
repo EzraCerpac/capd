@@ -19,10 +19,21 @@ final class PhoneSystemSearch {
     private var preparedRevision: MobileLibraryRevision?
     private var generation = 0
     private var paused = false
+    private var foreground = false
+    private var maintenance: Task<Void, Never>?
+    private let now: @MainActor () -> Date
+    private let waitForMaintenance: @MainActor () async throws -> Void
     private let defaults: UserDefaults
     private let localID: UUID
 
-    init() {
+    init(
+        now: @escaping @MainActor () -> Date = Date.init,
+        waitForMaintenance: @escaping @MainActor () async throws -> Void = {
+            try await Task.sleep(for: .seconds(60 * 60))
+        }
+    ) {
+        self.now = now
+        self.waitForMaintenance = waitForMaintenance
         let defaults = UserDefaults(suiteName: MobileEnvironment.groupID) ?? .standard
         self.defaults = defaults
         enabled = defaults.bool(forKey: "capd.system-search.enabled")
@@ -40,12 +51,14 @@ final class PhoneSystemSearch {
         self.bridge = bridge
         if !enabled { invalidate(bridge) }
         schedule()
+        updateMaintenance()
     }
 
     func refresh(session: MobileLibrarySession) {
         self.session = session
         paused = false
         schedule()
+        updateMaintenance()
     }
 
     func resumeWithoutSession() {
@@ -57,6 +70,7 @@ final class PhoneSystemSearch {
         paused = false
         if let bridge { invalidate(bridge) }
         schedule()
+        updateMaintenance()
     }
 
     func setEnabled(_ value: Bool) {
@@ -64,9 +78,37 @@ final class PhoneSystemSearch {
         defaults.set(value, forKey: "capd.system-search.enabled")
         if !value, let bridge { invalidate(bridge) }
         schedule()
+        updateMaintenance()
     }
 
     func retry() { schedule() }
+
+    func setForeground(_ value: Bool) {
+        foreground = value
+        updateMaintenance()
+        if value { renewIfNeeded() }
+    }
+
+    private func renewIfNeeded() {
+        guard foreground, enabled, !paused, !updating, session != nil, bridge != nil,
+            coordinator?.needsRenewal ?? true
+        else { return }
+        schedule()
+    }
+
+    private func updateMaintenance() {
+        maintenance?.cancel()
+        maintenance = nil
+        guard foreground, enabled, !paused, session != nil, bridge != nil else { return }
+        let wait = waitForMaintenance
+        maintenance = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                do { try await wait() } catch { return }
+                guard !Task.isCancelled, let self else { return }
+                self.renewIfNeeded()
+            }
+        }
+    }
 
     func prepareForIntent() async throws {
         guard session != nil, bridge != nil, !paused else {
@@ -82,7 +124,9 @@ final class PhoneSystemSearch {
             guard error == nil else { throw SystemIntegrationError.unavailable }
             if enabled, let session {
                 let revision = try session.store.libraryRevision()
-                if preparedSessionToken != session.token || preparedRevision != revision {
+                if preparedSessionToken != session.token || preparedRevision != revision
+                    || coordinator?.needsRenewal == true
+                {
                     schedule()
                     continue
                 }
@@ -93,6 +137,7 @@ final class PhoneSystemSearch {
 
     func suspendAndDrain() async {
         paused = true
+        updateMaintenance()
         if let bridge { invalidate(bridge) }
         // OS callbacks are not cancellable: retain the lease until they complete.
         await tail?.value
@@ -160,7 +205,7 @@ final class PhoneSystemSearch {
                 let index =
                     coordinator
                     ?? SpotlightCoordinator(
-                        libraryID: libraryID, backend: backend())
+                        libraryID: libraryID, backend: backend(), now: now)
                 invalidate(bridge, preservingDeferredRoute: enabled && !paused)
                 try await index.reconcile([], enabled: false)
                 try journal.removed(libraryID)
@@ -169,7 +214,8 @@ final class PhoneSystemSearch {
             }
             try journal.begin(libraryID)
             if coordinator == nil {
-                coordinator = SpotlightCoordinator(libraryID: libraryID, backend: backend())
+                coordinator = SpotlightCoordinator(
+                    libraryID: libraryID, backend: backend(), now: now)
             }
             try await coordinator?.reconcile(captures, enabled: true)
             if !enabled || paused {

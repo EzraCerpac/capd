@@ -12,9 +12,9 @@ Each app has one app-level shortcuts provider with three phrase templates and an
 
 The named `CSSearchableIndex` uses `FileProtectionType.complete`. Current macOS/iOS 27 exposes the protection property, checked by the synthetic test. Older macOS versions may differ in protection enforcement; no locked-device test has been performed. IDs are `capd.v1.<library UUID>.<canonical capture UUID>`, independent of device IDs/local row numbers. Domain IDs include the library UUID. Never use a local `Int64`, device UUID, URL, or content fingerprint as the searchable identifier. Sync aliases must already be canonicalized in the supplied projection. The same record from two devices must have the same library/capture IDs; replacement of an alias in a complete snapshot removes its old item.
 
-Reconciliation serializes operations, removes absent/tombstoned IDs, updates changed items in place, and makes no repeated donation for unchanged snapshots. Higher revisions win within a snapshot; a tombstone wins a tie. Conflicting duplicate data at one revision is rejected. Snapshots are limited to 1000 records, title to 256 characters, text to 8192, and 32 keywords of at most 80 characters. Initialization truncates values and the reconciliation/backend boundaries validate decoded or mutated inputs. Do not truncate a library to fit the snapshot limit: if a complete usable snapshot cannot be built, deactivate system search and report the error. Avoid out-of-order snapshots by refreshing through one host/coordinator after committed local changes and sync projection.
+Reconciliation serializes operations, removes absent/tombstoned IDs, updates changed items in place, and makes no repeated donation for unchanged snapshots until renewal is due. Higher revisions win within a snapshot; a tombstone wins a tie. Conflicting duplicate data at one revision is rejected. Snapshots are limited to 1000 records, title to 256 characters, text to 8192, and 32 keywords of at most 80 characters. Initialization truncates values and the reconciliation/backend boundaries validate decoded or mutated inputs. Do not truncate a library to fit the snapshot limit: if a complete usable snapshot cannot be built, deactivate system search and report the error. Avoid out-of-order snapshots by refreshing through one host/coordinator after committed local changes and sync projection.
 
-A coordinator's first enabled reconciliation clears only its own library domain and rebuilds from the canonical snapshot, removing stale IDs left by a previous process. A new process does not trust an in-memory manifest. Items expire after 30 days as an additional bound; expiration is not a substitute for immediate deletion. The host must reconcile after delete, merge, and sync tombstones, and refresh on foreground/launch. Keep one coordinator/backend for a library's named index. This package has no background reindex delegate extension, recovery scheduling, or autonomous background worker. Operation completion is journal acceptance; Spotlight visibility is asynchronous.
+A coordinator's first enabled reconciliation clears only its own library domain and rebuilds from the canonical snapshot, removing stale IDs left by a previous process. A new process does not trust an in-memory manifest. Each successful indexing write assigns a 30-day expiration. Unchanged entries are renewed after 24 hours while the host is active; changing another record does not postpone their renewal. This configured expiration is a fallback, not a guarantee of physical erasure by the OS or a substitute for immediate deletion. The host must reconcile after delete, merge, and sync tombstones, and refresh on foreground/launch. Keep one coordinator/backend for a library's named index. Failed phone deletion retains its durable journal scope for retry. This package has no background reindex delegate extension, recovery scheduling, or autonomous background worker. Operation completion is journal acceptance; Spotlight visibility is asynchronous.
 
 Disable the host immediately and call `await bridge.deactivate(using: coordinator)` on consent revocation/library removal before changing libraries. This clears runtime data and awaits scoped domain deletion, even if the calling task is cancelled. Surface deletion errors and retry until confirmed; never silently report revocation complete on failure. A bridge refuses switching to another library until deactivated. Delete individual IDs or this library's domain only. No global Spotlight deletion API is used.
 
@@ -31,7 +31,11 @@ Library replacement drains search work under the generation/search leases before
 activation. Failed domain deletion retains its repair scope. Opt-out invalidates
 routing immediately and serializes scoped deletion. Oversized libraries fail
 closed. Find changes the local filter; Open re-resolves the current capture;
-Draft Text opens the ordinary composer and requires Save. Failed reconciliation
+Draft Text opens the ordinary composer and requires Save. Foreground maintenance
+checks hourly and renews due entries from a fresh bounded snapshot under the
+session/search lease. Intent preparation also checks renewal age. Maintenance
+stops when the scene is inactive, consent is off, or the session is paused; there
+is no guaranteed renewal while iOS suspends the app. Failed reconciliation
 retains a cold-launch route for retry while search consent remains active. Find
 returns the shared navigation stack to the library root before applying its filter.
 
@@ -62,6 +66,8 @@ report missing. An in-place overwrite preserving those filesystem attributes is
 outside this detection. Discovery remains read-only and does not add schema or
 store mappings. A failed Spotlight batch forces a scoped domain rebuild on the
 next reconciliation, including any items partially accepted before the failure.
+The existing lightweight maintenance poll skips complete reads until the store
+revision changes or an indexed item is due for renewal, then reads a fresh snapshot.
 
 Search routes show the existing search window. Open resolves UUIDs to current
 local rows. Draft Text presents editable text and saves only after confirmation.
