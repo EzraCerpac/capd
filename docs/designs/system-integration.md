@@ -46,6 +46,15 @@ store mappings. Query/detail paths reopen the read-only store per request.
 Mutations retain the actual runtime session. Search/entity/open actions do not
 start a sync client, access Keychain, or contact a service.
 
+Identifier batches resolve from one validated Mac snapshot. The unbound local
+library UUID follows the database file's filesystem device, inode, and creation
+time, persisted in preferences and checked for every snapshot. Database
+recreation or atomic replacement rotates that UUID, so old saved references
+report missing. An in-place overwrite preserving those filesystem attributes is
+outside this detection. Discovery remains read-only and does not add schema or
+store mappings. A failed Spotlight batch forces a scoped domain rebuild on the
+next reconciliation, including any items partially accepted before the failure.
+
 Search routes show the existing search window. Open resolves UUIDs to current
 local rows. Draft Text presents editable text and saves only after confirmation.
 The package and app providers compile App Intents metadata; a bare SwiftPM

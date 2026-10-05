@@ -12,11 +12,16 @@ public protocol CaptureActionHost: AnyObject {
     func prepareForIntent() async throws
     func search(_ query: String) throws -> [SearchCapture]
     func resolve(_ reference: CaptureReference) throws -> SearchCapture?
+    func resolve(_ references: [CaptureReference]) throws -> [SearchCapture]
     func handle(_ action: CaptureAction) throws
 }
 
 extension CaptureActionHost {
     public func prepareForIntent() async throws {}
+
+    public func resolve(_ references: [CaptureReference]) throws -> [SearchCapture] {
+        try references.compactMap { try resolve($0) }
+    }
 }
 
 @MainActor
@@ -48,11 +53,16 @@ public final class CaptureIntentRuntime {
         guard host.systemSearchEnabled else { throw SystemIntegrationError.privacyDisabled }
         guard references.count <= 100 else { throw SystemIntegrationError.invalidInput }
         var seen = Set<String>()
-        return try references.filter { seen.insert($0.id).inserted }.compactMap {
-            guard let capture = try host.resolve($0), capture.reference == $0, !capture.deleted
-            else { return nil }
-            return capture
+        let requested = references.filter { seen.insert($0.id).inserted }
+        guard !requested.isEmpty else { return [] }
+        let allowed = Set(requested)
+        var resolved: [CaptureReference: SearchCapture] = [:]
+        for capture in try host.resolve(requested) where !capture.deleted {
+            if allowed.contains(capture.reference), resolved[capture.reference] == nil {
+                resolved[capture.reference] = capture
+            }
         }
+        return requested.compactMap { resolved[$0] }
     }
 
     public func perform(_ action: CaptureAction) throws {

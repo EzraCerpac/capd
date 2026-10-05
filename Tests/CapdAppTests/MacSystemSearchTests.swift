@@ -125,6 +125,158 @@ struct MacSystemSearchTests {
         #expect(backend.items.isEmpty)
     }
 
+    @Test func identifierBatchResolvesFromOneSnapshot() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let suite = "capd-discovery-batch-\(UUID())"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer {
+            defaults.removePersistentDomain(forName: suite)
+            try? FileManager.default.removeItem(at: root)
+        }
+        let paths = StoragePaths(root: root)
+        let store = try MacLibrarySession.open(paths: paths).store
+        for index in 0..<100 {
+            _ = try CaptureService(store: store).ingest(
+                CaptureRequest(text: "Batch \(index)", title: "Capture \(index)"))
+        }
+        var loads = 0
+        let host = MacSystemSearch(
+            paths: paths, enabled: true, defaults: defaults,
+            backend: DiscoveryMemoryIndex(),
+            loadSnapshot: { paths, localID in
+                loads += 1
+                return try MacDiscoverySnapshot.load(paths: paths, localLibraryID: localID)
+            }, dispatch: { _, _ in })
+        let runtime = CaptureIntentRuntime()
+        runtime.host = host
+        let records = try host.search("")
+        loads = 0
+        let references = records.reversed().map(\.reference)
+        #expect(try runtime.resolve(references).map(\.reference) == references)
+        #expect(loads == 1)
+        loads = 0
+        let mixed = [
+            references[0], references[0], CaptureReference(libraryID: UUID(), captureID: UUID()),
+        ]
+        #expect(try runtime.resolve(mixed).map(\.reference) == [references[0]])
+        #expect(loads == 1)
+        loads = 0
+        #expect(try runtime.resolve([]).isEmpty)
+        #expect(loads == 0)
+        #expect(throws: SystemIntegrationError.invalidInput) {
+            try runtime.resolve(references + [references[0]])
+        }
+        #expect(loads == 0)
+        host.setEnabled(false)
+        #expect(throws: SystemIntegrationError.privacyDisabled) { try runtime.resolve(references) }
+        #expect(loads == 0)
+        await host.settle()
+    }
+
+    @Test(arguments: [false, true])
+    func recreatedDatabaseAtSamePathInvalidatesSavedReferences(atomicReplacement: Bool) async throws
+    {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let suite = "capd-discovery-replacement-\(UUID())"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer {
+            defaults.removePersistentDomain(forName: suite)
+            try? FileManager.default.removeItem(at: root)
+        }
+        let paths = StoragePaths(root: root)
+        do {
+            let store = try MacLibrarySession.open(paths: paths).store
+            _ = try CaptureService(store: store).ingest(CaptureRequest(text: "Old", title: "Old"))
+            try store.dbPool.close()
+        }
+        let backend = DiscoveryMemoryIndex()
+        var opened: [Int64] = []
+        let host = MacSystemSearch(
+            paths: paths, enabled: true, defaults: defaults,
+            backend: backend, dispatch: { _, id in if let id { opened.append(id) } })
+        let saved = try #require(try host.search("").first)
+        let reopened = MacSystemSearch(
+            paths: paths, enabled: true, defaults: defaults,
+            backend: backend, dispatch: { _, _ in })
+        #expect(try reopened.resolve(saved.reference) == saved)
+        host.refresh()
+        await host.settle()
+        if atomicReplacement {
+            let replacement = StoragePaths(root: root.appendingPathComponent("replacement"))
+            let store = try MacLibrarySession.open(paths: replacement).store
+            _ = try CaptureService(store: store).ingest(CaptureRequest(text: "New", title: "New"))
+            try store.dbPool.close()
+            _ = try FileManager.default.replaceItemAt(
+                paths.databaseURL,
+                withItemAt: replacement.databaseURL)
+        } else {
+            for suffix in ["", "-wal", "-shm"] {
+                let file = URL(fileURLWithPath: paths.databaseURL.path + suffix)
+                if FileManager.default.fileExists(atPath: file.path) {
+                    try FileManager.default.removeItem(at: file)
+                }
+            }
+            let store = try MacLibrarySession.open(paths: paths).store
+            _ = try CaptureService(store: store).ingest(CaptureRequest(text: "New", title: "New"))
+            try store.dbPool.close()
+        }
+        let current = try #require(try host.search("").first)
+        #expect(current.reference.libraryID != saved.reference.libraryID)
+        #expect(current.reference != saved.reference)
+        let runtime = CaptureIntentRuntime()
+        runtime.host = host
+        #expect(try runtime.resolve([saved.reference]).isEmpty)
+        #expect(throws: SystemIntegrationError.missingCapture) {
+            try runtime.perform(.open(saved.reference))
+        }
+        #expect(opened.isEmpty)
+        try runtime.perform(.open(current.reference))
+        #expect(opened == [1])
+        let restarted = MacSystemSearch(
+            paths: paths, enabled: true, defaults: defaults,
+            backend: backend, dispatch: { _, _ in })
+        #expect(try restarted.resolve(current.reference) == current)
+        host.refresh()
+        await host.settle()
+        #expect(Set(backend.items.keys) == [current.id])
+    }
+
+    @Test func legacyPathIdentityRotatesOnceWithoutWritingTheStore() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let suite = "capd-discovery-legacy-\(UUID())"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer {
+            defaults.removePersistentDomain(forName: suite)
+            try? FileManager.default.removeItem(at: root)
+        }
+        let paths = StoragePaths(root: root)
+        do {
+            let store = try MacLibrarySession.open(paths: paths).store
+            _ = try CaptureService(store: store).ingest(
+                CaptureRequest(text: "Synthetic", title: "Synthetic"))
+            try store.dbPool.close()
+        }
+        let legacyID = UUID()
+        defaults.set(
+            legacyID.uuidString, forKey: "capd.system-search.local-id." + paths.databaseURL.path)
+        let prior = try MacDiscoverySnapshot.load(paths: paths, localLibraryID: legacyID)
+        let old = CaptureReference(
+            libraryID: legacyID, captureID: try #require(prior.captures.first?.id))
+        let before = try Data(contentsOf: paths.databaseURL)
+        let backend = DiscoveryMemoryIndex()
+        let host = MacSystemSearch(
+            paths: paths, enabled: true, defaults: defaults,
+            backend: backend, dispatch: { _, _ in })
+        let current = try #require(try host.search("").first)
+        #expect(current.reference.libraryID != legacyID)
+        #expect(try host.resolve(old) == nil)
+        let restarted = MacSystemSearch(
+            paths: paths, enabled: true, defaults: defaults,
+            backend: backend, dispatch: { _, _ in })
+        #expect(try restarted.resolve(current.reference) == current)
+        #expect(try Data(contentsOf: paths.databaseURL) == before)
+    }
+
     @Test func exactSourcePresentationWinsOverInFlightQuery() async throws {
         let selected = Capture(
             kind: .text, title: "Selected source", selection: "synthetic", createdAt: Date())

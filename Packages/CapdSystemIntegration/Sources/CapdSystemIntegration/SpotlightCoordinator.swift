@@ -83,7 +83,12 @@ public final class SpotlightCoordinator {
         guard consent else { return }
         let changed = visible.values.filter { indexed[$0.id] != $0 }.sorted { $0.id < $1.id }
         if !changed.isEmpty {
-            try await backend.replace(changed, domain: domain)
+            do {
+                try await backend.replace(changed, domain: domain)
+            } catch {
+                initialized = false
+                throw error
+            }
             for capture in changed { indexed[capture.id] = capture }
         }
     }

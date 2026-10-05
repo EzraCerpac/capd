@@ -10,7 +10,6 @@ final class MacSystemSearch: CaptureActionHost {
     private let changes: MacDiscoveryChangeMonitor
     private let loadSnapshot: (StoragePaths, UUID) throws -> MacDiscoverySnapshot
     private var indexedRevision: MacDiscoveryChangeMonitor.Revision?
-    private let localID: UUID
     private let defaults: UserDefaults
     private let backend: any SpotlightBackend
     private let dispatch: (CaptureAction, Int64?) throws -> Void
@@ -34,14 +33,7 @@ final class MacSystemSearch: CaptureActionHost {
         self.dispatch = dispatch
         systemSearchEnabled = enabled
         self.backend = backend ?? CoreSpotlightBackend(name: "dev.jxd.capd.mac.captures")
-        let identityKey = "capd.system-search.local-id." + paths.databaseURL.path
         cleanupKey = "capd.system-search.indexed-id." + paths.databaseURL.path
-        if let raw = defaults.string(forKey: identityKey), let id = UUID(uuidString: raw) {
-            localID = id
-        } else {
-            localID = UUID()
-            defaults.set(localID.uuidString, forKey: identityKey)
-        }
     }
 
     func install() { CaptureIntentRuntime.shared.host = self }
@@ -76,11 +68,18 @@ final class MacSystemSearch: CaptureActionHost {
     }
 
     func resolve(_ reference: CaptureReference) throws -> SearchCapture? {
+        try resolve([reference]).first
+    }
+
+    func resolve(_ references: [CaptureReference]) throws -> [SearchCapture] {
         let current = try snapshot()
-        guard current.libraryID == reference.libraryID,
-            let entry = current.captures.first(where: { $0.id == reference.captureID })
-        else { return nil }
-        return Self.record(entry, libraryID: current.libraryID)
+        let captures = Dictionary(uniqueKeysWithValues: current.captures.map { ($0.id, $0) })
+        return references.compactMap { reference in
+            guard current.libraryID == reference.libraryID,
+                let entry = captures[reference.captureID]
+            else { return nil }
+            return Self.record(entry, libraryID: current.libraryID)
+        }
     }
 
     func handle(_ action: CaptureAction) throws {
@@ -157,7 +156,32 @@ final class MacSystemSearch: CaptureActionHost {
 
     private func snapshot() throws -> MacDiscoverySnapshot {
         guard systemSearchEnabled else { throw SystemIntegrationError.privacyDisabled }
-        return try loadSnapshot(paths, localID)
+        let identity = try databaseIdentity()
+        let identityKey = "capd.system-search.local-id." + paths.databaseURL.path
+        let fileKey = "capd.system-search.local-file." + paths.databaseURL.path
+        let localID: UUID
+        if defaults.string(forKey: fileKey) == identity,
+            let stored = defaults.string(forKey: identityKey).flatMap(UUID.init(uuidString:))
+        {
+            localID = stored
+        } else {
+            localID = UUID()
+            defaults.set(localID.uuidString, forKey: identityKey)
+            defaults.set(identity, forKey: fileKey)
+        }
+        let current = try loadSnapshot(paths, localID)
+        guard try databaseIdentity() == identity else { throw MacDiscoveryError.invalidIdentity }
+        return current
+    }
+
+    private func databaseIdentity() throws -> String {
+        let attributes = try FileManager.default.attributesOfItem(atPath: paths.databaseURL.path)
+        guard let device = attributes[.systemNumber] as? NSNumber,
+            let file = attributes[.systemFileNumber] as? NSNumber,
+            let created = attributes[.creationDate] as? Date
+        else { throw MacDiscoveryError.invalidIdentity }
+        return
+            "\(device.uint64Value):\(file.uint64Value):\(created.timeIntervalSinceReferenceDate.bitPattern)"
     }
 
     private static func record(_ entry: MacDiscoveryCapture, libraryID: UUID) -> SearchCapture {

@@ -22,6 +22,7 @@ private final class MemoryIndex: SpotlightBackend {
     var domains: [String: String] = [:]
     var calls: [String] = []
     var failReplace = false
+    var partiallyAcceptReplace = false
     var pauseReplace = false
     var started = false
     var continuation: CheckedContinuation<Void, Never>?
@@ -29,6 +30,11 @@ private final class MemoryIndex: SpotlightBackend {
         calls.append("replace")
         started = true
         if pauseReplace { await withCheckedContinuation { continuation = $0 } }
+        if partiallyAcceptReplace, let first = captures.first {
+            items[first.id] = first
+            domains[first.id] = domain
+            throw SystemIntegrationError.unavailable
+        }
         if failReplace { throw SystemIntegrationError.unavailable }
         for capture in captures {
             items[capture.id] = capture
@@ -190,6 +196,31 @@ struct SpotlightCoordinatorTests {
         task.cancel()
         await #expect(throws: CancellationError.self) { try await task.value }
         #expect(backend.items[reference.id]?.revision == 0)
+    }
+
+    @Test func partiallyAcceptedFailedBatchIsRemovedByNextReconciliation() async throws {
+        let backend = MemoryIndex()
+        let coordinator = SpotlightCoordinator(libraryID: library, backend: backend)
+        let initial = fixture()
+        let partial = SearchCapture(
+            reference: CaptureReference(libraryID: library, captureID: UUID()),
+            title: "Partially accepted capture")
+        let survivor = SearchCapture(
+            reference: CaptureReference(libraryID: library, captureID: UUID()),
+            title: "Current capture")
+        backend.items["unrelated"] = fixture()
+        backend.domains["unrelated"] = "another-app"
+        try await coordinator.reconcile([initial], enabled: true)
+        backend.partiallyAcceptReplace = true
+        await #expect(throws: SystemIntegrationError.unavailable) {
+            try await coordinator.reconcile([initial, partial], enabled: true)
+        }
+        #expect(backend.items[partial.id] == partial)
+        backend.partiallyAcceptReplace = false
+        try await coordinator.reconcile([survivor], enabled: true)
+        #expect(Set(backend.items.keys) == ["unrelated", survivor.id])
+        #expect(backend.calls.filter { $0 == "deleteDomain" }.count == 2)
+        #expect(backend.domains["unrelated"] == "another-app")
     }
 
     @Test func revocationDuringIndexingIsSerializedAndUncancellable() async throws {
