@@ -5,6 +5,182 @@ import Testing
 @testable import CapdSync
 
 struct ClientResponseValidationTests {
+    @Test(arguments: [100, Int.max], [false, true])
+    func nextRevisionCountCannotInflate(count: Int, duplicateCreate: Bool) throws {
+        let f = try ResponseFixture()
+        defer { f.clean() }
+        let original = f.capture("inflated")
+        try f.client.enqueue(captureID: original.id, mutation: .create(original))
+        try f.client.push(to: f.server)
+        let operation: SyncOperation
+        if duplicateCreate {
+            let duplicate = SharedCapture(source: original.source)
+            operation = try f.client.enqueue(captureID: duplicate.id, mutation: .create(duplicate))
+        } else {
+            operation = try f.client.enqueue(captureID: original.id, mutation: .recapture)
+        }
+        let before = try f.client.captures()
+        var inflated = try #require(f.server.baseline().captures.first)
+        inflated.revision += 1
+        inflated.seenCount = count
+        let forged = SyncReceipt(operationID: operation.id, outcome: .accepted, capture: inflated)
+        #expect(throws: SyncError.invalidOperation) {
+            try f.client.push(to: ResponseTransport(server: f.server, receipt: forged))
+        }
+        #expect(try f.client.pendingOperations() == [operation])
+        #expect(try f.client.captures() == before)
+    }
+
+    @Test(arguments: ["note", "revision", "operation", "conflicts"])
+    func noNoteEditPreservesNextRevisionNoteTuple(field: String) throws {
+        let f = try ResponseFixture()
+        defer { f.clean() }
+        var original = f.capture("untouched note")
+        original.note = "Original"
+        try f.client.enqueue(captureID: original.id, mutation: .create(original))
+        try f.client.push(to: f.server)
+        let operation = try f.client.enqueue(
+            captureID: original.id, mutation: .edit(CaptureEdit(rating: 5)))
+        let before = try f.client.captures()
+        var changed = try #require(f.server.baseline().captures.first)
+        changed.revision += 1
+        changed.rating = 5
+        switch field {
+        case "note": changed.note = "Unrequested"
+        case "revision": changed.noteRevision = changed.revision
+        case "operation": changed.noteOperationID = UUID()
+        default: changed.noteConflicts = [NoteVariant(operationID: UUID(), value: "Unrequested")]
+        }
+        let forged = SyncReceipt(operationID: operation.id, outcome: .accepted, capture: changed)
+        #expect(throws: SyncError.invalidOperation) {
+            try f.client.push(to: ResponseTransport(server: f.server, receipt: forged))
+        }
+        #expect(try f.client.pendingOperations() == [operation])
+        #expect(try f.client.captures() == before)
+    }
+
+    @Test func noNoteEditAllowsUnseenConcurrentNoteChange() throws {
+        let f = try ResponseFixture()
+        defer { f.clean() }
+        let original = f.capture("concurrent note")
+        try f.client.enqueue(captureID: original.id, mutation: .create(original))
+        try f.client.push(to: f.server)
+        try f.client.enqueue(captureID: original.id, mutation: .edit(CaptureEdit(rating: 5)))
+        _ = try f.server.apply(
+            SyncOperation(
+                deviceID: UUID(), sequence: 1, captureID: original.id, baseRevision: 1,
+                mutation: .edit(CaptureEdit(note: NoteEdit("Remote")))))
+        #expect(try f.client.push(to: f.server).first?.outcome == .accepted)
+        let accepted = try #require(f.client.captures().first)
+        #expect(accepted.note == "Remote")
+        #expect(accepted.rating == 5)
+        #expect(accepted.revision == 3)
+    }
+
+    @Test(arguments: [100, Int.max], [false, true])
+    func unseenSnapshotImportCanGrowCountsBeyondRevisionDelta(
+        count: Int, duplicateCreate: Bool
+    ) throws {
+        let binding = SyncLibraryBinding(libraryID: UUID(), serviceID: UUID())
+        let f = try ResponseFixture(binding: binding)
+        defer { f.clean() }
+        let transport = BoundResponseTransport(
+            transport: ResponseTransport(server: f.server), binding: binding,
+            deviceID: f.client.deviceID)
+        let original = f.capture("imported count")
+        try f.client.enqueue(captureID: original.id, mutation: .create(original))
+        try f.client.push(to: transport)
+        if duplicateCreate {
+            let duplicate = SharedCapture(source: original.source)
+            try f.client.enqueue(captureID: duplicate.id, mutation: .create(duplicate))
+        } else {
+            try f.client.enqueue(captureID: original.id, mutation: .recapture)
+        }
+        var imported = original
+        imported.seenCount = count
+        let snapshot = ContentSnapshotImport(
+            snapshotID: UUID(), targetBinding: binding, sourceDeviceID: UUID(), captures: [imported]
+        )
+        _ = try f.server.importContentSnapshot(
+            snapshot, preview: f.server.previewContentSnapshotImport(snapshot))
+        let expected = count == Int.max ? count : count + 1
+        let accepted = try #require(f.client.push(to: transport).first?.capture)
+        #expect(accepted.revision == 3)
+        #expect(accepted.seenCount == expected)
+        #expect(try f.client.pendingOperations().isEmpty)
+        try f.client.pull(from: transport)
+        #expect(try f.client.captures().first?.seenCount == expected)
+    }
+
+    @Test func acknowledgedFeedEchoesDoNotAccumulateMarkers() throws {
+        let f = try ResponseFixture()
+        defer { f.clean() }
+        let original = f.capture("acknowledged markers")
+        try f.client.enqueue(captureID: original.id, mutation: .create(original))
+        try f.client.push(to: f.server)
+        try f.client.pull(from: f.server)
+        for _ in 0..<3 {
+            try f.client.enqueue(captureID: original.id, mutation: .recapture)
+            try f.client.push(to: f.server)
+            try f.client.pull(from: f.server)
+        }
+        #expect(try f.observedIDs().isEmpty)
+        #expect(try f.client.captures().first?.seenCount == 4)
+    }
+
+    @Test func pendingObservationSurvivesReopenAndBaselineThenDrainsWithReceipt() throws {
+        let f = try ResponseFixture()
+        defer { f.clean() }
+        let original = f.capture("pending marker")
+        let operation = try f.client.enqueue(captureID: original.id, mutation: .create(original))
+        let historical = try f.server.apply(operation)
+        try f.client.pull(from: f.server)
+        #expect(try f.observedIDs() == [operation.id.uuidString])
+        try f.writer.write { db in
+            for _ in 0..<3 {
+                try db.execute(
+                    sql: "INSERT INTO sync_observed (id) VALUES (?)", arguments: [UUID().uuidString]
+                )
+            }
+        }
+        let reopened = try SyncClient(
+            databaseURL: f.root.appendingPathComponent("client.sqlite"),
+            blobDirectory: f.root.appendingPathComponent("client-blobs"),
+            deviceID: f.client.deviceID)
+        #expect(try f.observedIDs() == [operation.id.uuidString])
+        try reopened.pull(
+            from: ResponseTransport(server: f.server, snapshot: f.server.baseline()))
+        #expect(try f.observedIDs() == [operation.id.uuidString])
+        #expect(try reopened.captures().first?.seenCount == 1)
+        #expect(try reopened.push(to: f.server) == [historical])
+        #expect(try f.observedIDs().isEmpty)
+        #expect(try reopened.pendingOperations().isEmpty)
+        try reopened.pull(from: f.server)
+        #expect(try f.observedIDs().isEmpty)
+    }
+
+    @Test(arguments: [false, true])
+    func legacyOrphansAreCompactedBeforeProjectionAndRecovery(baseline: Bool) throws {
+        let f = try ResponseFixture()
+        defer { f.clean() }
+        try f.writer.write { db in
+            for _ in 0..<3 {
+                try db.execute(
+                    sql: "INSERT INTO sync_observed (id) VALUES (?)", arguments: [UUID().uuidString]
+                )
+            }
+        }
+        if baseline {
+            try f.client.pull(
+                from: ResponseTransport(server: f.server, snapshot: f.server.baseline()))
+        } else {
+            let original = f.capture("legacy marker")
+            try f.client.enqueue(captureID: original.id, mutation: .create(original))
+            #expect(try f.client.captures() == [original])
+        }
+        #expect(try f.observedIDs().isEmpty)
+    }
+
     @Test func sameIDCreateReceiptMustPreserveSource() throws {
         let f = try ResponseFixture()
         defer { f.clean() }
@@ -380,14 +556,18 @@ private struct ResponseFixture {
     let client: SyncClient
     let server: SyncServer
 
-    init() throws {
+    init(binding: SyncLibraryBinding? = nil) throws {
         writer = try SyncDatabase.open(at: root.appendingPathComponent("client.sqlite"))
         client = try SyncClient(
-            writer: writer, blobs: BlobStore(directory: root.appendingPathComponent("client-blobs"))
+            writer: writer,
+            blobs: BlobStore(
+                directory: root.appendingPathComponent("client-blobs"), binding: binding),
+            binding: binding
         )
         server = try SyncServer(
             databaseURL: root.appendingPathComponent("server.sqlite"),
-            blobDirectory: root.appendingPathComponent("server-blobs"))
+            blobDirectory: root.appendingPathComponent("server-blobs"),
+            libraryID: binding?.libraryID, serviceID: binding?.serviceID)
     }
 
     func capture(_ value: String) -> SharedCapture {
@@ -395,4 +575,24 @@ private struct ResponseFixture {
     }
 
     func clean() { try? FileManager.default.removeItem(at: root) }
+
+    func observedIDs() throws -> Set<String> {
+        try writer.read { try String.fetchSet($0, sql: "SELECT id FROM sync_observed") }
+    }
+}
+
+private struct BoundResponseTransport: BoundSyncTransport {
+    let transport: ResponseTransport
+    let binding: SyncLibraryBinding
+    let deviceID: UUID
+
+    func apply(_ operation: SyncOperation) throws -> SyncReceipt { try transport.apply(operation) }
+    func changes(after cursor: Int64, limit: Int) throws -> FeedPage {
+        try transport.changes(after: cursor, limit: limit)
+    }
+    func baseline() throws -> Baseline { try transport.baseline() }
+    func upload(_ blob: BlobReference, offset: Int, chunk: Data, final: Bool) throws {
+        try transport.upload(blob, offset: offset, chunk: chunk, final: final)
+    }
+    func download(_ blob: BlobReference) throws -> Data { try transport.download(blob) }
 }

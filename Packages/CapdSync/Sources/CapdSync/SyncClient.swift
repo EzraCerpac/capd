@@ -58,6 +58,7 @@ public final class SyncClient: Sendable {
         self.deviceID = try SyncDatabase.prepare(
             writer, role: "client", deviceID: deviceID, binding: binding,
             hasUnboundBlobs: hasUnboundBlobs, prepareProjection: prepareProjection)!
+        try write(pruneObservations)
     }
 
     private func read<T>(_ body: (Database) throws -> T) throws -> T {
@@ -258,6 +259,8 @@ public final class SyncClient: Sendable {
             }
             try db.execute(
                 sql: "DELETE FROM sync_outbox WHERE id = ?", arguments: [operation.id.uuidString])
+            try db.execute(
+                sql: "DELETE FROM sync_observed WHERE id = ?", arguments: [operation.id.uuidString])
             try rebuild(db)
         }
     }
@@ -297,15 +300,24 @@ public final class SyncClient: Sendable {
                     db, sql: "SELECT observed_sequence FROM sync_meta")!
             if let current, !observed {
                 guard record.revision > current.revision else { throw SyncError.invalidOperation }
-                if case .recapture = operation.mutation {
+                switch operation.mutation {
+                case .recapture, .create:
                     guard record.seenCount == Int.max || record.seenCount > current.seenCount else {
                         throw SyncError.invalidOperation
                     }
-                }
-                if case .create = operation.mutation {
-                    guard record.seenCount == Int.max || record.seenCount > current.seenCount else {
-                        throw SyncError.invalidOperation
+                    if record.revision - 1 == current.revision {
+                        let count = current.seenCount == Int.max ? Int.max : current.seenCount + 1
+                        guard record.seenCount == count else { throw SyncError.invalidOperation }
                     }
+                case .edit(let edit) where edit.note == nil:
+                    if record.revision - 1 == current.revision {
+                        guard record.note == current.note,
+                            record.noteRevision == current.noteRevision,
+                            record.noteOperationID == current.noteOperationID,
+                            record.noteConflicts == current.noteConflicts
+                        else { throw SyncError.invalidOperation }
+                    }
+                default: break
                 }
             }
             switch operation.mutation {
@@ -489,7 +501,10 @@ public final class SyncClient: Sendable {
                     try validateLocalChange(change, in: db)
                     try SyncDatabase.alias(db, change.requestedCaptureID, to: change.capture.id)
                     try db.execute(
-                        sql: "INSERT OR IGNORE INTO sync_observed (id) VALUES (?)",
+                        sql: """
+                            INSERT OR IGNORE INTO sync_observed (id)
+                            SELECT id FROM sync_outbox WHERE id = ?
+                            """,
                         arguments: [change.operationID.uuidString])
                 }
                 try accept(db, change.capture)
@@ -505,6 +520,7 @@ public final class SyncClient: Sendable {
             guard try Int64.fetchOne(db, sql: "SELECT cursor FROM sync_meta") == oldCursor
             else { throw SyncError.invalidCursor }
             let acceptedSequence = baseline.deviceSequences[deviceID] ?? 0
+            try pruneObservations(db)
             let observed = try String.fetchSet(db, sql: "SELECT id FROM sync_observed")
             guard
                 try !operations(db).contains(where: {
@@ -601,6 +617,7 @@ public final class SyncClient: Sendable {
 
     private func rebuild(_ db: Database) throws {
         let before = try SyncDatabase.records(db, table: "sync_visible")
+        try pruneObservations(db)
         let observed = try String.fetchSet(db, sql: "SELECT id FROM sync_observed")
         let observedSequence = try Int64.fetchOne(
             db, sql: "SELECT observed_sequence FROM sync_meta")!
@@ -671,6 +688,11 @@ public final class SyncClient: Sendable {
             try SyncDatabase.save(db, record, table: "sync_visible")
             try projectionGate.project { try project(db, record) }
         }
+    }
+
+    private func pruneObservations(_ db: Database) throws {
+        try db.execute(
+            sql: "DELETE FROM sync_observed WHERE id NOT IN (SELECT id FROM sync_outbox)")
     }
 }
 
