@@ -40,7 +40,8 @@ private struct ContinuousReviewAdapter: MobileSyncAdapter {
 
 private final class ContinuousReviewFeed: SyncTransport, @unchecked Sendable {
     enum Failure: Error { case excessivePulls }
-    let captureID = UUID()
+    let captureID: UUID
+    private let sourceRecord: SharedCapture
     private let remoteDeviceID = UUID()
     private let server: SyncServer
     private let lock = NSLock()
@@ -50,7 +51,15 @@ private final class ContinuousReviewFeed: SyncTransport, @unchecked Sendable {
     var calls: Int { lock.withLock { requests } }
     var applied: [SyncOperation] { lock.withLock { operations } }
     var pushPageCounts: [Int] { lock.withLock { pageCounts } }
-    init(server: SyncServer) { self.server = server }
+    init(server: SyncServer) {
+        let captureID = UUID()
+        self.captureID = captureID
+        self.sourceRecord = SharedCapture(
+            id: captureID,
+            source: CaptureSource(
+                kind: .text, selection: "Continuously advancing remote source"))
+        self.server = server
+    }
     func changes(after cursor: Int64, limit: Int) throws -> FeedPage {
         let calls = lock.withLock {
             requests += 1
@@ -59,10 +68,7 @@ private final class ContinuousReviewFeed: SyncTransport, @unchecked Sendable {
         guard calls <= MobileStore.pullPageBudget * 4 else { throw Failure.excessivePulls }
         let changes = (1...limit).map { offset in
             let revision = cursor + Int64(offset)
-            var capture = SharedCapture(
-                id: captureID,
-                source: CaptureSource(
-                    kind: .text, selection: "Continuously advancing remote source"))
+            var capture = sourceRecord
             capture.revision = revision
             return FeedChange(
                 cursor: revision, operationID: UUID(), deviceID: remoteDeviceID,
