@@ -115,6 +115,7 @@ public struct GroundedAnswerService: Sendable {
     private struct Passage {
         let text: String
         let weight: Double
+        let isTruncated: Bool
     }
     private let retriever: any AnswerRetrieving
     private let model: any AnswerGenerating
@@ -156,24 +157,22 @@ public struct GroundedAnswerService: Sendable {
                 if var previous = candidates[evidence.id] {
                     previous.matches += 1
                     previous.score += score
-                    for fragment in Self.fragments(evidence.excerpt) {
+                    for fragment in Self.passages(evidence.excerpt, weight: weight) {
                         if previous.excerpts.contains(where: {
-                            $0.text.contains(fragment) && $0.weight >= weight
+                            $0.text.contains(fragment.text) && $0.weight >= weight
                         }) {
                             continue
                         }
                         previous.excerpts.removeAll {
-                            fragment.contains($0.text) && weight >= $0.weight
+                            fragment.text.contains($0.text) && weight >= $0.weight
                         }
-                        previous.excerpts.append(.init(text: fragment, weight: weight))
+                        previous.excerpts.append(fragment)
                     }
                     candidates[evidence.id] = previous
                 } else {
                     candidates[evidence.id] = Candidate(
                         evidence: evidence,
-                        excerpts: Self.fragments(evidence.excerpt).map {
-                            .init(text: $0, weight: weight)
-                        },
+                        excerpts: Self.passages(evidence.excerpt, weight: weight),
                         matches: 1, score: score)
                 }
             }
@@ -255,15 +254,22 @@ public struct GroundedAnswerService: Sendable {
                     terms.append(term)
                 }
             }
-            return terms.count < 8
+            return true
         }
-        return Array(terms.prefix(8))
+        guard terms.count > 8 else { return terms }
+        return (0..<8).map { terms[$0 * (terms.count - 1) / 7] }
     }
 
     private static func fragments(_ excerpt: String) -> [String] {
+        passages(excerpt, weight: 0).map(\.text)
+    }
+
+    private static func passages(_ excerpt: String, weight: Double) -> [Passage] {
         excerpt.components(separatedBy: "\n\n").compactMap {
             let fragment = normalized(boundedPrefix($0, byteLimit: excerptLimit))
-            return fragment.isEmpty ? nil : fragment
+            return fragment.isEmpty
+                ? nil
+                : Passage(text: fragment, weight: weight, isTruncated: $0.utf8.count > excerptLimit)
         }
     }
 
@@ -296,9 +302,9 @@ public struct GroundedAnswerService: Sendable {
         for (index, fragment) in prioritized.enumerated() {
             let cost =
                 fragment.element.text.utf8.count + (selected.isEmpty ? 0 : separator.utf8.count)
-            // Keep room for a second complete passage when selecting the first one.
+            // A clipped prefix should not crowd out another complete matching passage.
             let reserve =
-                selected.isEmpty
+                selected.isEmpty && fragment.element.isTruncated
                 ? (prioritized.dropFirst(index + 1).map { $0.element.text.utf8.count }.min().map {
                     $0 + separator.utf8.count
                 } ?? 0) : 0
