@@ -9,6 +9,81 @@ import Testing
 
 @Suite("Opt-in Mac Store sync")
 struct StoreSyncTests {
+    @Test(arguments: ["nil", "empty", "accepted"], [false, true])
+    func duplicateCreateRetainsSourceContentThroughHTTPProjection(
+        canonicalFields: String, batched: Bool
+    ) throws {
+        try fixture { paths, binding, server in
+            let store = try Store(paths: paths, syncBinding: binding)
+            let client = try #require(store.syncClient)
+            let url = URL(string: "https://example.com/duplicate-source")!
+            let value: String? =
+                canonicalFields == "nil"
+                ? nil : canonicalFields == "empty" ? "" : "Canonical content"
+            let canonical = SharedCapture(
+                source: CaptureSource(
+                    kind: .link, contentHash: CaptureIdentity.contentHash(for: url),
+                    url: url.absoluteString, title: value, selection: value),
+                createdAt: Date(timeIntervalSince1970: 1_600_000_000))
+            _ = try server.apply(
+                SyncOperation(
+                    deviceID: UUID(), sequence: 1, captureID: canonical.id,
+                    baseRevision: 0, mutation: .create(canonical)))
+            let request = CaptureRequest(
+                url: url.absoluteString, text: "Incoming selection", title: "Incoming title",
+                note: "Incoming note", tags: ["manual"], fetchBody: false,
+                capturedAt: Date(timeIntervalSince1970: 1_700_000_000))
+            let service = CaptureService(store: store)
+            let local: Capture
+            if batched {
+                var duplicate = request
+                duplicate.capturedAt = request.capturedAt.addingTimeInterval(1)
+                local = try service.ingest([request, duplicate])[0].get().capture
+            } else {
+                local = try service.ingest(request).capture
+            }
+            let before = try client.pendingOperations()
+            #expect(before.first?.captureID != canonical.id)
+            #expect(before.first?.baseRevision == 0)
+            let later = try client.enqueue(
+                captureID: before[0].captureID,
+                mutation: .edit(CaptureEdit(note: NoteEdit("Later note"))))
+            #expect(later.predecessorID == before.last?.id)
+            let principal = SyncPrincipal(
+                serviceID: binding.serviceID, libraryID: binding.libraryID,
+                deviceID: client.deviceID)
+            let handler = SyncHTTPHandler(
+                serviceID: binding.serviceID,
+                authorizer: StoreBudgetAuthorizer(principal: principal), server: { _ in server })
+            let transport = SyncHTTPTransport(
+                binding: binding, deviceID: client.deviceID,
+                credential: { "synthetic-budget" }, execute: { handler.handle($0) })
+            let receipts = try client.push(to: transport)
+            #expect(receipts.allSatisfy { $0.outcome == .accepted })
+            #expect(receipts.first?.capture?.id == canonical.id)
+            let title = canonicalFields == "accepted" ? value : request.title
+            let selection = canonicalFields == "accepted" ? value : request.text
+            #expect(receipts.first?.capture?.source.title == title)
+            #expect(receipts.first?.capture?.source.selection == selection)
+            try client.pull(from: transport)
+            let accepted = try #require(try server.baseline().captures.first)
+            #expect(accepted.source.title == title)
+            #expect(accepted.source.selection == selection)
+            #expect(accepted.createdAt == canonical.createdAt)
+            #expect(accepted.source.contentHash == canonical.source.contentHash)
+            #expect(accepted.note == "Later note")
+            #expect(accepted.noteConflicts.isEmpty)
+            #expect(accepted.manualTags == ["manual"])
+            #expect(try client.pendingOperations().isEmpty)
+            let reopened = try Store(paths: paths, syncBinding: binding)
+            let projected = try #require(try SearchService(store: reopened).capture(id: local.id!))
+            #expect(projected.title == title)
+            #expect(projected.selection == selection)
+            #expect(projected.note == accepted.note)
+            #expect(projected.createdAt == canonical.createdAt)
+        }
+    }
+
     @Test func captureBatchIsolatesWriteFailuresWithoutReorderingResults() throws {
         try fixture { paths, binding, _ in
             let store = try Store(paths: paths, syncBinding: binding)

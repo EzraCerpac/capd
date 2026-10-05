@@ -695,6 +695,10 @@ public final class SyncClient: Sendable {
             guard incoming.id != current.id, !current.deleted,
                 CaptureFingerprint.matches(incoming.source, current.source)
             else { return nil }
+            SyncDatabase.fillSourceContent(
+                &record.source,
+                from: SourceContentPatch(
+                    title: incoming.source.title, selection: incoming.source.selection))
             if record.seenCount < Int.max { record.seenCount += 1 }
             record.manualTags = Array(Set(record.manualTags).union(incoming.manualTags))
                 .sorted()
@@ -929,6 +933,10 @@ public final class SyncClient: Sendable {
                 }
                 if var existing = records[id] {
                     if !existing.deleted {
+                        SyncDatabase.fillSourceContent(
+                            &existing.source,
+                            from: SourceContentPatch(
+                                title: incoming.source.title, selection: incoming.source.selection))
                         if existing.seenCount < Int.max { existing.seenCount += 1 }
                         if incoming.note != nil { existing.note = incoming.note }
                         existing.manualTags = Array(
