@@ -20,6 +20,15 @@ package final class AppSettings {
         didSet { defaults.set(fetchesPageBodies, forKey: Key.fetchesPageBodies) }
     }
 
+    package var websiteIconsEnabled = false {
+        didSet {
+            guard oldValue != websiteIconsEnabled else { return }
+            saveWebsiteIcons(websiteIconsEnabled)
+        }
+    }
+    package var websiteIconIssue: String?
+    @ObservationIgnored package var saveWebsiteIcons: (Bool) -> Void = { _ in }
+
     package var hasCompletedOnboarding: Bool {
         didSet { defaults.set(hasCompletedOnboarding, forKey: Key.hasCompletedOnboarding) }
     }

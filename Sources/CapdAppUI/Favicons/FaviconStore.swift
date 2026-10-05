@@ -1,164 +1,144 @@
 import AppKit
 import CapdKit
+import CapdSync
+import CapdWebsiteIcons
 import Observation
 import SwiftUI
 
-/// A cached favicon plus the verdict on whether its artwork needs a light chip
-/// behind it to stay legible on the app's near-black surfaces.
 package struct Favicon {
     package var image: NSImage
     package var needsLightBacking: Bool
 }
 
-/// Per-host favicon cache: memory in front of `favicons/` on disk, filled on the first
-/// sight of a host. Views read synchronously and fall back to a symbol tile; the fetch
-/// completing mutates observed state, which repaints whichever rows asked.
 @MainActor
 @Observable
 package final class FaviconStore {
-    private let paths: StoragePaths
-    private let fetcher: FaviconFetcher
-    private let now: () -> Date
-    private var icons: [String: Favicon] = [:]
-    /// Hosts with a settled answer this session — including misses and transient
-    /// failures, so an offline launch doesn't retry on every keystroke.
-    @ObservationIgnored private var resolved: Set<String> = []
-    @ObservationIgnored private var tasks: [String: Task<Void, Never>] = [:]
+    private let scope: String
+    private let generation: UUID
+    private let read: @Sendable (WebsiteIconRecord) async throws -> Data?
+    private let cache = WebsiteIconCache()
+    private var records: [String: WebsiteIconRecord] = [:]
+    private var icons: [WebsiteIconIdentity: Favicon] = [:]
+    @ObservationIgnored private var resolved: Set<WebsiteIconIdentity> = []
+    @ObservationIgnored private var tasks:
+        [WebsiteIconIdentity: (id: UUID, task: Task<Void, Never>)] = [:]
+    @ObservationIgnored private var observation: Task<Void, Never>?
+    @ObservationIgnored private var uses: [WebsiteIconIdentity: UInt64] = [:]
+    @ObservationIgnored private var tick: UInt64 = 0
 
-    package init(
-        paths: StoragePaths,
-        fetcher: FaviconFetcher = .live,
-        now: @escaping () -> Date = Date.init
-    ) {
-        self.paths = paths
-        self.fetcher = fetcher
-        self.now = now
+    package convenience init(store: Store, scope: String, generation: UUID = UUID()) {
+        self.init(scope: scope, generation: generation) { record in
+            try await Task.detached(priority: .utility) {
+                try store.verifiedWebsiteIconData(record)
+            }.value
+        }
+        observation = Task { [weak self] in
+            do {
+                for try await records in store.websiteIconRecords() {
+                    guard !Task.isCancelled else { return }
+                    self?.replaceRecords(records)
+                }
+            } catch {
+                self?.replaceRecords([])
+            }
+        }
     }
 
-    /// Deliberately does no I/O: it runs inside view bodies, and mutating observed
-    /// state there is not allowed. The disk check rides the same background task as
-    /// the network fetch and lands a frame later.
-    func favicon(forHost host: String) -> Favicon? {
-        let key = FaviconPolicy.cacheKey(forHost: host)
-        if let favicon = icons[key] {
-            return favicon
+    package init(
+        scope: String, generation: UUID = UUID(), records: [WebsiteIconRecord] = [],
+        read: @escaping @Sendable (WebsiteIconRecord) async throws -> Data?
+    ) {
+        self.scope = scope
+        self.generation = generation
+        self.read = read
+        replaceRecords(records)
+    }
+
+    func favicon(forURL url: String) -> Favicon? {
+        guard let origin = WebsiteIconOrigin(url: url), let record = records[origin.id],
+            let identity = identity(record)
+        else { return nil }
+        if let image = icons[identity] {
+            tick &+= 1
+            uses[identity] = tick
+            return image
         }
-        if !resolved.contains(key), tasks[key] == nil {
-            tasks[key] = Task { await resolve(key) }
+        guard !resolved.contains(identity), tasks[identity] == nil, tasks.count < 16 else {
+            return nil
         }
+        let read = read
+        let attempt = UUID()
+        let task = Task { [weak self] in
+            guard let self else { return }
+            defer {
+                if self.tasks[identity]?.id == attempt { self.tasks[identity] = nil }
+            }
+            let loaded = await self.cache.image(for: identity) { _ in try await read(record) }
+            guard !Task.isCancelled, self.identity(self.records[record.id]) == identity else {
+                return
+            }
+            self.resolved.insert(identity)
+            guard let loaded else { return }
+            let needsLightBacking = await Task.detached(priority: .utility) {
+                FaviconLuminance.needsLightBacking(loaded.image)
+            }.value
+            guard !Task.isCancelled, self.identity(self.records[record.id]) == identity else {
+                return
+            }
+            self.icons[identity] = Favicon(
+                image: NSImage(
+                    cgImage: loaded.image,
+                    size: NSSize(
+                        width: CGFloat(loaded.image.width), height: CGFloat(loaded.image.height))),
+                needsLightBacking: needsLightBacking)
+            self.tick &+= 1
+            self.uses[identity] = self.tick
+            if self.icons.count > 128,
+                let oldest = self.uses.min(by: { $0.value < $1.value })?.key
+            {
+                self.icons[oldest] = nil
+                self.uses[oldest] = nil
+                self.resolved.remove(oldest)
+            }
+        }
+        tasks[identity] = (attempt, task)
         return nil
     }
 
-    /// Lets tests run the fetches spawned by `favicon(forHost:)` to completion.
-    func awaitPendingFetches() async {
-        while let task = tasks.values.first {
-            await task.value
+    func replaceRecords(_ values: [WebsiteIconRecord]) {
+        var next: [String: WebsiteIconRecord] = [:]
+        for record in values where !record.deleted && (try? record.validate()) != nil {
+            next[record.id] = record
+        }
+        records = next
+        let current = Set(next.values.compactMap(identity))
+        icons = icons.filter { current.contains($0.key) }
+        uses = uses.filter { current.contains($0.key) }
+        resolved = Set(icons.keys)
+        for (identity, running) in tasks where !current.contains(identity) {
+            running.task.cancel()
+            tasks[identity] = nil
         }
     }
 
-    private func resolve(_ key: String) async {
-        defer { tasks[key] = nil }
-
-        if let data = try? Data(contentsOf: paths.faviconURL(forHost: key)),
-            let image = NSImage(data: data)
-        {
-            cache(data, image: image, forKey: key)
-            resolved.insert(key)
-            return
-        }
-        if let recordedAt = missDate(forKey: key),
-            !FaviconPolicy.isExpired(missRecordedAt: recordedAt, now: now())
-        {
-            resolved.insert(key)
-            return
-        }
-
-        switch await fetcher.fetch(host: key) {
-        case .icon(let pngData):
-            store(pngData, forKey: key)
-        case .svg(let data):
-            if let pngData = Self.rasterizeSVG(data) {
-                store(pngData, forKey: key)
-            } else {
-                recordMiss(forKey: key)
-            }
-        case .missing:
-            recordMiss(forKey: key)
-        case .transientFailure:
-            resolved.insert(key)
-        }
+    private func identity(_ record: WebsiteIconRecord?) -> WebsiteIconIdentity? {
+        guard let record, !record.deleted, let content = record.content else { return nil }
+        return .init(
+            library: scope, generation: generation, originID: record.id,
+            revision: record.revision, normalizerVersion: content.normalizerVersion,
+            digest: content.blob.digest)
     }
 
-    private func store(_ pngData: Data, forKey key: String) {
-        resolved.insert(key)
-        guard let image = NSImage(data: pngData) else {
-            recordMiss(forKey: key)
-            return
-        }
-        try? FileManager.default.createDirectory(
-            at: paths.faviconsDirectory, withIntermediateDirectories: true)
-        try? pngData.write(to: paths.faviconURL(forHost: key))
-        try? FileManager.default.removeItem(at: paths.faviconMissURL(forHost: key))
-        cache(pngData, image: image, forKey: key)
+    func awaitPendingLoads() async {
+        while let running = tasks.values.first { await running.task.value }
     }
 
-    /// The verdict is recomputed on every load rather than persisted: the pass over a
-    /// ≤64px PNG is trivial, and it means icons cached by older builds — or judged by
-    /// an older heuristic — are never stuck with a stale answer.
-    private func cache(_ pngData: Data, image: NSImage, forKey key: String) {
-        icons[key] = Favicon(
-            image: image,
-            needsLightBacking: FaviconLuminance.needsLightBacking(pngData: pngData))
-    }
-
-    private func recordMiss(forKey key: String) {
-        resolved.insert(key)
-        try? FileManager.default.createDirectory(
-            at: paths.faviconsDirectory, withIntermediateDirectories: true)
-        try? Data().write(to: paths.faviconMissURL(forHost: key))
-    }
-
-    private func missDate(forKey key: String) -> Date? {
-        let attributes = try? FileManager.default.attributesOfItem(
-            atPath: paths.faviconMissURL(forHost: key).path)
-        return attributes?[.modificationDate] as? Date
-    }
-
-    /// SVG never touches CapdKit's ImageIO path; CoreSVG via NSImage is best-effort and
-    /// an undrawable file simply counts as a miss.
-    private static func rasterizeSVG(_ data: Data) -> Data? {
-        guard let image = NSImage(data: data), image.isValid else { return nil }
-        let size = FaviconPolicy.renderedPixelSize
-        guard
-            let bitmap = NSBitmapImageRep(
-                bitmapDataPlanes: nil,
-                pixelsWide: size,
-                pixelsHigh: size,
-                bitsPerSample: 8,
-                samplesPerPixel: 4,
-                hasAlpha: true,
-                isPlanar: false,
-                colorSpaceName: .deviceRGB,
-                bytesPerRow: 0,
-                bitsPerPixel: 0),
-            let context = NSGraphicsContext(bitmapImageRep: bitmap)
-        else {
-            return nil
-        }
-        NSGraphicsContext.saveGraphicsState()
-        NSGraphicsContext.current = context
-        image.draw(
-            in: NSRect(x: 0, y: 0, width: size, height: size),
-            from: .zero,
-            operation: .sourceOver,
-            fraction: 1)
-        NSGraphicsContext.restoreGraphicsState()
-        return bitmap.representation(using: .png, properties: [:])
+    isolated deinit {
+        observation?.cancel()
+        for running in tasks.values { running.task.cancel() }
     }
 }
 
 extension EnvironmentValues {
-    /// nil — the default — degrades every favicon tile to its symbol fallback, so
-    /// previews and tests need no setup.
     @Entry var faviconStore: FaviconStore?
 }

@@ -258,7 +258,11 @@ final class AppState {
         let enrichment = EnrichmentService(
             store: store, steps: [TabFirstBodyStep()],
             generationGate: session.runtime.map { GenerationGate(runtime: $0) })
-        let favicons = FaviconStore(paths: store.paths)
+        let iconScope =
+            session.configuration.map {
+                "\($0.binding.serviceID.uuidString)/\($0.binding.libraryID.uuidString)/\($0.deviceID.uuidString)"
+            } ?? store.paths.databaseURL.path
+        let favicons = FaviconStore(store: store, scope: iconScope)
         let settings = self.settings
         let openURL: @MainActor (URL) -> Void = { [settings, contextSuppressions] url in
             contextSuppressions.register(url)
@@ -308,6 +312,20 @@ final class AppState {
         // flag cannot immediately write it back.
         settings.autoTagsCaptures = (try? store.taxonomy().taggingEnabled) ?? true
         settings.saveAutoTags = { try? store.setTaggingEnabled($0) }
+        var storedIconPolicy = (try? store.websiteIconsEnabled()) ?? false
+        settings.websiteIconsEnabled = storedIconPolicy
+        settings.saveWebsiteIcons = { [weak settings] enabled in
+            do {
+                try store.setWebsiteIconsEnabled(enabled)
+                storedIconPolicy = enabled
+                settings?.websiteIconIssue = nil
+            } catch {
+                settings?.websiteIconIssue =
+                    "Could not change website icon loading. \(error.localizedDescription)"
+                storedIconPolicy = (try? store.websiteIconsEnabled()) ?? storedIconPolicy
+                settings?.websiteIconsEnabled = storedIconPolicy
+            }
+        }
         settings.requestRetagging = { try? store.requestRetagging() }
         if case .unavailable(let reason) = FoundationModelTagger().availability() {
             settings.autoTagsUnavailableReason = reason.explanation

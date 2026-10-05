@@ -13,6 +13,7 @@ struct SearchRowContent: Equatable {
     var snippet: AttributedString?
     var age: String
     var host: String?
+    var sourceURL: URL?
     var tags: [String]
     var rating: Int
 }
@@ -26,6 +27,7 @@ extension SearchRowContent {
         snippet = hit.snippet.map(Self.attributed) ?? Self.preview(of: capture)
         age = Self.compactAge(from: capture.createdAt, to: now)
         host = Self.host(for: capture)
+        sourceURL = capture.kind == .link ? capture.url.flatMap(URL.init(string:)) : nil
         tags = Array(capture.tagList.prefix(Self.displayedTags))
         rating = capture.rating
     }

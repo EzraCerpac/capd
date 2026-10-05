@@ -43,6 +43,7 @@ struct SyncSettingsView: View {
     let retry: () -> Void
     var systemSearch: PhoneSystemSearch? = nil
     var connection: PhoneLibraryConnection? = nil
+    var websiteIcons: PhoneWebsiteIcons? = nil
     @Environment(\.dismiss) private var dismiss
     @State private var showingSetup = false
 
@@ -51,6 +52,19 @@ struct SyncSettingsView: View {
             Form {
                 Section("On this device") {
                     Text("Captures save here immediately and stay available offline.")
+                }
+                if let websiteIcons {
+                    Section("Website icons") {
+                        Toggle(
+                            "Show synced website icons",
+                            isOn: Binding(
+                                get: { websiteIcons.displayEnabled },
+                                set: { websiteIcons.setDisplayEnabled($0) })
+                        ).accessibilityIdentifier("showWebsiteIcons")
+                        Text(
+                            "Icons arrive through your connected library and stay available offline. This device never requests icons from websites. Enable Load website icons on a connected Mac; its background agent needs to be available to generate new icons, including for links saved here."
+                        ).font(.footnote)
+                    }
                 }
                 if let systemSearch {
                     Section("System search") {

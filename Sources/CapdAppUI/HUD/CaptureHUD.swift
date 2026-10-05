@@ -155,7 +155,7 @@ struct CaptureHUDView: View {
     private var source: some View {
         HStack(spacing: 7) {
             FaviconTile(
-                host: model.content?.host,
+                url: model.content?.sourceURL?.absoluteString,
                 fallbackSymbol: kindSymbol,
                 fallbackTint: kindTint,
                 size: 17)

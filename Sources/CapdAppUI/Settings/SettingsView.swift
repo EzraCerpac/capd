@@ -28,6 +28,16 @@ package struct SettingsView: View {
                 }
             }
             section("Network") {
+                row("Load website icons") {
+                    toggle($settings.websiteIconsEnabled)
+                }
+                Text(
+                    "This Mac’s background agent requests only the saved HTTPS host’s /favicon.ico, including for links saved on your connected devices. Page paths, queries, source text and notes are excluded. It sends no cookies or credentials and follows no redirects. Synced icons remain available when this is off."
+                ).font(.caption).foregroundStyle(Theme.textSecondary)
+                if let issue = settings.websiteIconIssue {
+                    Text(issue).font(.caption).foregroundStyle(Theme.textSecondary)
+                }
+                hairline
                 row("Fetch page content for link captures") {
                     toggle($settings.fetchesPageBodies)
                 }
