@@ -66,7 +66,8 @@ public final class SyncServer: SyncTransport, Sendable {
 
     /// A dedicated service writer cannot inherit an ordinary device's retained history.
     public func reserveServiceWriter(deviceID: UUID, principalID: String) throws {
-        guard !principalID.isEmpty else { throw SyncError.wrongDevice }
+        let zeroDeviceID = UUID(uuid: (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0))
+        guard !principalID.isEmpty, deviceID != zeroDeviceID else { throw SyncError.wrongDevice }
         try write { db in
             try db.execute(
                 sql: """

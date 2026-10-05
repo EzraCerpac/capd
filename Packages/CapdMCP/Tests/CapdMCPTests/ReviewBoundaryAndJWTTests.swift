@@ -126,6 +126,50 @@ final class ReviewBoundaryAndJWTTests: XCTestCase {
         }
     }
 
+    func testGenericHTTPVerifierCannotReserveZeroWriterDevice() throws {
+        let f = try MCPTests.Fixture()
+        defer { try? FileManager.default.removeItem(at: f.directory) }
+        let zero = UUID(uuid: (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0))
+        let arguments = f.create()
+        let body = try JSONEncoder().encode(
+            JSONValue.object([
+                "jsonrpc": .string("2.0"), "id": .number(1), "method": .string("tools/call"),
+                "params": .object([
+                    "name": .string("create_capture"), "arguments": .object(arguments),
+                ]),
+            ]))
+        func call(device: UUID) throws -> Object {
+            let grant = MCPGrant(
+                issuer: f.grant.issuer, audience: f.grant.audience, subject: f.grant.subject,
+                binding: f.binding, scopes: f.grant.scopes, deviceID: device,
+                expiresAt: f.grant.expiresAt)
+            let boundary = try MCPHTTPBoundary(
+                toolbox: f.toolbox, verifier: MCPTests.Verifier(grant: grant),
+                issuer: grant.issuer, resource: grant.audience,
+                metadataURL: "https://capd.example.invalid/metadata", origins: [],
+                binding: f.binding)
+            let response = boundary.handle(
+                MCPHTTPRequest(
+                    method: "POST", path: "/mcp",
+                    headers: [
+                        "Authorization": "Bearer synthetic",
+                        "Accept": "application/json, text/event-stream",
+                        "Content-Type": "application/json", "MCP-Protocol-Version": "2025-11-25",
+                    ], body: body))
+            XCTAssertEqual(response.status, 200)
+            return try XCTUnwrap(
+                JSONDecoder().decode(JSONValue.self, from: response.body)
+                    .object?["result"]?.object)
+        }
+        XCTAssertEqual(try call(device: zero)["isError"], .bool(true))
+        XCTAssertTrue(try f.server.baseline().captures.isEmpty)
+        XCTAssertTrue(try f.server.baseline().deviceSequences.isEmpty)
+        XCTAssertEqual(try f.store.nextSequence(deviceID: zero), 1)
+        XCTAssertEqual(try call(device: f.device)["isError"], .bool(false))
+        XCTAssertEqual(try call(device: f.device)["isError"], .bool(false))
+        XCTAssertEqual(try f.server.baseline().deviceSequences, [f.device: 1])
+    }
+
     func testJWTPolicyRejectsZeroDeviceForWriter() throws {
         let zeroDeviceID = UUID(uuid: (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0))
         let binding = SyncLibraryBinding(libraryID: UUID(), serviceID: UUID())

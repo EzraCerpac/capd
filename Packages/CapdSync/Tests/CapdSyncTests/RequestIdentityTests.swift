@@ -25,6 +25,35 @@ struct RequestIdentityTests {
         #expect(try server.apply(decoded) == receipt)
     }
 
+    @Test func zeroServiceWriterCannotChangeReservationsOrConsumePrincipal() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let database = root.appendingPathComponent("authority.sqlite")
+        let server = try SyncServer(
+            databaseURL: database, blobDirectory: root.appendingPathComponent("blobs"))
+        let zero = UUID(uuid: (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0))
+        #expect(throws: SyncError.wrongDevice) {
+            try server.reserveServiceWriter(deviceID: zero, principalID: "principal")
+        }
+        let reader = try DatabaseQueue(path: database.path)
+        #expect(try reader.read { try !$0.tableExists("sync_service_writers") })
+        let device = UUID()
+        try server.reserveServiceWriter(deviceID: device, principalID: "principal")
+        try server.reserveServiceWriter(deviceID: device, principalID: "principal")
+        #expect(throws: SyncError.wrongDevice) {
+            try server.reserveServiceWriter(deviceID: zero, principalID: "other-principal")
+        }
+        #expect(
+            try reader.read {
+                try String.fetchAll($0, sql: "SELECT device FROM sync_service_writers")
+            } == [device.uuidString])
+        let operation = SyncOperation(
+            deviceID: device, sequence: 1, captureID: UUID(), baseRevision: 0, mutation: .recapture)
+        let receipt = try server.apply(operation, servicePrincipalID: "principal")
+        #expect(try server.apply(operation, servicePrincipalID: "principal") == receipt)
+        #expect(try server.baseline().deviceSequences == [device: 1])
+    }
+
     @Test func servicePrincipalCannotRotateItsDurableWriterDeviceAfterReopen() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
