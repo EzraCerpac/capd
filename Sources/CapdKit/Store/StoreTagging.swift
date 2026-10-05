@@ -16,7 +16,37 @@ public struct TagUsage: Sendable, Equatable {
     }
 }
 
+struct TagGenerationSnapshot: Sendable, Equatable {
+    var cursor: Int64?
+    var sequence: Int64?
+    let taxonomy: Taxonomy
+    let retagRequested: Bool
+}
+
 extension Store {
+    func tagGenerationSnapshot() throws -> TagGenerationSnapshot {
+        try reader.read { try tagGenerationSnapshot(in: $0) }
+    }
+
+    private func tagGenerationSnapshot(in db: Database) throws -> TagGenerationSnapshot {
+        TagGenerationSnapshot(
+            cursor: syncClient == nil
+                ? nil : try Int64.fetchOne(db, sql: "SELECT cursor FROM sync_meta"),
+            sequence: syncClient == nil
+                ? nil : try Int64.fetchOne(db, sql: "SELECT sequence FROM sync_meta"),
+            taxonomy: try Self.fetchTaxonomy(db),
+            retagRequested: try Bool.fetchOne(
+                db, sql: "SELECT retag_requested FROM \(Schema.taxonomy) WHERE id=1") ?? false)
+    }
+
+    private func checkTagGeneration(_ expected: TagGenerationSnapshot?, in db: Database) throws {
+        if let expected {
+            try Task.checkCancellation()
+            guard try tagGenerationSnapshot(in: db) == expected else {
+                throw GenerationGateError.changed
+            }
+        }
+    }
     public func taxonomy() throws -> Taxonomy {
         try reader.read { db in try Self.fetchTaxonomy(db) }
     }
@@ -98,8 +128,11 @@ extension Store {
     /// Atomically installs the planned fixed vocabulary, resets automatic assignments, and
     /// starts the full-library pass. A concurrent request is consumed only by this write.
     @discardableResult
-    func prepareRetagging(tags: [String], now: Date = Date()) throws -> Int {
+    func prepareRetagging(
+        tags: [String], now: Date = Date(), expectedGeneration: TagGenerationSnapshot? = nil
+    ) throws -> Int {
         try write { db in
+            try checkTagGeneration(expectedGeneration, in: db)
             let requested =
                 try Bool.fetchOne(
                     db,
@@ -192,9 +225,11 @@ extension Store {
         id: Int64,
         tags: [String],
         taxonomy: Taxonomy,
-        now: Date = Date(), inputFingerprint: String? = nil, expectedCapture: Capture? = nil
+        now: Date = Date(), inputFingerprint: String? = nil, expectedCapture: Capture? = nil,
+        expectedGeneration: TagGenerationSnapshot? = nil
     ) throws -> Bool {
         try write { db in
+            try checkTagGeneration(expectedGeneration, in: db)
             let before = try Capture.fetchOne(db, key: id)
             if syncClient != nil {
                 guard let before else { return false }
@@ -310,9 +345,10 @@ extension Store {
         mapping: [String: String],
         taxonomy: Taxonomy,
         batchSize: Int = 200,
-        now: Date = Date()
+        now: Date = Date(), expectedGeneration: TagGenerationSnapshot? = nil
     ) throws {
         var lastID: Int64 = 0
+        var expected = expectedGeneration
         while true {
             let rows = try reader.read { db in
                 try Row.fetchAll(
@@ -330,6 +366,7 @@ extension Store {
             guard !rows.isEmpty else { break }
 
             try write { db in
+                try checkTagGeneration(expected, in: db)
                 var edits: [(captureID: UUID, edit: CaptureEdit)] = []
                 for row in rows {
                     let id: Int64 = row["id"]
@@ -383,10 +420,21 @@ extension Store {
                     }
                 }
                 try syncClient?.enqueue(in: db, edits: edits)
+                if expected != nil {
+                    expected?.sequence =
+                        syncClient == nil
+                        ? nil
+                        : try Int64.fetchOne(
+                            db, sql: "SELECT sequence FROM sync_meta")
+                    try checkTagGeneration(expected, in: db)
+                }
             }
             lastID = rows.last!["id"]
         }
-        try saveTaxonomy(taxonomy)
+        try write { db in
+            try checkTagGeneration(expected, in: db)
+            try Self.persistTaxonomy(taxonomy, in: db)
+        }
     }
 
     static func fetchTaxonomy(_ db: Database) throws -> Taxonomy {

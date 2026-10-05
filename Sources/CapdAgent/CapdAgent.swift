@@ -58,10 +58,13 @@ struct CapdAgent {
 
             let enrichment = EnrichmentService(
                 store: store,
-                steps: [FetchChildStep(agentExecutable: executable), OCRStep()])
+                steps: [FetchChildStep(agentExecutable: executable), OCRStep()],
+                generationGate: generationGate(session.runtime))
             let queue = EnrichmentQueue(
                 enrichment: enrichment, isOnMainsPower: PowerStatus.isOnMainsPower)
-            let tagging = TagService(store: store, tagger: FoundationModelTagger())
+            let tagging = TagService(
+                store: store, tagger: FoundationModelTagger(),
+                generationGate: generationGate(session.runtime))
 
             logger.info("capd-agent \(CapdKit.version, privacy: .public) started")
 
@@ -71,7 +74,8 @@ struct CapdAgent {
                 await sweep(
                     enrichment: enrichment,
                     olderThan: session.runtime == nil ? nil : EnrichmentService.staleClaimAge)
-                while true {
+                while !Task.isCancelled {
+                    guard await startSync(session.runtime) else { return }
                     await sweep(enrichment: enrichment, olderThan: EnrichmentService.staleClaimAge)
                     if ((try? enrichment.pendingCount()) ?? 0) > 0 {
                         await queue.drain()
@@ -80,6 +84,9 @@ struct CapdAgent {
                         do {
                             try await tag(with: tagging)
                             taggingRetry.recordSuccess()
+                        } catch is GenerationGateError {
+                        } catch is CancellationError {
+                            return
                         } catch {
                             let delay = taggingRetry.recordFailure()
                             let reason = String(describing: error)
@@ -105,8 +112,7 @@ struct CapdAgent {
         while !Task.isCancelled {
             let result = await runtime.sync()
             if result.pullSucceeded {
-                await runtime.start(interval: pollInterval)
-                return true
+                return !Task.isCancelled
             }
             do {
                 try await Task.sleep(
@@ -116,6 +122,15 @@ struct CapdAgent {
             } catch { return false }
         }
         return false
+    }
+
+    static func generationGate(_ runtime: MacSyncRuntime?) -> GenerationGate? {
+        guard let runtime else { return nil }
+        return GenerationGate {
+            let result = await runtime.sync()
+            guard result.pullSucceeded else { throw GenerationGateError.syncUnavailable }
+            return result.cursor
+        }
     }
 
     private static func tag(with tagging: TagService) async throws {

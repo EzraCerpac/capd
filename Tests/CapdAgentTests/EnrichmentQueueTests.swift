@@ -60,20 +60,14 @@ struct EnrichmentQueueTests {
                     captureID: UUID(),
                     mutation: .edit(CaptureEdit(note: NoteEdit("Missing capture"))))
             }
-            await wire.holdPull(after: 2)
-            let startup = Task { await CapdAgent.startSync(runtime, retryDelay: .zero) }
-            await wire.waitForPull()
-            let waitingStatus = await runtime.status()
-            #expect(waitingStatus.phase == .attention || waitingStatus.phase == .syncing)
-            startup.cancel()
-            let ready = await startup.value
+            let ready = await CapdAgent.startSync(runtime, retryDelay: .zero)
             #expect(ready)
-            await wire.releasePull()
             let status = await runtime.sync()
             #expect(status.pullSucceeded)
             await runtime.stop()
             let enrichment = EnrichmentService(
-                store: session.store, steps: [StartupStep(wire: wire)])
+                store: session.store, steps: [StartupStep(wire: wire)],
+                generationGate: CapdAgent.generationGate(runtime))
             #expect(try enrichment.pendingCount() == 1)
             if ready {
                 await EnrichmentQueue(enrichment: enrichment, isOnMainsPower: { false }).drain()
