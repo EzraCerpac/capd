@@ -14,6 +14,8 @@ let package = Package(
     ],
     dependencies: [
         .package(path: "Packages/CapdSync"),
+        .package(path: "Packages/CapdMobile"),
+        .package(path: "Packages/CapdDesignSystem"),
         .package(url: "https://github.com/groue/GRDB.swift", from: "7.11.1"),
         .package(url: "https://github.com/apple/swift-argument-parser", from: "1.8.2"),
         .package(url: "https://github.com/sindresorhus/KeyboardShortcuts", from: "3.0.1"),
@@ -46,6 +48,7 @@ let package = Package(
         .target(
             name: "CapdAppUI",
             dependencies: [
+                .product(name: "CapdDesignSystem", package: "CapdDesignSystem"),
                 "CapdKit",
                 "KeyboardShortcuts",
             ]
@@ -111,6 +114,19 @@ let package = Package(
                 "CapdAgent",
                 "CapdKit",
                 .product(name: "GRDB", package: "GRDB.swift"),
+            ]
+        ),
+        .testTarget(
+            name: "PhoneLibraryConnectionTests",
+            dependencies: [
+                .product(name: "CapdMobile", package: "CapdMobile"),
+                .product(name: "CapdSync", package: "CapdSync"),
+                .product(name: "GRDB", package: "GRDB.swift"),
+            ],
+            path: "iOS",
+            sources: [
+                "App/PhoneLibraryConnection.swift",
+                "Tests/PhoneLibraryConnectionRecoveryTests.swift",
             ]
         ),
     ],

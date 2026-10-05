@@ -34,7 +34,7 @@ struct StoreTests {
                         "captures_on_title", "captures_on_tags_version", "captures_on_rating",
                         "captures_on_reminder_at",
                     ])
-                #expect(applied == ["001", "002", "003", "004", "005"])
+                #expect(applied == ["001", "002", "003", "004", "005", "006"])
                 #expect(journalMode == "wal")
                 #expect(foreignKeys == 1)
             }
@@ -58,7 +58,7 @@ struct StoreTests {
                 let count = try Capture.fetchCount(db)
                 let survivor = try Capture.fetchOne(db)
 
-                #expect(applied == ["001", "002", "003", "004", "005"])
+                #expect(applied == ["001", "002", "003", "004", "005", "006"])
                 #expect(count == 1)
                 #expect(survivor?.title == "Durable")
             }
@@ -323,8 +323,11 @@ struct StoreTests {
         try withTemporaryPaths { paths in
             let store = try Store(paths: paths)
             try store.dbPool.write { db in
+                let known = try Migrations.migrator.appliedMigrations(db)
+                var future = "future"
+                while known.contains(future) { future.append("-future") }
                 try db.execute(
-                    sql: "INSERT INTO grdb_migrations (identifier) VALUES ('006')")
+                    sql: "INSERT INTO grdb_migrations (identifier) VALUES (?)", arguments: [future])
             }
 
             #expect(throws: StoreError.databaseIsNewerThanApp) {

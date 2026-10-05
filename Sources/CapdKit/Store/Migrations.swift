@@ -9,7 +9,18 @@ enum Migrations {
         migrator.registerMigration("003", migrate: addRetagProgress)
         migrator.registerMigration("004", migrate: addCaptureRating)
         migrator.registerMigration("005", migrate: addCaptureReminder)
+        migrator.registerMigration("006", migrate: scopeCaptureHashesByKind)
         return migrator
+    }
+
+    static func scopeCaptureHashesByKind(_ db: Database) throws {
+        try db.drop(index: "captures_on_content_hash")
+        try db.create(
+            index: "captures_on_content_hash",
+            on: Schema.captures,
+            columns: [Capture.CodingKeys.kind.rawValue, Capture.CodingKeys.contentHash.rawValue],
+            options: .unique,
+            condition: Capture.CodingKeys.contentHash != nil)
     }
 
     static func addCaptureReminder(_ db: Database) throws {
