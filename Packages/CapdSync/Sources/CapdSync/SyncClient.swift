@@ -142,6 +142,34 @@ public final class SyncClient: Sendable {
         return operation
     }
 
+    /// Validates pending and projected replies inside this client's writer transaction.
+    /// Propagate errors so the caller rolls back pending work.
+    public func validateResponseBudget(in db: Database, captureID: UUID) throws {
+        guard ObjectIdentifier(db) == writerIdentity else { throw SyncTransactionError.wrongWriter }
+        guard db.isInsideTransaction else { throw SyncTransactionError.requiresTransaction }
+        try projectionGate.check()
+        try SyncDatabase.checkBinding(db, binding)
+        let id = try SyncDatabase.canonical(db, captureID)
+        let deviceCount =
+            try Int.fetchOne(
+                db, sql: "SELECT COUNT(*) FROM sync_devices WHERE id != ? COLLATE NOCASE",
+                arguments: [deviceID.uuidString])! + 1
+        let budget = try SyncHTTPResponseBudget(
+            principal: SyncPrincipal(
+                serviceID: binding?.serviceID ?? deviceID,
+                libraryID: binding?.libraryID ?? deviceID, deviceID: deviceID),
+            deviceCount: deviceCount)
+        try validatePendingReplies(
+            db, captureIDs: [id], budget: budget,
+            observed: try String.fetchSet(db, sql: "SELECT id FROM sync_observed"),
+            observedSequence: try Int64.fetchOne(
+                db, sql: "SELECT observed_sequence FROM sync_meta")!)
+        if let record = try SyncDatabase.record(db, id: id, table: "sync_visible"), !record.deleted
+        {
+            try budget.validateMutationCapture(record)
+        }
+    }
+
     /// Enqueues an ordered batch of edits and rebuilds its projection once in the caller's transaction.
     @discardableResult
     public func enqueue(in db: Database, edits: [(captureID: UUID, edit: CaptureEdit)]) throws

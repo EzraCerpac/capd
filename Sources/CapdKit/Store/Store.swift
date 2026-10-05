@@ -229,8 +229,10 @@ public final class Store: Sendable {
         synchronize: (Capture?, Capture) throws -> Void
     ) throws -> CaptureOutcome {
         if let hash = capture.contentHash,
-            var existing = try Capture.filter(Capture.CodingKeys.contentHash == hash)
-                .fetchOne(db)
+            var existing = try Capture.filter(
+                Capture.CodingKeys.kind == capture.kind && Capture.CodingKeys.contentHash == hash
+            )
+            .fetchOne(db)
         {
             let before = existing
             let previousSeenAt = existing.lastSeenAt

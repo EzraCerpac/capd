@@ -458,6 +458,118 @@ class MigrationTests(unittest.TestCase):
             self.assertEqual((1, 1), db.execute("SELECT cursor,floor FROM sync_meta").fetchone())
         self.assertTrue(migration.import_initial_mac(self.archive, authority, binding, import_id)["replayed"])
 
+    def test_import_rejects_aggregate_baseline_over_frame_before_authority_writes(self):
+        body = "/" * 4_500_000
+        self.db.execute("UPDATE captures SET body=?", (body,))
+        self.db.commit()
+        identities = migration.backfill_legacy(self.source, "captures.sqlite")
+        migration.backup(self.source, self.archive)
+        import_id = uuid.uuid4()
+        with contextlib.closing(sqlite3.connect(self.archive / "payload" / "captures.sqlite")) as db:
+            snapshots = db.execute(
+                "SELECT local_id,global_id,payload FROM sync_legacy_snapshot ORDER BY local_id"
+            ).fetchall()
+        sizes = []
+        for local_id, identity, payload in snapshots:
+            record = migration.imported_capture(identity, json.loads(payload), import_id)
+            size = len(migration.encode(record).replace(b"/", b"\\/"))
+            self.assertLessEqual(size, migration.MAXIMUM_IMPORTED_CAPTURE_BYTES)
+            self.assertEqual(identities[local_id], identity)
+            sizes.append(size)
+        aggregate = sum(sizes) + 2 + len(sizes) - 1 + 55 * len(sizes)
+        self.assertGreater(
+            aggregate, migration.MAXIMUM_SHARED_FRAME_BYTES - 65_536)
+
+        authority, binding = self.authority()
+        before_source = migration.inventory(self.source)
+        before_archive = migration.inventory(self.archive)
+        before_assets = migration.inventory(authority / "assets")
+        with contextlib.closing(sqlite3.connect(authority / "server.sqlite")) as db:
+            before_sql = migration.sql_signature(db)
+        with self.assertRaisesRegex(
+            migration.PreparationError, "baseline exceeds the shared response budget"
+        ):
+            migration.import_initial_mac(self.archive, authority, binding, str(import_id))
+        with contextlib.closing(sqlite3.connect(authority / "server.sqlite")) as db:
+            self.assertEqual(before_sql, migration.sql_signature(db))
+            self.assertEqual(
+                [],
+                db.execute(
+                    "SELECT name FROM sqlite_master WHERE name IN ('sync_initial_import', 'sync_imported_legacy')"
+                ).fetchall(),
+            )
+            self.assertEqual(0, db.execute("SELECT COUNT(*) FROM sync_records").fetchone()[0])
+        self.assertEqual(before_assets, migration.inventory(authority / "assets"))
+        self.assertEqual(before_source, migration.inventory(self.source))
+        self.assertEqual(before_archive, migration.inventory(self.archive))
+
+    def test_initial_import_accepts_aggregate_baseline_within_frame_budget(self):
+        body = "/" * 4_000_000
+        self.db.execute("UPDATE captures SET body=?", (body,))
+        self.db.commit()
+        migration.backfill_legacy(self.source, "captures.sqlite")
+        migration.backup(self.source, self.archive)
+        import_id = uuid.uuid4()
+        with contextlib.closing(sqlite3.connect(self.archive / "payload" / "captures.sqlite")) as db:
+            snapshots = db.execute(
+                "SELECT local_id,global_id,payload FROM sync_legacy_snapshot ORDER BY local_id"
+            ).fetchall()
+        sizes = []
+        for _, identity, payload in snapshots:
+            record = migration.imported_capture(identity, json.loads(payload), import_id)
+            encoded = migration.encode(record)
+            sizes.append(len(encoded) + encoded.count(b"/"))
+        aggregate = sum(sizes) + 2 + len(sizes) - 1 + 55 * len(sizes)
+        self.assertLessEqual(
+            aggregate, migration.MAXIMUM_SHARED_FRAME_BYTES - 65_536)
+
+        authority, binding = self.authority()
+        result = migration.import_initial_mac(self.archive, authority, binding, str(import_id))
+        self.assertEqual(2, result["count"])
+        with contextlib.closing(sqlite3.connect(authority / "server.sqlite")) as db:
+            self.assertEqual(2, db.execute("SELECT COUNT(*) FROM sync_records").fetchone()[0])
+            self.assertEqual((1, 1), db.execute("SELECT cursor,floor FROM sync_meta").fetchone())
+
+    def test_initial_import_allows_same_hash_across_capture_kinds(self):
+        self.db.execute("ALTER TABLE captures ADD COLUMN content_hash TEXT")
+        image_hash = migration.digest(self.source / "assets" / "nested" / "image.png")
+        self.db.execute("UPDATE captures SET content_hash=? WHERE id IN (42,81)", (image_hash,))
+        self.db.commit()
+        identities = migration.backfill_legacy(self.source, "captures.sqlite")
+        migration.backup(self.source, self.archive)
+        authority, binding = self.authority()
+        result = migration.import_initial_mac(self.archive, authority, binding, str(uuid.uuid4()))
+        self.assertEqual(2, result["count"])
+        with contextlib.closing(sqlite3.connect(authority / "server.sqlite")) as db:
+            rows = db.execute(
+                "SELECT source_kind,content_hash,blob_digest FROM sync_records WHERE content_hash=?",
+                (image_hash,),
+            ).fetchall()
+        self.assertCountEqual(
+            [("image", image_hash, image_hash), ("text", image_hash, None)], rows)
+        self.assertEqual(2, len(set(identities.values())))
+
+    def test_initial_import_still_rejects_duplicate_hash_within_kind_before_writes(self):
+        self.db.execute("ALTER TABLE captures ADD COLUMN content_hash TEXT")
+        self.db.execute("UPDATE captures SET kind='text',asset_path=NULL WHERE id=42")
+        self.db.execute("UPDATE captures SET content_hash=? WHERE id=42", ("caf\u00e9",))
+        self.db.execute("UPDATE captures SET content_hash=? WHERE id=81", ("cafe\u0301",))
+        self.db.commit()
+        migration.backfill_legacy(self.source, "captures.sqlite")
+        migration.backup(self.source, self.archive)
+        authority, binding = self.authority()
+        before_assets = migration.inventory(authority / "assets")
+        with contextlib.closing(sqlite3.connect(authority / "server.sqlite")) as db:
+            before_sql = migration.sql_signature(db)
+        with self.assertRaisesRegex(
+            migration.PreparationError, "duplicate legacy content fingerprints"
+        ):
+            migration.import_initial_mac(self.archive, authority, binding, str(uuid.uuid4()))
+        with contextlib.closing(sqlite3.connect(authority / "server.sqlite")) as db:
+            self.assertEqual(before_sql, migration.sql_signature(db))
+            self.assertEqual(0, db.execute("SELECT COUNT(*) FROM sync_records").fetchone()[0])
+        self.assertEqual(before_assets, migration.inventory(authority / "assets"))
+
     def test_utf8_record_exceeding_shared_frame_refuses_before_import(self):
         body = "🦆" * 4_194_304
         self.assertEqual(16_777_216, len(body.encode("utf-8")))

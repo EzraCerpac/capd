@@ -174,14 +174,20 @@ public final class MobileStore: Sendable {
             createdAt: capture.createdAt, note: capture.note.isEmpty ? nil : capture.note,
             metadata: capture.metadata)
         record.manualTags = capture.manualTags
-        return try enqueue(captureID: record.id, mutation: .create(record))
+        return try enqueue(captureID: record.id, mutation: .create(record)) { db in
+            try MobileCaptureSaveValidation.validate(record, in: db)
+        }
     }
 
     @discardableResult
-    private func enqueue(captureID: UUID, mutation: CaptureMutation, baseRevision: Int64? = nil)
+    private func enqueue(
+        captureID: UUID, mutation: CaptureMutation, baseRevision: Int64? = nil,
+        validating: ((Database) throws -> Void)? = nil
+    )
         throws -> UUID
     {
         return try database.write { db in
+            try validating?(db)
             let operation = try client.enqueue(
                 in: db, captureID: captureID, mutation: mutation, baseRevision: baseRevision)
             let encoder = JSONEncoder()
@@ -191,6 +197,14 @@ public final class MobileStore: Sendable {
                 expectedServiceID: deviceID, expectedLibraryID: deviceID,
                 expectedDeviceID: deviceID, action: .apply(operation))
             guard try encoder.encode(envelope).count <= SyncHTTPHandler.maximumBodyBytes else {
+                throw CaptureValidationError.tooLarge
+            }
+            if case .delete = mutation {
+                return operation.id
+            }
+            do {
+                try client.validateResponseBudget(in: db, captureID: captureID)
+            } catch SyncHTTPError.resourceLimit {
                 throw CaptureValidationError.tooLarge
             }
             return operation.id

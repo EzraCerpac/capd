@@ -37,7 +37,7 @@ struct SyncCompatibilityTests {
                 let applied = try Migrations.migrator.appliedMigrations(db)
                 let journal = try String.fetchOne(db, sql: "PRAGMA journal_mode")
                 let columns = try db.columns(in: Schema.capturesFTS).map(\.name)
-                #expect(applied == ["001", "002", "003", "004", "005"])
+                #expect(applied == ["001", "002", "003", "004", "005", "006"])
                 #expect(journal == "wal")
                 #expect(columns == Schema.ranking.map(\.column))
             }
