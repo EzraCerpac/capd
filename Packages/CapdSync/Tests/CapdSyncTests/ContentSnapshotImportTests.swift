@@ -6,6 +6,201 @@ import Testing
 
 @Suite("Explicit content snapshot imports")
 struct ContentSnapshotImportTests {
+    @Test func newDeviceAdmissionCannotStrandImportedRecord() throws {
+        let f = try SnapshotFixture()
+        defer { f.clean() }
+        let cursor: Int64 = 1_000_000_000_000_000_000
+        try f.seedMetadata(cursor: cursor, sequence: 1)
+        try f.database.write { db in
+            for _ in 0..<3 {
+                try db.execute(
+                    sql: "INSERT INTO sync_devices (id, sequence) VALUES (?, ?)",
+                    arguments: [UUID().uuidString, Int64.max])
+            }
+        }
+        var capture = f.capture(id: f.duplicateID, hash: "enrollment-limit", note: "Existing note")
+        capture.revision = cursor + 1
+        capture.noteRevision = cursor + 1
+        capture.seenCount = Int.max
+        capture.manualTags = [""]
+        capture.manualTags[0] = String(
+            repeating: "x",
+            count: try f.responseBudget().maximumCaptureBytes - SyncDatabase.encode(capture).count)
+        let snapshot = f.snapshot([capture])
+        try f.server.importContentSnapshot(
+            snapshot, preview: f.server.previewContentSnapshotImport(snapshot))
+        #expect(try f.transport(f.seedDevice).baseline().captures.count == 1)
+        let asset = try f.server.blobs.put(Data("unchanged enrollment asset".utf8))
+        var accepted = 0
+        var rejected: SyncOperation?
+        for _ in 0..<8 {
+            let device = UUID()
+            let operation = SyncOperation(
+                deviceID: device, sequence: 1, captureID: UUID(), baseRevision: 0,
+                mutation: .delete)
+            let before = try f.logicalState()
+            do {
+                let receipt = try f.transport(device).apply(operation)
+                #expect(receipt.outcome == .missing)
+                accepted += 1
+            } catch SyncHTTPError.resourceLimit {
+                rejected = operation
+                let unchanged = try f.logicalState() == before
+                #expect(unchanged)
+                break
+            }
+        }
+        let baseline = try f.server.baseline()
+        let actualReplyBytes = try f.baselineReplyBytes(
+            baseline.captures[0], cursor: baseline.cursor, sequences: baseline.deviceSequences)
+        print(
+            "New-device admission: accepted \(accepted), baseline reply bytes \(actualReplyBytes)")
+        var recoveryFailed = false
+        do { _ = try f.transport(f.seedDevice).baseline() } catch SyncHTTPError.resourceLimit {
+            recoveryFailed = true
+        }
+        #expect(rejected != nil)
+        #expect(!recoveryFailed)
+        #expect(try f.server.blobs.read(asset) == Data("unchanged enrollment asset".utf8))
+        if let rejected {
+            let current = baseline.captures[0]
+            try f.transport(f.seedDevice).apply(
+                SyncOperation(
+                    deviceID: f.seedDevice, sequence: 2, captureID: current.id,
+                    baseRevision: current.revision,
+                    mutation: .edit(CaptureEdit(removeTags: current.manualTags))))
+            #expect(try f.transport(rejected.deviceID).apply(rejected).outcome == .missing)
+            #expect(try f.transport(rejected.deviceID).baseline().captures.count == 1)
+        }
+    }
+
+    @Test(arguments: [false, true])
+    func growingMutationCannotExceedBaselineBudget(editExisting: Bool) throws {
+        let f = try SnapshotFixture()
+        defer { f.clean() }
+        try f.seedMetadata(cursor: 9, sequence: 9)
+        try f.database.write { db in
+            for _ in 0..<49 {
+                try db.execute(
+                    sql: "INSERT INTO sync_devices (id, sequence) VALUES (?, ?)",
+                    arguments: [UUID().uuidString, Int64.max])
+            }
+        }
+        let operationID = UUID()
+        var incoming = f.capture(id: f.duplicateID, hash: "mutation-limit")
+        if editExisting {
+            incoming.revision = 9
+            try f.database.write { try SyncDatabase.save($0, incoming) }
+        }
+        var candidate = incoming
+        candidate.revision = 10
+        if !editExisting { candidate.noteOperationID = operationID }
+        candidate.manualTags = [""]
+        func feedBytes(_ capture: SharedCapture) throws -> Int {
+            let change = FeedChange(
+                cursor: 10, operationID: operationID, deviceID: f.seedDevice, sequence: 10,
+                requestedCaptureID: capture.id, capture: capture)
+            return try f.replyBytes(.page(FeedPage(cursor: 10, changes: [change])))
+        }
+        candidate.manualTags[0] = String(
+            repeating: "x", count: SyncHTTPHandler.maximumBodyBytes - (try feedBytes(candidate)))
+        incoming.manualTags = candidate.manualTags
+        let operation = SyncOperation(
+            id: operationID, deviceID: f.seedDevice, sequence: 10, captureID: incoming.id,
+            baseRevision: editExisting ? 9 : 0,
+            mutation: editExisting
+                ? .edit(CaptureEdit(addTags: candidate.manualTags)) : .create(incoming))
+        #expect(try feedBytes(candidate) == SyncHTTPHandler.maximumBodyBytes)
+        #expect(
+            try f.replyBytes(
+                .receipt(
+                    SyncReceipt(operationID: operationID, outcome: .accepted, capture: candidate)))
+                < SyncHTTPHandler.maximumBodyBytes)
+        let sequences = try f.server.baseline().deviceSequences.merging([f.seedDevice: 10]) {
+            _, new in new
+        }
+        let prospectiveBaselineBytes = try f.baselineReplyBytes(
+            candidate, cursor: 10, sequences: sequences)
+        #expect(prospectiveBaselineBytes > SyncHTTPHandler.maximumBodyBytes)
+        let request = SyncHTTPEnvelope(
+            expectedServiceID: f.binding.serviceID, expectedLibraryID: f.binding.libraryID,
+            expectedDeviceID: f.seedDevice, action: .apply(operation))
+        #expect(try SyncDatabase.encode(request).count <= SyncHTTPHandler.maximumBodyBytes)
+        let before = try f.logicalState()
+        var rejected = false
+        do { _ = try f.transport(f.seedDevice).apply(operation) } catch SyncHTTPError.resourceLimit
+        { rejected = true }
+        let unchanged = try f.logicalState() == before
+        var recoveryFailed = false
+        do { _ = try f.transport(f.seedDevice).baseline() } catch SyncHTTPError.resourceLimit {
+            recoveryFailed = true
+        }
+        print(
+            "Growing mutation: edit \(editExisting), prospective baseline bytes \(prospectiveBaselineBytes)"
+        )
+        #expect(rejected)
+        #expect(unchanged)
+        #expect(!recoveryFailed)
+    }
+
+    @Test func mutationConsumesOnlyRemainingScalarHeadroom() throws {
+        let f = try SnapshotFixture()
+        defer { f.clean() }
+        let cursor: Int64 = 1_000_000_000_000_000_000
+        try f.seedMetadata(cursor: cursor, sequence: 9)
+        try f.database.write { db in
+            for _ in 0..<49 {
+                try db.execute(
+                    sql: "INSERT INTO sync_devices (id, sequence) VALUES (?, ?)",
+                    arguments: [UUID().uuidString, Int64.max])
+            }
+        }
+        let budget = try SyncHTTPResponseBudget(
+            principal: SyncPrincipal(
+                serviceID: f.binding.serviceID, libraryID: f.binding.libraryID,
+                deviceID: f.seedDevice), deviceCount: 50)
+        var original = f.capture(id: f.duplicateID, hash: "remaining-headroom")
+        original.revision = cursor
+        original.noteRevision = cursor
+        original.seenCount = Int.max
+        try f.database.write { try SyncDatabase.save($0, original) }
+        var candidate = original
+        candidate.manualTags = [""]
+        candidate.manualTags[0] = String(
+            repeating: "x",
+            count: budget.maximumEnvelopeCaptureBytes - (try SyncDatabase.encode(candidate).count))
+        #expect(try SyncDatabase.encode(candidate).count > budget.maximumCaptureBytes)
+        try budget.validateMutationCapture(candidate)
+        let transport = f.transport(f.seedDevice)
+        var current = original
+        let mutations: [CaptureMutation] = [
+            .edit(CaptureEdit(addTags: candidate.manualTags)), .delete, .restore, .recapture,
+        ]
+        for (offset, mutation) in mutations.enumerated() {
+            let receipt = try transport.apply(
+                SyncOperation(
+                    deviceID: f.seedDevice, sequence: Int64(10 + offset), captureID: current.id,
+                    baseRevision: current.revision, mutation: mutation))
+            #expect(receipt.outcome == .accepted)
+            current = try #require(receipt.capture)
+            #expect(try transport.baseline().captures.first == current)
+            #expect(
+                try transport.changes(after: current.revision - 1, limit: 1).changes.first?.capture
+                    == current)
+        }
+        #expect(current.seenCount == Int.max)
+        #expect(try SyncDatabase.encode(current).count == budget.maximumEnvelopeCaptureBytes)
+        let newDevice = UUID()
+        let repaired = try f.transport(newDevice).apply(
+            SyncOperation(
+                deviceID: newDevice, sequence: 1, captureID: current.id,
+                baseRevision: current.revision,
+                mutation: .edit(CaptureEdit(removeTags: current.manualTags))))
+        #expect(repaired.capture?.manualTags.isEmpty == true)
+        #expect(try f.transport(newDevice).baseline().deviceSequences[newDevice] == 1)
+        #expect(try transport.baseline().captures.first?.manualTags.isEmpty == true)
+    }
+
     @Test func knownDeviceSequenceGrowthCannotStrandImportedRecord() throws {
         let f = try SnapshotFixture()
         defer { f.clean() }

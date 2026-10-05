@@ -299,22 +299,7 @@ enum SnapshotImport {
                 throw SyncHTTPError.resourceLimit
             }
         }
-        let rows = try Row.fetchCursor(
-            db, sql: "SELECT id, length(payload) AS bytes FROM sync_records")
-        while let row = try rows.next() {
-            let storedBytes: Int = row["bytes"]
-            guard storedBytes <= budget.maximumCaptureBytes else {
-                throw SyncHTTPError.resourceLimit
-            }
-            if storedBytes <= budget.smallStoredCaptureBytes { continue }
-            let data = try Data.fetchOne(
-                db, sql: "SELECT payload FROM sync_records WHERE id=?",
-                arguments: [row["id"] as String])!
-            let capture = try SyncDatabase.decode(SharedCapture.self, data)
-            guard try SyncDatabase.encode(capture).count <= budget.maximumCaptureBytes else {
-                throw SyncHTTPError.resourceLimit
-            }
-        }
+        try budget.validateStoredCaptures(db)
     }
 
     private static func validate(_ snapshot: ContentSnapshotImport, binding: SyncLibraryBinding?)

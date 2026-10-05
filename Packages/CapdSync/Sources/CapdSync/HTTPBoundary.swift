@@ -1,4 +1,5 @@
 import Foundation
+import GRDB
 
 public struct SyncPrincipal: Codable, Equatable, Sendable {
     public let serviceID: UUID
@@ -111,6 +112,7 @@ public struct SyncHTTPReply: Codable, Sendable {
 
 struct SyncHTTPResponseBudget {
     let maximumCaptureBytes: Int
+    let maximumEnvelopeCaptureBytes: Int
     let smallStoredCaptureBytes: Int
 
     static func replyPayload(
@@ -162,9 +164,9 @@ struct SyncHTTPResponseBudget {
         let revisionGrowth = 2 * (String(Int64.max).utf8.count - 1)
         let countGrowth = String(Int.max).utf8.count - 1
         let restoreGrowth = try SyncDatabase.encode(false).count - SyncDatabase.encode(true).count
+        maximumEnvelopeCaptureBytes = SyncHTTPHandler.maximumBodyBytes - maximumOverhead
         maximumCaptureBytes =
-            SyncHTTPHandler.maximumBodyBytes - maximumOverhead
-            - revisionGrowth - countGrowth - restoreGrowth
+            maximumEnvelopeCaptureBytes - revisionGrowth - countGrowth - restoreGrowth
         guard maximumCaptureBytes >= 0 else { throw SyncHTTPError.resourceLimit }
 
         // Decimal has a 128-bit coefficient and an 8-bit exponent; strings escape to six bytes.
@@ -173,6 +175,42 @@ struct SyncHTTPResponseBudget {
         let doubleScalarBytes = -Double.leastNonzeroMagnitude.exponent + 3
         let scalarExpansion = max(6, max(decimalScalarBytes, doubleScalarBytes))
         smallStoredCaptureBytes = max(0, (maximumCaptureBytes - captureBytes) / scalarExpansion)
+    }
+
+    func validateMutationCapture(_ capture: SharedCapture) throws {
+        var future = capture
+        future.revision = Int64.max
+        future.noteRevision = Int64.max
+        future.seenCount = Int.max
+        future.deleted = false
+        guard try SyncDatabase.encode(future).count <= maximumEnvelopeCaptureBytes else {
+            throw SyncHTTPError.resourceLimit
+        }
+    }
+
+    func validateStoredCaptures(
+        _ db: Database, replacing: UUID? = nil, forMutation: Bool = false
+    ) throws {
+        let maximumBytes = forMutation ? maximumEnvelopeCaptureBytes : maximumCaptureBytes
+        let rows = try Row.fetchCursor(
+            db, sql: "SELECT id, length(payload) AS bytes FROM sync_records")
+        while let row = try rows.next() {
+            let id: String = row["id"]
+            if id == replacing?.uuidString { continue }
+            let storedBytes: Int = row["bytes"]
+            guard storedBytes <= maximumBytes else { throw SyncHTTPError.resourceLimit }
+            if storedBytes <= smallStoredCaptureBytes { continue }
+            let data = try Data.fetchOne(
+                db, sql: "SELECT payload FROM sync_records WHERE id=?", arguments: [id])!
+            let capture = try SyncDatabase.decode(SharedCapture.self, data)
+            if forMutation {
+                try validateMutationCapture(capture)
+            } else {
+                guard try SyncDatabase.encode(capture).count <= maximumCaptureBytes else {
+                    throw SyncHTTPError.resourceLimit
+                }
+            }
+        }
     }
 }
 
@@ -256,12 +294,25 @@ public struct SyncHTTPHandler: Sendable {
             switch envelope.action {
             case .apply(let operation):
                 result = .receipt(
-                    try authority.apply(operation) { receipt, change in
+                    try authority.apply(operation) { db, receipt, change in
                         try checkResponseSize(.receipt(receipt), principal: principal)
                         if let change {
                             try checkResponseSize(
                                 .page(FeedPage(cursor: change.cursor, changes: [change])),
                                 principal: principal)
+                        }
+                        let deviceCount = try Int.fetchOne(
+                            db, sql: "SELECT COUNT(*) FROM sync_devices")!
+                        let deviceIsKnown = try Bool.fetchOne(
+                            db, sql: "SELECT EXISTS(SELECT 1 FROM sync_devices WHERE id=?)",
+                            arguments: [operation.deviceID.uuidString])!
+                        let budget = try SyncHTTPResponseBudget(
+                            principal: principal,
+                            deviceCount: deviceCount + (deviceIsKnown ? 0 : 1))
+                        if let change { try budget.validateMutationCapture(change.capture) }
+                        if !deviceIsKnown {
+                            try budget.validateStoredCaptures(
+                                db, replacing: change?.capture.id, forMutation: true)
                         }
                     })
             case .changes(let cursor, let limit):

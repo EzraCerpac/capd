@@ -60,12 +60,12 @@ public final class SyncServer: SyncTransport, Sendable {
     }
 
     public func apply(_ operation: SyncOperation) throws -> SyncReceipt {
-        try apply(operation, validating: { _, _ in })
+        try apply(operation, validating: { _, _, _ in })
     }
 
     func apply(
         _ operation: SyncOperation,
-        validating validate: (SyncReceipt, FeedChange?) throws -> Void
+        validating validate: (Database, SyncReceipt, FeedChange?) throws -> Void
     ) throws -> SyncReceipt {
         try write { db in
             if let row = try Row.fetchOne(
@@ -77,7 +77,7 @@ public final class SyncServer: SyncTransport, Sendable {
                     throw SyncError.operationIDReused
                 }
                 let receipt = try SyncDatabase.decode(SyncReceipt.self, row["receipt"])
-                try validate(receipt, nil)
+                try validate(db, receipt, nil)
                 return receipt
             }
             try SyncDatabase.validate(operation)
@@ -199,7 +199,7 @@ public final class SyncServer: SyncTransport, Sendable {
                         deviceID: operation.deviceID, sequence: operation.sequence,
                         requestedCaptureID: operation.captureID, capture: $0)
                 } : nil
-            try validate(receipt, change)
+            try validate(db, receipt, change)
             if let change, let record {
                 try SyncDatabase.save(db, record)
                 try db.execute(
