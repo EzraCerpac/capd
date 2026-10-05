@@ -4,6 +4,7 @@ import GRDB
 import Testing
 
 @testable import CapdMobile
+@testable import CapdSync
 
 private func encoded<T: Encodable>(_ value: T) throws -> Data {
     let encoder = JSONEncoder()
@@ -572,4 +573,160 @@ private actor DrainFlag {
     await drain.value
     #expect(await flag.done)
     #expect(await controller.currentState().phase == .paused)
+}
+
+private actor ActivationBudgetRemote: AsyncSyncTransport {
+    nonisolated let binding: SyncLibraryBinding
+    nonisolated let deviceID: UUID
+    let base: ActivationRemote
+    let captures: [SharedCapture]
+    let targetCursor: Int64
+    let verifiedCursor: Int64
+    let remoteDeviceID = UUID()
+    var baselineReads = 0
+    var pageReads = 0
+
+    init(
+        server: SyncServer, enrollment: SyncEnrollment, targetCursor: Int64,
+        verifiedCursor: Int64? = nil
+    ) throws {
+        base = ActivationRemote(server, enrollment)
+        binding = enrollment.binding
+        deviceID = enrollment.deviceID
+        captures = try server.baseline().captures
+        self.targetCursor = targetCursor
+        self.verifiedCursor = verifiedCursor ?? targetCursor
+    }
+
+    func send(_ request: SyncHTTPRequest) async throws -> SyncHTTPResponse {
+        let envelope = try JSONDecoder().decode(SyncHTTPEnvelope.self, from: request.body)
+        let result: SyncHTTPResult
+        switch envelope.action {
+        case .changes(let cursor, let limit):
+            pageReads += 1
+            guard pageReads <= MobileStore.pullPageBudget else {
+                throw SyncHTTPError.unavailable
+            }
+            let count = Int(min(Int64(limit), targetCursor - cursor))
+            let changes = (0..<count).map { offset in
+                let revision = cursor + Int64(offset) + 1
+                var capture = captures[offset % captures.count]
+                capture.revision = revision
+                return FeedChange(
+                    cursor: revision, operationID: UUID(), deviceID: remoteDeviceID,
+                    sequence: revision, requestedCaptureID: capture.id, capture: capture)
+            }
+            result = .page(FeedPage(cursor: cursor + Int64(count), changes: changes))
+        case .baselinePage(let after, let limit, _):
+            if after == nil { baselineReads += 1 }
+            let records = captures.sorted { $0.id.uuidString < $1.id.uuidString }
+                .filter { after == nil || $0.id.uuidString > after!.uuidString }
+            result = .baseline(
+                Baseline(
+                    cursor: baselineReads == 1 ? targetCursor : verifiedCursor,
+                    captures: Array(records.prefix(limit)), deviceSequences: [:],
+                    totalCaptureCount: captures.count))
+        default:
+            return try await base.send(request)
+        }
+        return SyncHTTPResponse(
+            status: 200, headers: ["Content-Type": "application/json"],
+            body: try encoded(
+                SyncHTTPReply(
+                    version: 1,
+                    principal: SyncPrincipal(
+                        serviceID: binding.serviceID, libraryID: binding.libraryID,
+                        deviceID: deviceID),
+                    result: result, metadataContractVersion: 1,
+                    generatedProcessingContractVersion: 1, extractionQualityContractVersion: 1)))
+    }
+}
+
+@Test(arguments: [false, true])
+func incompleteActivationRefusesEmptyAndArchiveOnlyOriginals(archiveOnly: Bool) async throws {
+    let f = ActivationFixture()
+    defer { f.clean() }
+    let old =
+        try archiveOnly
+        ? f.populated()
+        : MobileLibrarySession.open(root: f.root, role: .app, credentials: f.credentials)
+    let pending = try old.store.pending()
+    let bytes = try f.originalFiles()
+    let prep = try f.activation.prepare(endpoint: f.endpoint, binding: f.binding)
+    let server = try f.authority()
+    let capture = SharedCapture(
+        source: CaptureSource(kind: .text, selection: "Synthetic authority feed budget"))
+    _ = try server.apply(
+        SyncOperation(
+            deviceID: UUID(), sequence: 1, captureID: capture.id,
+            baseRevision: 0, mutation: .create(capture)))
+    let remote = try ActivationBudgetRemote(
+        server: server, enrollment: prep.enrollment, targetCursor: 10_001)
+    await #expect(throws: SyncError.invalidCursor) {
+        try await f.activation.activate(
+            prep, handoff: nil, credential: "synthetic-activation-only",
+            originalDisposition: archiveOnly ? .keepArchivedOnly : .importReviewed,
+            transport: remote)
+    }
+    #expect(await remote.pageReads == MobileStore.pullPageBudget)
+    #expect(await remote.baselineReads == 2)
+    #expect(try MobileLibraryAccess.selected(in: f.root) == .legacy)
+    #expect(try old.store.pending() == pending)
+    #expect(try f.originalFiles() == bytes)
+    #expect(throws: SyncConnectionError.credentialUnavailable) {
+        try f.credentials.read(for: prep.enrollment)
+    }
+}
+
+@Test(arguments: [false, true])
+func reviewedCanonicalRecordsOnEarlyPagesCannotBypassVerifiedCursor(lateAuthority: Bool)
+    async throws
+{
+    let f = ActivationFixture()
+    defer { f.clean() }
+    let old = try f.populated()
+    let pending = try old.store.pending()
+    let prep = try f.activation.prepare(endpoint: f.endpoint, binding: f.binding)
+    let server = try f.authority()
+    let handoff = try f.handoff(prep, server: server)
+    let target: Int64 = lateAuthority ? 100 : 10_001
+    let remote = try ActivationBudgetRemote(
+        server: server, enrollment: prep.enrollment, targetCursor: target,
+        verifiedCursor: lateAuthority ? target + 1 : target)
+    await #expect(throws: SyncError.invalidCursor) {
+        try await f.activation.activate(
+            prep, handoff: handoff, credential: "synthetic-activation-only", transport: remote)
+    }
+    #expect(await remote.baselineReads == 2)
+    let stages = try FileManager.default.contentsOfDirectory(
+        at: f.root.appendingPathComponent("ConnectedLibraries"), includingPropertiesForKeys: nil)
+    let stage = try MobileStore(
+        url: #require(stages.first).appendingPathComponent("captures.sqlite"),
+        deviceID: prep.enrollment.deviceID, binding: prep.enrollment.binding)
+    #expect(
+        Set(try stage.search().map(\.id)) == Set(handoff.receipt.items.map(\.canonicalCaptureID)))
+    #expect(try MobileLibraryAccess.selected(in: f.root) == .legacy)
+    #expect(try old.store.pending() == pending)
+    #expect(throws: SyncConnectionError.credentialUnavailable) {
+        try f.credentials.read(for: prep.enrollment)
+    }
+}
+
+@Test func activationPublishesWhenBoundedPullReachesVerifiedCursorExactly() async throws {
+    let f = ActivationFixture()
+    defer { f.clean() }
+    _ = try f.populated()
+    let prep = try f.activation.prepare(endpoint: f.endpoint, binding: f.binding)
+    let server = try f.authority()
+    let handoff = try f.handoff(prep, server: server)
+    let remote = try ActivationBudgetRemote(
+        server: server, enrollment: prep.enrollment, targetCursor: 10_000)
+    let config = try await f.activation.activate(
+        prep, handoff: handoff, credential: "synthetic-activation-only", transport: remote)
+    #expect(await remote.pageReads == MobileStore.pullPageBudget)
+    #expect(try MobileLibraryAccess.selected(in: f.root) == config)
+    let reader = try DatabaseQueue(path: config.databaseURL(in: f.root).path)
+    #expect(
+        try await reader.read { try Int64.fetchOne($0, sql: "SELECT cursor FROM sync_meta") }
+            == 10_000)
 }
