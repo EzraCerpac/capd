@@ -64,18 +64,13 @@ struct StoreSyncTests {
             _ = try server.apply(
                 SyncOperation(
                     deviceID: remoteDevice, sequence: 5, captureID: remote.id,
-                    baseRevision: restored.revision, mutation: .recapture))
-            let authority = try DatabaseQueue(
-                path: paths.root.deletingLastPathComponent().appendingPathComponent(
-                    "authority.sqlite"
-                ).path)
-            try authority.write { db in
-                try db.execute(
-                    sql: "DELETE FROM sync_records WHERE id=?", arguments: [remote.id.uuidString])
-            }
+                    baseRevision: restored.revision, mutation: .delete))
+            let deleted = try #require(try server.baseline().captures.first)
+            #expect(deleted.deleted)
             try server.expireFeed(through: server.baseline().cursor)
             try client.pull(from: transport)
             #expect(try client.captures().isEmpty)
+            #expect(try client.captures(includeDeleted: true) == [deleted])
             #expect(try store.noteConflicts().isEmpty)
             #expect(try reopened.noteConflicts().isEmpty)
         }
