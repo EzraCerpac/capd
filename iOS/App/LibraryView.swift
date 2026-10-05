@@ -254,10 +254,13 @@ struct CaptureDetailView: View {
                         .accessibilityIdentifier("deleteCapture")
                 }
                 ToolbarItem(placement: .topBarTrailing) {
-                    if let raw = capture.url, let url = URL(string: raw) {
-                        ShareLink(item: url).accessibilityIdentifier("shareCapture")
-                    } else {
-                        ShareLink(item: capture.selection).accessibilityIdentifier("shareCapture")
+                    if capture.kind != .image {
+                        if let raw = capture.url, let url = URL(string: raw) {
+                            ShareLink(item: url).accessibilityIdentifier("shareCapture")
+                        } else {
+                            ShareLink(item: capture.selection).accessibilityIdentifier(
+                                "shareCapture")
+                        }
                     }
                 }
             }
