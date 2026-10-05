@@ -133,7 +133,8 @@ struct LibraryView: View {
     }
 
     private func consumeSystemAction() {
-        if capturing || showingSyncSettings || asking, let action = systemBridge.pendingAction {
+        guard !capturing else { return }
+        if showingSyncSettings || asking, let action = systemBridge.pendingAction {
             switch action {
             case .find, .open: return
             case .stageText: break
