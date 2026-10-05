@@ -2,6 +2,7 @@ import argparse
 from pathlib import Path
 import subprocess
 import tempfile
+import unittest
 
 
 HARNESS = r'''
@@ -129,10 +130,7 @@ if failures != 0 { exit(1) }
 '''
 
 
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--module-cache", type=Path, required=True)
-    args = parser.parse_args()
+def run_harness(module_cache):
     root = Path(__file__).resolve().parents[1]
     source = (root / "iOS/App/LibraryView.swift").read_text()
     assert ".sheet(isPresented: $capturing, onDismiss: consumeSystemAction)" in source
@@ -146,11 +144,24 @@ def main():
         binary = directory / "draft-routing-tests"
         swift.write_text(HARNESS.replace("__ACTUAL_ROUTING_METHOD__", method))
         subprocess.run(
-            ["xcrun", "swiftc", "-swift-version", "6", "-module-cache-path", str(args.module_cache),
+            ["xcrun", "swiftc", "-swift-version", "6", "-module-cache-path", str(module_cache),
              str(swift), "-o", str(binary)],
             check=True,
         )
         subprocess.run([str(binary)], check=True)
+
+
+class PhoneLibraryDraftRoutingTests(unittest.TestCase):
+    def test_deferred_drafts_and_existing_routes(self):
+        with tempfile.TemporaryDirectory(prefix="capd-draft-module-cache-") as module_cache:
+            run_harness(Path(module_cache))
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--module-cache", type=Path, required=True)
+    args = parser.parse_args()
+    run_harness(args.module_cache)
 
 
 if __name__ == "__main__":
