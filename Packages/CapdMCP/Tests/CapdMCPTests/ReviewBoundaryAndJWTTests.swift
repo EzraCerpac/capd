@@ -87,6 +87,45 @@ final class ReviewBoundaryAndJWTTests: XCTestCase {
         XCTAssertEqual(changedToken.status, 401)
     }
 
+    func testAcceptRequiresPositiveValidQualityForBothMediaTypes() throws {
+        let f = try MCPTests.Fixture()
+        defer { try? FileManager.default.removeItem(at: f.directory) }
+        let boundary = try MCPHTTPBoundary(
+            toolbox: f.toolbox, verifier: MCPTests.Verifier(grant: f.grant),
+            issuer: f.grant.issuer, resource: f.grant.audience,
+            metadataURL: "https://capd.example.invalid/metadata", origins: [], binding: f.binding)
+        let body = try JSONEncoder().encode(
+            JSONValue.object([
+                "jsonrpc": .string("2.0"), "id": .number(1), "method": .string("tools/list"),
+            ]))
+        let cases: [(String, Int)] = [
+            ("application/json;q=0, text/event-stream", 406),
+            ("application/json, text/event-stream;q=0.000", 406),
+            ("application/json;q=invalid, text/event-stream", 406),
+            ("application/json;q=1.001, text/event-stream", 406),
+            ("application/json;q=-1, text/event-stream", 406),
+            ("application/json;q=0.1234, text/event-stream", 406),
+            ("application/json;q=0.5;q=1, text/event-stream", 406),
+            ("application/json;q=0, text/event-stream, */*;q=1", 406),
+            ("application/*;q=0.5, application/json;q=0, text/event-stream", 406),
+            ("application/json;q=0.001, text/event-stream;q=1.000", 200),
+            ("Application/JSON; Q=0.5, text/event-stream", 200),
+            ("application/json, text/event-stream", 200),
+            ("application/*;q=0.5, text/*;q=0.5", 200),
+            ("*/*;q=0, application/json;q=0.5, text/event-stream;q=1", 200),
+        ]
+        for (accept, expected) in cases {
+            let response = boundary.handle(
+                MCPHTTPRequest(
+                    method: "POST", path: "/mcp",
+                    headers: [
+                        "Authorization": "Bearer synthetic", "Accept": accept,
+                        "Content-Type": "application/json", "MCP-Protocol-Version": "2025-11-25",
+                    ], body: body))
+            XCTAssertEqual(response.status, expected, accept)
+        }
+    }
+
     func testJWTPolicyRejectsZeroDeviceForWriter() throws {
         let zeroDeviceID = UUID(uuid: (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0))
         let binding = SyncLibraryBinding(libraryID: UUID(), serviceID: UUID())

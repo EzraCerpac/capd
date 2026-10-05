@@ -73,6 +73,13 @@ public final class SyncServer: SyncTransport, Sendable {
                     CREATE TABLE IF NOT EXISTS sync_service_writers (
                         device TEXT PRIMARY KEY, principal TEXT NOT NULL);
                     """)
+            guard
+                try Bool.fetchOne(
+                    db,
+                    sql:
+                        "SELECT EXISTS(SELECT 1 FROM sync_service_writers WHERE principal=? AND device<>?)",
+                    arguments: [principalID, deviceID.uuidString]) == false
+            else { throw SyncError.wrongDevice }
             if let owner = try String.fetchOne(
                 db, sql: "SELECT principal FROM sync_service_writers WHERE device=?",
                 arguments: [deviceID.uuidString])

@@ -506,16 +506,30 @@ public final class MCPToolbox: Sendable {
             throw MCPFailure.invalidArguments
         }
         let formatter = ISO8601DateFormatter()
-        formatter.formatOptions.insert(.withFractionalSeconds)
-        if let date = formatter.date(from: value) { return date }
-        formatter.formatOptions.remove(.withFractionalSeconds)
-        guard let date = formatter.date(from: value) else { throw MCPFailure.invalidArguments }
-        return date
+        guard let dot = value.firstIndex(of: ".") else {
+            guard let date = formatter.date(from: value) else { throw MCPFailure.invalidArguments }
+            return date
+        }
+        let start = value.index(after: dot)
+        let digits = value[start...].prefix { $0 >= "0" && $0 <= "9" }
+        guard !digits.isEmpty, let fraction = Double("0." + digits) else {
+            throw MCPFailure.invalidArguments
+        }
+        let end = value.index(start, offsetBy: digits.count)
+        let whole = String(value[..<dot]) + value[end...]
+        guard let date = formatter.date(from: whole) else { throw MCPFailure.invalidArguments }
+        return Date(timeIntervalSinceReferenceDate: date.timeIntervalSinceReferenceDate + fraction)
     }
 
     private static func timestamp(_ date: Date) -> String {
+        let seconds = date.timeIntervalSinceReferenceDate
+        let whole = seconds.rounded(.down)
         let formatter = ISO8601DateFormatter()
-        formatter.formatOptions.insert(.withFractionalSeconds)
-        return formatter.string(from: date)
+        let base = formatter.string(from: Date(timeIntervalSinceReferenceDate: whole))
+        var fraction = String(
+            String(format: "%.17f", locale: Locale(identifier: "en_US_POSIX"), seconds - whole)
+                .dropFirst(2))
+        while fraction.count > 3, fraction.last == "0" { fraction.removeLast() }
+        return String(base.dropLast()) + "." + fraction + "Z"
     }
 }

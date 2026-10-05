@@ -126,6 +126,73 @@ final class ToolboxRegressionTests: XCTestCase {
             try f.store.capture(id: first)?.metadata?.reminderAt, stored.metadata?.reminderAt)
     }
 
+    func testStoredSubmillisecondTimestampsRemainDistinctAndRoundTripExactly() throws {
+        let f = try MCPTests.Fixture()
+        defer { try? FileManager.default.removeItem(at: f.directory) }
+        let dates = [800_000_000.1234567, 800_000_000.1234568, 123.45678901234567]
+            .map { Date(timeIntervalSinceReferenceDate: $0) }
+        var projectedDates: [JSONValue] = []
+        for (index, date) in dates.enumerated() {
+            let capture = SharedCapture(
+                source: CaptureSource(kind: .text, selection: "precision \(index)"),
+                createdAt: date, metadata: CaptureMetadata(reminderAt: date))
+            _ = try f.server.apply(
+                SyncOperation(
+                    deviceID: UUID(), sequence: 1, captureID: capture.id, baseRevision: 0,
+                    mutation: .create(capture)))
+            let stored = try XCTUnwrap(try f.store.capture(id: capture.id))
+            let full = try XCTUnwrap(
+                f.call("get_capture", ["id": .string(capture.id.uuidString)])[
+                    "structuredContent"]?.object?["capture"]?.object)
+            let timestamp = try XCTUnwrap(full["created_at"])
+            projectedDates.append(timestamp)
+            XCTAssertEqual(full["reminder_at"], timestamp)
+            XCTAssertLessThanOrEqual(try XCTUnwrap(timestamp.string).utf8.count, 40)
+            var edit = editArguments(id: capture.id, revision: stored.revision)
+            edit["sequence"] = .number(Decimal(index + 1))
+            edit["reminder_at"] = full["reminder_at"]
+            XCTAssertEqual(f.call("edit_capture", edit)["isError"], .bool(false))
+            XCTAssertEqual(try f.store.capture(id: capture.id)?.metadata?.reminderAt, date)
+        }
+        XCTAssertNotEqual(projectedDates[0], projectedDates[1])
+        let recent = f.call("list_recent", [:])["structuredContent"]?.object
+        guard case .array(let captures) = recent?["captures"] else { return XCTFail() }
+        XCTAssertEqual(
+            captures.map { $0.object?["created_at"] },
+            [projectedDates[1], projectedDates[0], projectedDates[2]])
+        for (index, timestamp) in projectedDates.enumerated() {
+            let id = UUID()
+            var create = f.create(id: id, sequence: Int64(index + 4), text: "round trip \(index)")
+            create["created_at"] = timestamp
+            XCTAssertEqual(f.call("create_capture", create)["isError"], .bool(false))
+            XCTAssertEqual(try f.store.capture(id: id)?.createdAt, dates[index])
+        }
+    }
+
+    func testFractionalDateInputKeepsOffsetsAndValidationLimits() throws {
+        let f = try MCPTests.Fixture()
+        defer { try? FileManager.default.removeItem(at: f.directory) }
+        let first = UUID()
+        var create = f.create(id: first)
+        for value in [
+            "2026-10-04T10:00:00.Z", "2026-10-04T10:00:00.badZ",
+            "2026-10-04T10:00:00.123.invalidZ", "not-a-date",
+            "2026-10-04T10:00:00.12345678901234567+02:00",
+        ] {
+            create["created_at"] = .string(value)
+            XCTAssertEqual(f.call("create_capture", create)["isError"], .bool(true), value)
+        }
+        XCTAssertEqual(try f.store.nextSequence(deviceID: f.device), 1)
+        create["created_at"] = .string("2026-10-04T10:00:00.123456789Z")
+        XCTAssertEqual(f.call("create_capture", create)["isError"], .bool(false))
+        let second = UUID()
+        create = f.create(id: second, sequence: 2, text: "offset")
+        create["created_at"] = .string("2026-10-04T12:00:00.123456789+02:00")
+        XCTAssertEqual(f.call("create_capture", create)["isError"], .bool(false))
+        XCTAssertEqual(
+            try f.store.capture(id: first)?.createdAt, try f.store.capture(id: second)?.createdAt)
+    }
+
     func testTruncationReturnsExactUTF8Prefixes() throws {
         let f = try MCPTests.Fixture()
         defer { try? FileManager.default.removeItem(at: f.directory) }

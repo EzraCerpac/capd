@@ -133,13 +133,7 @@ public final class MCPHTTPBoundary: Sendable {
                 ])
         }
         guard request.method == "POST" else { return response(405, extra: ["Allow": "POST"]) }
-        let accept = Set(
-            (h["accept"] ?? "").lowercased().split(separator: ",").compactMap {
-                $0.trimmingCharacters(in: .whitespaces).split(separator: ";").first
-            })
-        guard accept.contains("application/json"), accept.contains("text/event-stream") else {
-            return response(406)
-        }
+        guard Self.acceptsRequiredMediaTypes(h["accept"] ?? "") else { return response(406) }
         guard
             h["content-type"]?.split(separator: ";").first?.trimmingCharacters(in: .whitespaces)
                 .lowercased() == "application/json"
@@ -368,6 +362,49 @@ public final class MCPHTTPBoundary: Sendable {
         if let id { fields["id"] = id } else if legacyUnknownID { fields["id"] = .null }
         return response(status, .object(fields))
     }
+    private static func acceptsRequiredMediaTypes(_ value: String) -> Bool {
+        let required = ["application/json", "text/event-stream"]
+        var selected = required.map { _ in (specificity: -1, quality: 0.0) }
+        for entry in value.lowercased().split(separator: ",", omittingEmptySubsequences: false) {
+            let parts = entry.split(separator: ";", omittingEmptySubsequences: false)
+                .map { $0.trimmingCharacters(in: .whitespaces) }
+            let media = parts[0]
+            var quality = 1.0
+            var hasQuality = false
+            for parameter in parts.dropFirst() {
+                let pair = parameter.split(separator: "=", omittingEmptySubsequences: false)
+                    .map { $0.trimmingCharacters(in: .whitespaces) }
+                if pair.first == "q" {
+                    guard !hasQuality, pair.count == 2 else { return false }
+                    let digits = pair[1].split(separator: ".", omittingEmptySubsequences: false)
+                    guard digits.count <= 2, digits[0] == "0" || digits[0] == "1" else {
+                        return false
+                    }
+                    if digits.count == 2 {
+                        guard digits[1].count <= 3,
+                            digits[1].allSatisfy({ $0 >= "0" && $0 <= "9" }),
+                            digits[0] == "0" || digits[1].allSatisfy({ $0 == "0" })
+                        else { return false }
+                    }
+                    guard let parsed = Double(pair[1]) else { return false }
+                    quality = parsed
+                    hasQuality = true
+                }
+            }
+            for (index, type) in required.enumerated() {
+                let wildcard = type.split(separator: "/")[0] + "/*"
+                let specificity =
+                    media == type ? 2 : media == wildcard ? 1 : media == "*/*" ? 0 : -1
+                if specificity > selected[index].specificity {
+                    selected[index] = (specificity, quality)
+                } else if specificity == selected[index].specificity {
+                    selected[index].quality = max(selected[index].quality, quality)
+                }
+            }
+        }
+        return selected.allSatisfy { $0.specificity >= 0 && $0.quality > 0 }
+    }
+
     private func response(_ status: Int, _ value: JSONValue? = nil, extra: [String: String] = [:])
         -> MCPHTTPResponse
     {
