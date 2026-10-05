@@ -9,6 +9,28 @@ import Testing
 
 @Suite("CLI bound Mac runtime", .timeLimit(.minutes(1)))
 struct CLISyncRuntimeTests {
+    @Test func explicitBusySyncHasUnsuccessfulExitAndKeepsExactQueue() throws {
+        try withScratchRoot { root in
+            let paths = StoragePaths(root: root)
+            let binding = SyncLibraryBinding(libraryID: UUID(), serviceID: UUID())
+            let device = UUID()
+            let store = try Store(paths: paths, syncBinding: binding, deviceID: device)
+            _ = try CaptureService(store: store).ingest(CaptureRequest(text: "Busy explicit sync"))
+            let operations = try #require(try store.syncClient?.pendingOperations())
+            let enrollment = try SyncEnrollment(
+                endpoint: URL(string: "https://sync.example.invalid/v1/sync")!, binding: binding,
+                deviceID: device)
+            try MacSyncConfiguration(enrollment: enrollment).install(paths: paths)
+            let lease = try #require(try MacSyncLease.acquire(paths: paths))
+            let result = try capd(["sync", "run"], root: root)
+            withExtendedLifetime(lease) {}
+            #expect(result.status == 3)
+            #expect(try jsonObject(result.stdout)["phase"] as? String == "busy")
+            #expect(result.stderr.contains("Saved changes remain queued"))
+            #expect(try store.syncClient?.pendingOperations() == operations)
+        }
+    }
+
     @Test(.serialized, arguments: [Duration.milliseconds(75), .zero])
     func postCommandFlushRetriesBusyLeaseWithoutRecreatingOperation(deadline: Duration) async throws
     {

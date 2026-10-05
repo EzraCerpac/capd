@@ -32,6 +32,12 @@ struct Sync: ParsableCommand {
             }
             let result = blocking { await runtime.sync(within: .seconds(35)) }
             print(try jsonString(result))
+            if result.phase == .busy {
+                throw CLIError(
+                    message:
+                        "Another Capd process is synchronizing this library. Saved changes remain queued.",
+                    code: 3)
+            }
             if result.phase == .offline || result.phase == .attention {
                 throw CLIError(message: result.issue ?? "Sync needs attention.", code: 3)
             }

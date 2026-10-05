@@ -269,7 +269,7 @@ public final class Store: Sendable {
     public func deleteCaptures(ids: [Int64]) throws -> [Capture] {
         let deleted = try write { db in
             let doomed = try Capture.filter(ids.contains(Capture.CodingKeys.id)).fetchAll(db)
-            for capture in doomed { try enqueueDeleted(capture, in: db) }
+            try enqueueDeleted(doomed, in: db)
             try Capture.filter(ids.contains(Capture.CodingKeys.id)).deleteAll(db)
             return doomed
         }

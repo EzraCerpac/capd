@@ -67,7 +67,7 @@ struct CapdAgent {
 
             Task {
                 var taggingRetry = TagRetryPolicy()
-                await startSync(session.runtime)
+                guard await startSync(session.runtime) else { return }
                 await sweep(
                     enrichment: enrichment,
                     olderThan: session.runtime == nil ? nil : EnrichmentService.staleClaimAge)
@@ -100,9 +100,22 @@ struct CapdAgent {
         }
     }
 
-    static func startSync(_ runtime: MacSyncRuntime?) async {
-        _ = await runtime?.sync()
-        await runtime?.start(interval: pollInterval)
+    static func startSync(_ runtime: MacSyncRuntime?, retryDelay: Duration? = nil) async -> Bool {
+        guard let runtime else { return true }
+        while !Task.isCancelled {
+            let result = await runtime.sync()
+            if result.phase == .idle {
+                await runtime.start(interval: pollInterval)
+                return true
+            }
+            do {
+                try await Task.sleep(
+                    for: retryDelay
+                        ?? (result.phase == .offline || result.phase == .attention
+                            ? .seconds(30) : pollInterval))
+            } catch { return false }
+        }
+        return false
     }
 
     private static func tag(with tagging: TagService) async throws {

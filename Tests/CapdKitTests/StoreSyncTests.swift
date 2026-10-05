@@ -7,6 +7,65 @@ import Testing
 
 @Suite("Opt-in Mac Store sync")
 struct StoreSyncTests {
+    @Test("Bulk synchronized deletion rebuilds once and rolls back an incomplete batch")
+    func bulkDeletionProjectsOnceAndRollsBack() throws {
+        try fixture { paths, binding, server in
+            let store = try Store(paths: paths, syncBinding: binding)
+            let client = try #require(store.syncClient)
+            let captures = try (1...3).map {
+                try CaptureService(store: store).ingest(CaptureRequest(text: "Bulk delete \($0)"))
+                    .capture
+            }
+            let ids = try captures.map { try #require($0.id) }
+            let original = try client.pendingOperations()
+            try store.dbPool.write { db in
+                try db.execute(sql: "CREATE TABLE projection_count (id TEXT)")
+                try db.execute(
+                    sql:
+                        "CREATE TRIGGER count_projection AFTER UPDATE ON sync_visible BEGIN INSERT INTO projection_count VALUES (NEW.id); END"
+                )
+                try db.execute(
+                    sql:
+                        "CREATE TRIGGER abort_second_delete BEFORE INSERT ON sync_outbox WHEN NEW.sequence=5 BEGIN SELECT RAISE(ABORT,'synthetic partial batch'); END"
+                )
+            }
+            #expect(throws: (any Error).self) { try store.deleteCaptures(ids: ids) }
+            #expect(try client.pendingOperations() == original)
+            #expect(try store.reader.read { try Capture.fetchAll($0).count } == 3)
+            #expect(
+                try store.reader.read {
+                    try Int.fetchOne($0, sql: "SELECT COUNT(*) FROM projection_count")
+                } == 0)
+            try store.dbPool.write { try $0.execute(sql: "DROP TRIGGER abort_second_delete") }
+            #expect(try store.deleteCaptures(ids: ids).count == 3)
+            #expect(
+                try store.reader.read {
+                    try Int.fetchOne($0, sql: "SELECT COUNT(*) FROM projection_count")
+                } == 3)
+            let operations = try client.pendingOperations()
+            #expect(operations.map(\.sequence) == Array(1...6))
+            #expect(
+                operations.suffix(3).allSatisfy {
+                    if case .delete = $0.mutation { return true }
+                    return false
+                })
+            for operation in operations.suffix(3) {
+                #expect(
+                    operation.predecessorID
+                        == original.first { $0.captureID == operation.captureID }?.id)
+            }
+            #expect(try client.captures().isEmpty)
+            #expect(try client.captures(includeDeleted: true).allSatisfy(\.deleted))
+            let transport = StoreTestTransport(
+                server: server, binding: binding, deviceID: client.deviceID)
+            try client.push(to: transport)
+            try client.pull(from: transport)
+            #expect(try client.pendingOperations().isEmpty)
+            #expect(try server.baseline().captures.count == 3)
+            #expect(try server.baseline().captures.allSatisfy(\.deleted))
+        }
+    }
+
     @Test("Conflict status uses compact projections and upgrades existing visible conflicts")
     func compactConflictProjection() throws {
         try fixture { paths, binding, server in

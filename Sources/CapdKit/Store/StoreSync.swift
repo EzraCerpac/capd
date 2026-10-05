@@ -349,9 +349,9 @@ extension Store {
         }
     }
 
-    func enqueueDeleted(_ capture: Capture, in db: Database) throws {
+    func enqueueDeleted(_ captures: [Capture], in db: Database) throws {
         guard let client = syncClient else { return }
-        let id = try StoreSync.identity(db, capture: capture)
-        try client.enqueue(in: db, captureID: id, mutation: .delete)
+        let ids = try captures.map { try StoreSync.identity(db, capture: $0) }
+        try client.enqueue(in: db, deletions: ids)
     }
 }

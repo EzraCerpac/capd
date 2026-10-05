@@ -2,6 +2,7 @@ import CapdKit
 import CapdSync
 import Foundation
 import GRDB
+import Synchronization
 import Testing
 
 @testable import CapdAgent
@@ -9,8 +10,10 @@ import Testing
 
 @Suite("EnrichmentQueue")
 struct EnrichmentQueueTests {
-    @Test("Agent startup pulls remote content before claiming local enrichment")
-    func initialSyncPrecedesEnrichment() async throws {
+    @Test(
+        "Agent startup pulls remote content before claiming local enrichment",
+        arguments: ["none", "offline", "attention", "busy", "paused"])
+    func initialSyncPrecedesEnrichment(failure: String) async throws {
         try await withTemporaryPaths { paths in
             let binding = SyncLibraryBinding(libraryID: UUID(), serviceID: UUID())
             let device = UUID()
@@ -54,10 +57,28 @@ struct EnrichmentQueueTests {
                     baseRevision: 1,
                     mutation: .edit(CaptureEdit(generated: GeneratedContent(body: "Remote body")))))
             await wire.holdPull()
+            if failure == "offline" || failure == "attention" { await wire.failNextPull(failure) }
+            let lease = Mutex<MacSyncLease?>(nil)
+            if failure == "busy" {
+                lease.withLock { $0 = try? MacSyncLease.acquire(paths: paths) }
+                #expect(lease.withLock { $0 != nil })
+            }
+            if failure == "paused" { try await MacLibrarySession.setEnabled(false, paths: paths) }
             let startup = Task {
-                await CapdAgent.startSync(runtime)
+                guard await CapdAgent.startSync(runtime, retryDelay: .milliseconds(1)) else {
+                    return
+                }
                 let queue = EnrichmentQueue(enrichment: enrichment, isOnMainsPower: { false })
                 await queue.drain()
+            }
+            if failure == "busy" || failure == "paused" {
+                while await runtime.status().phase == .idle { await Task.yield() }
+                #expect(await wire.enrichments == 0)
+                #expect(try session.store.syncClient?.pendingOperations().isEmpty == true)
+                lease.withLock { $0 = nil }
+                if failure == "paused" {
+                    try await MacLibrarySession.setEnabled(true, paths: paths)
+                }
             }
             await wire.waitForPull()
             for _ in 0..<20 { await Task.yield() }
@@ -72,6 +93,26 @@ struct EnrichmentQueueTests {
             #expect(current.body == "Remote body")
             #expect(current.enrichmentState == .ok)
             #expect(try server.baseline().captures.first?.generated.body == "Remote body")
+        }
+    }
+
+    @Test func unboundStartupAndCancelledRetry() async throws {
+        #expect(await CapdAgent.startSync(nil))
+        try await withTemporaryPaths { paths in
+            let binding = SyncLibraryBinding(libraryID: UUID(), serviceID: UUID())
+            let enrollment = try SyncEnrollment(
+                endpoint: URL(string: "https://sync.example.invalid/v1/sync")!,
+                binding: binding, deviceID: UUID())
+            _ = try Store(paths: paths, syncBinding: binding, deviceID: enrollment.deviceID)
+            try MacSyncConfiguration(enrollment: enrollment, enabled: false).install(paths: paths)
+            let session = try MacLibrarySession.open(
+                paths: paths, credentials: MemorySyncCredentialStore())
+            let runtime = try #require(session.runtime)
+            let startup = Task { await CapdAgent.startSync(runtime) }
+            while await runtime.status().phase != .paused { await Task.yield() }
+            startup.cancel()
+            #expect(await startup.value == false)
+            #expect(await runtime.status().phase == .paused)
         }
     }
 
@@ -224,6 +265,7 @@ private actor StartupWire: AsyncSyncTransport {
     nonisolated let deviceID: UUID
     let handler: SyncHTTPHandler
     private var holding = false
+    private var failure = "none"
     private let pulls: AsyncStream<Void>
     private let pullContinuation: AsyncStream<Void>.Continuation
     private let releases: AsyncStream<Void>
@@ -237,6 +279,7 @@ private actor StartupWire: AsyncSyncTransport {
         (releases, releaseContinuation) = AsyncStream.makeStream()
     }
     func holdPull() { holding = true }
+    func failNextPull(_ failure: String) { self.failure = failure }
     func waitForPull() async {
         var iterator = pulls.makeAsyncIterator()
         _ = await iterator.next()
@@ -249,6 +292,12 @@ private actor StartupWire: AsyncSyncTransport {
     func enriched() { enrichments += 1 }
     func send(_ request: SyncHTTPRequest) async throws -> SyncHTTPResponse {
         let envelope = try JSONDecoder().decode(SyncHTTPEnvelope.self, from: request.body)
+        if case .changes = envelope.action, failure != "none" {
+            let failure = failure
+            self.failure = "none"
+            if failure == "offline" { throw SyncHTTPError.unavailable }
+            throw SyncHTTPError.unauthorized
+        }
         if holding, case .changes = envelope.action {
             pullContinuation.yield(())
             var iterator = releases.makeAsyncIterator()

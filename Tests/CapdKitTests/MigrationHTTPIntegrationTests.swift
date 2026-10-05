@@ -28,7 +28,9 @@ struct MigrationHTTPIntegrationTests {
                 id: 42, kind: .image, title: "Synthetic HTTP kestrel", note: "Original Mac note",
                 body: "Searchable pangolin body", ocrText: "Axolotl OCR", assetPath: imagePath,
                 sourceAppBundleID: "example.synthetic", tags: "manual", tagsVersion: -1,
-                rating: 5, contentHash: "synthetic-http-image",
+                rating: 5,
+                contentHash: SHA256.hash(data: imageBytes).map { String(format: "%02x", $0) }
+                    .joined(),
                 reminderAt: now.addingTimeInterval(100), createdAt: now,
                 lastSeenAt: now.addingTimeInterval(20), seenCount: 7)
         ).capture

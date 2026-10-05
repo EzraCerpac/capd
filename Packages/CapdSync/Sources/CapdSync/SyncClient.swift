@@ -145,18 +145,30 @@ public final class SyncClient: Sendable {
     public func enqueue(in db: Database, edits: [(captureID: UUID, edit: CaptureEdit)]) throws
         -> [SyncOperation]
     {
+        try enqueue(in: db, mutations: edits.map { ($0.captureID, .edit($0.edit)) })
+    }
+
+    /// Enqueues ordered tombstones and rebuilds their projection once in the caller's transaction.
+    @discardableResult
+    public func enqueue(in db: Database, deletions: [UUID]) throws -> [SyncOperation] {
+        try enqueue(in: db, mutations: deletions.map { ($0, .delete) })
+    }
+
+    private func enqueue(in db: Database, mutations: [(UUID, CaptureMutation)]) throws
+        -> [SyncOperation]
+    {
         guard ObjectIdentifier(db) == writerIdentity else { throw SyncTransactionError.wrongWriter }
         guard db.isInsideTransaction else { throw SyncTransactionError.requiresTransaction }
         try projectionGate.check()
         try SyncDatabase.checkBinding(db, binding)
-        guard !edits.isEmpty else { return [] }
+        guard !mutations.isEmpty else { return [] }
         var predecessors: [UUID: UUID] = [:]
         for pending in try operations(db) {
             predecessors[try SyncDatabase.canonical(db, pending.captureID)] = pending.id
         }
         var sequence = try Int64.fetchOne(db, sql: "SELECT sequence FROM sync_meta")!
         var appended: [SyncOperation] = []
-        for (captureID, edit) in edits {
+        for (captureID, mutation) in mutations {
             let id = try SyncDatabase.canonical(db, captureID)
             guard sequence < Int64.max else { throw SyncError.invalidOperation }
             sequence += 1
@@ -164,7 +176,7 @@ public final class SyncClient: Sendable {
                 deviceID: deviceID, sequence: sequence,
                 captureID: captureID,
                 baseRevision: try SyncDatabase.record(db, id: id)?.revision ?? 0,
-                predecessorID: predecessors[id], mutation: .edit(edit))
+                predecessorID: predecessors[id], mutation: mutation)
             try SyncDatabase.validate(operation)
             try db.execute(
                 sql: "INSERT INTO sync_outbox (sequence, id, payload) VALUES (?, ?, ?)",

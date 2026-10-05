@@ -1,4 +1,5 @@
 import CapdSync
+import CryptoKit
 import Foundation
 import GRDB
 import Testing
@@ -30,7 +31,9 @@ struct MigrationPreparationTests {
                 id: 42, kind: .image, title: "Synthetic kestrel", note: "Keep the annotation",
                 body: "Body pangolin", ocrText: "OCR axolotl", assetPath: imagePath,
                 sourceAppBundleID: "example.synthetic", tags: "manual tag", tagsVersion: -1,
-                rating: 5, contentHash: "synthetic-image", reminderAt: now.addingTimeInterval(100),
+                rating: 5,
+                contentHash: SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined(),
+                reminderAt: now.addingTimeInterval(100),
                 createdAt: now, lastSeenAt: now.addingTimeInterval(20), seenCount: 7)
         ).capture
         let generated = try store.upsertCapture(
