@@ -82,7 +82,7 @@ enum StoreSync {
             return nil
         }
         let root = paths.assetsDirectory.standardizedFileURL.resolvingSymlinksInPath()
-        let url = paths.assetURL(forRelativePath: path).standardizedFileURL
+        let url = root.appendingPathComponent(path, isDirectory: false).standardizedFileURL
         guard !path.hasPrefix("/"), !path.split(separator: "/").contains(".."),
             url.resolvingSymlinksInPath() == url, url.path.hasPrefix(root.path + "/")
         else { throw SyncError.invalidBlob }

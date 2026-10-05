@@ -9,6 +9,136 @@ import Testing
 
 @Suite("Opt-in Mac Store sync")
 struct StoreSyncTests {
+    @Test(arguments: ["root", "ancestor"])
+    func imageCaptureUnderSymlinkedLibrary(kind: String) throws {
+        try fixture { originalPaths, binding, server in
+            let paths = try symlinkedPaths(originalPaths, kind: kind)
+            let store = try Store(paths: paths, syncBinding: binding)
+            let client = try #require(store.syncClient)
+            let bytes = Data("synthetic symlink-root image".utf8)
+            let capture = try CaptureService(store: store).ingest(
+                CaptureRequest(
+                    imageData: bytes, capturedAt: Date(timeIntervalSince1970: 1_700_000_000))
+            ).capture
+            let path = try #require(capture.assetPath)
+            #expect(try Data(contentsOf: paths.assetURL(forRelativePath: path)) == bytes)
+            let queued = try client.pendingOperations()
+            #expect(queued.map(\.sequence) == [1])
+            guard case .create(let record) = try #require(queued.first).mutation else {
+                Issue.record("Image capture did not queue a create")
+                return
+            }
+            let blob = try #require(record.source.blob)
+            #expect(blob == BlobReference(data: bytes))
+            try client.push(
+                to: StoreTestTransport(
+                    server: server, binding: binding, deviceID: client.deviceID))
+            #expect(try client.pendingOperations().isEmpty)
+            #expect(try server.download(blob) == bytes)
+            #expect(try server.baseline().captures.first?.source.blob == blob)
+            #expect(try SearchService(store: store).capture(id: capture.id!)?.assetPath == path)
+        }
+    }
+
+    @Test(arguments: ["root", "ancestor"])
+    func importedImageUnderSymlinkedLibrary(kind: String) throws {
+        try fixture { originalPaths, binding, server in
+            let paths = try symlinkedPaths(originalPaths, kind: kind)
+            let local = try Store(paths: paths)
+            let bytes = Data("synthetic imported symlink-root image".utf8)
+            let capture = try CaptureService(store: local).ingest(
+                CaptureRequest(
+                    imageData: bytes, capturedAt: Date(timeIntervalSince1970: 1_700_000_000))
+            ).capture
+            let id = try local.dbPool.write { db in
+                try StoreSync.prepareIDs(db)
+                return try StoreSync.identity(db, capture: capture)
+            }
+            let blob = try #require(try StoreSync.reference(for: capture, paths: paths))
+            #expect(blob == BlobReference(data: bytes))
+            try server.upload(blob, offset: 0, chunk: bytes, final: true)
+            let deviceID = UUID()
+            let snapshot = ContentSnapshotImport(
+                snapshotID: UUID(), targetBinding: binding, sourceDeviceID: deviceID,
+                captures: [StoreSync.snapshot(capture, id: id, blob: blob)])
+            _ = try server.importContentSnapshot(
+                snapshot, preview: server.previewContentSnapshotImport(snapshot))
+            let transport = StoreTestTransport(
+                server: server, binding: binding, deviceID: deviceID)
+            let handoff = try StoreSyncImportHandoff(store: local, transport: transport)
+            let store = try Store(paths: paths, syncBinding: binding, imported: handoff)
+            let client = try #require(store.syncClient)
+            #expect(try client.pendingOperations().isEmpty)
+            #expect(try client.blobs.read(blob) == bytes)
+            #expect(
+                try SearchService(store: store).capture(id: capture.id!)?.assetPath
+                    == capture.assetPath)
+            _ = try store.updateNote(id: capture.id!, note: "Imported image note")
+            #expect(try client.pendingOperations().map(\.sequence) == [1])
+            try client.push(to: transport)
+            #expect(try client.pendingOperations().isEmpty)
+            #expect(try server.download(blob) == bytes)
+        }
+    }
+
+    @Test(arguments: [
+        "file-inside", "file-escape", "directory-inside", "directory-escape", "absolute",
+        "traversal",
+    ])
+    func unsafeAssetPathsCannotQueueCapture(kind: String) throws {
+        try fixture { paths, binding, _ in
+            let store = try Store(paths: paths, syncBinding: binding)
+            let client = try #require(store.syncClient)
+            let bytes = Data("synthetic rejected asset".utf8)
+            let target = (kind.hasSuffix("inside") ? paths.assetsDirectory : paths.root)
+                .appendingPathComponent("target/image.png")
+            try FileManager.default.createDirectory(
+                at: target.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try bytes.write(to: target)
+            let path: String
+            if kind.hasPrefix("file") {
+                path = "linked.png"
+                try FileManager.default.createSymbolicLink(
+                    at: paths.assetURL(forRelativePath: path), withDestinationURL: target)
+            } else if kind.hasPrefix("directory") {
+                path = "linked/image.png"
+                try FileManager.default.createSymbolicLink(
+                    at: paths.assetsDirectory.appendingPathComponent("linked"),
+                    withDestinationURL: target.deletingLastPathComponent())
+            } else {
+                path = kind == "absolute" ? target.path : "../target/image.png"
+            }
+            let blobFiles = try FileManager.default.contentsOfDirectory(
+                atPath: client.blobs.directory.path
+            ).sorted()
+            #expect(throws: SyncError.invalidBlob) {
+                try store.upsertCapture(
+                    Capture(kind: .image, assetPath: path, contentHash: "unsafe", createdAt: Date())
+                )
+            }
+            #expect(try SearchService(store: store).totalCaptureCount() == 0)
+            #expect(try client.pendingOperations().isEmpty)
+            #expect(
+                try store.reader.read {
+                    try Int.fetchOne($0, sql: "SELECT COUNT(*) FROM sync_capture_ids")
+                } == 0)
+            #expect(
+                try FileManager.default.contentsOfDirectory(atPath: client.blobs.directory.path)
+                    .sorted() == blobFiles)
+            #expect(try Data(contentsOf: target) == bytes)
+            _ = try CaptureService(store: store).ingest(CaptureRequest(imageData: bytes))
+            #expect(try client.pendingOperations().map(\.sequence) == [1])
+        }
+    }
+
+    private func symlinkedPaths(_ paths: StoragePaths, kind: String) throws -> StoragePaths {
+        let real = paths.root.deletingLastPathComponent().appendingPathComponent("real")
+        try FileManager.default.createDirectory(at: real, withIntermediateDirectories: true)
+        try FileManager.default.createSymbolicLink(at: paths.root, withDestinationURL: real)
+        return kind == "root"
+            ? paths : StoragePaths(root: paths.root.appendingPathComponent("library"))
+    }
+
     @Test func largeNoteChainCrossesAcknowledgedPredecessor() throws {
         try fixture { paths, binding, server in
             let store = try Store(paths: paths, syncBinding: binding)
