@@ -8,6 +8,42 @@ import UniformTypeIdentifiers
 @testable import CapdWebsiteIcons
 
 struct WebsiteIconCacheTests {
+    @Test func sameOriginWaitersHaveAAdmissionLimit() async throws {
+        let bytes = try png()
+        let identity = key(bytes)
+        let gate = Gate()
+        let cache = WebsiteIconCache { _ in await gate.read() }
+        let requests = (0..<100).map { _ in Task { await cache.image(for: identity) } }
+        await gate.waitForReads(1)
+        for _ in 0..<1000 { await Task.yield() }
+        await gate.finish(bytes)
+        var images = 0
+        for request in requests { if await request.value != nil { images += 1 } }
+        #expect(images == 64)
+        #expect(await gate.readCount == 1)
+    }
+
+    @Test func allOriginsShareAnAggregateWaiterLimit() async throws {
+        let bytes = try png()
+        let gate = Gate()
+        let refusals = Refusals()
+        let cache = WebsiteIconCache { _ in await gate.read() }
+        let requests = (0..<1024).map { index in
+            let identity = key(bytes, revision: Int64(index % 16 + 1))
+            return Task {
+                let image = await cache.image(for: identity)
+                if image == nil { await refusals.record() }
+                return image
+            }
+        }
+        await gate.waitForReads(2)
+        for _ in 0..<2000 { await Task.yield() }
+        #expect(await refusals.count == 512)
+        await cache.reset()
+        for request in requests { #expect(await request.value == nil) }
+        #expect(await gate.readCount == 2)
+        await gate.finish(bytes)
+    }
     @Test(arguments: ["digest", "malformed", "version", "bytes", "dimensions"])
     func refusesInvalidLocalAssets(problem: String) async throws {
         var data = try png()
@@ -68,14 +104,20 @@ struct WebsiteIconCacheTests {
         #expect(await gate.readCount == 2)
         await cache.reset()
         for attempt in attempts { #expect(await attempt.value == nil) }
-        await gate.finish(bytes)
-        for _ in 0..<100 { await Task.yield() }
         let fresh = key(bytes, generation: UUID())
         let next = Task { await cache.image(for: fresh) }
+        for _ in 0..<100 { await Task.yield() }
+        #expect(await gate.readCount == 2)
+        await gate.finish(bytes)
         await gate.waitForReads(3)
         await gate.finish(bytes)
         #expect(await next.value != nil)
     }
+}
+
+private actor Refusals {
+    var count = 0
+    func record() { count += 1 }
 }
 
 private actor Loads {

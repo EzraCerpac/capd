@@ -1,6 +1,7 @@
 import Foundation
 
 public actor WebsiteIconCache {
+    /// Reads a local, verified blob with its size bound enforced before allocating the data.
     public typealias Loader = @Sendable (WebsiteIconIdentity) async throws -> Data?
     private struct Entry {
         let image: WebsiteIconImage
@@ -18,6 +19,7 @@ public actor WebsiteIconCache {
     private var jobs: [WebsiteIconIdentity: Job] = [:]
     private var queue: [WebsiteIconIdentity] = []
     private var active = 0
+    private var waiterCount = 0
     private var tick: UInt64 = 0
 
     public init(load: Loader? = nil) { self.load = load }
@@ -33,6 +35,7 @@ public actor WebsiteIconCache {
         guard jobs.count < 16 || jobs[identity] != nil, let loader = load ?? self.load else {
             return nil
         }
+        guard (jobs[identity]?.waiters.count ?? 0) < 64, waiterCount < 512 else { return nil }
         let waiter = UUID()
         return await withTaskCancellationHandler {
             await withCheckedContinuation { continuation in
@@ -40,6 +43,7 @@ public actor WebsiteIconCache {
                     continuation.resume(returning: nil)
                     return
                 }
+                waiterCount += 1
                 if jobs[identity] != nil {
                     jobs[identity]?.waiters[waiter] = continuation
                 } else {
@@ -73,12 +77,14 @@ public actor WebsiteIconCache {
 
     private func cancel(_ waiter: UUID, for identity: WebsiteIconIdentity) {
         guard let continuation = jobs[identity]?.waiters.removeValue(forKey: waiter) else { return }
+        waiterCount -= 1
         continuation.resume(returning: nil)
         if let job = jobs[identity], job.waiters.isEmpty { discard(identity, id: job.id) }
     }
 
     private func discard(_ identity: WebsiteIconIdentity, id: UUID) {
         guard let job = jobs[identity], job.id == id else { return }
+        waiterCount -= job.waiters.count
         jobs[identity] = nil
         queue.removeAll { $0 == identity }
         job.task?.cancel()
@@ -105,6 +111,7 @@ public actor WebsiteIconCache {
         active -= 1
         defer { startQueued() }
         guard let job = jobs[identity], job.id == id else { return }
+        waiterCount -= job.waiters.count
         jobs[identity] = nil
         job.deadline?.cancel()
         if let image { remember(image, for: identity) }
