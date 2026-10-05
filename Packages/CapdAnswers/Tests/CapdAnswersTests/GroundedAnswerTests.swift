@@ -7,6 +7,7 @@ private actor Retriever: AnswerRetrieving {
     let hits: [AnswerEvidence]
     var calls = 0
     var limits: [Int] = []
+    var queries: [String] = []
     init(
         _ hits: [AnswerEvidence] = [
             .init(id: "capture-a", title: "Hiking", excerpt: "Pack water and a warm jacket.")
@@ -17,6 +18,7 @@ private actor Retriever: AnswerRetrieving {
     func search(_ queries: [String], limit: Int) async throws -> [[AnswerEvidence]] {
         calls += 1
         limits.append(limit)
+        self.queries.append(contentsOf: queries)
         return queries.map { _ in hits }
     }
 }
@@ -73,6 +75,70 @@ private let supportedDraft = AnswerDraft(statements: [
             retriever: Retriever(), model: Model(draft: .init(statements: []))
         ).answer("hiking")
     }
+}
+
+@Test func distinctQuotesFromSameSourceRemainInCitationOrder() async throws {
+    let citations: [AnswerDraft.Citation] = [
+        .init(number: 1, quote: "a warm jacket."),
+        .init(number: 1, quote: "Pack water"),
+        .init(number: 1, quote: "Pack\nwater"),
+        .init(number: 2, quote: "Pack water"),
+        .init(number: 1, quote: "a warm jacket."),
+    ]
+    let reader = Retriever([
+        .init(id: "capture-a", title: "Hiking", excerpt: "Pack water and a warm jacket."),
+        .init(id: "capture-b", title: "Water", excerpt: "Pack water for the trail."),
+    ])
+    let model = Model(
+        draft: .init(statements: [.init(text: "Bring supplies.", citations: citations)]))
+    let answer = try await GroundedAnswerService(retriever: reader, model: model).answer("hiking")
+    #expect(answer.statements.first?.citations == [citations[0], citations[1], citations[3]])
+    #expect(answer.sources.map(\.source.id) == ["capture-a", "capture-b"])
+}
+
+@Test func invalidLaterQuoteFromSameSourceRejectsEntireStatement() async throws {
+    let model = Model(
+        draft: .init(statements: [
+            .init(
+                text: "Bring supplies.",
+                citations: [
+                    .init(number: 1, quote: "Pack water"),
+                    .init(number: 1, quote: "Wear purple shoes"),
+                ])
+        ]))
+    await #expect(throws: AnswerError.insufficientEvidence) {
+        try await GroundedAnswerService(retriever: Retriever(), model: model).answer("hiking")
+    }
+}
+
+@Test(arguments: ["hiking", "What about hiking?", "Tell me about 猫"])
+func singleTermQuestionRetrievesExactlyOnce(question: String) async throws {
+    let reader = Retriever()
+    let terms = GroundedAnswerService.searchTerms(question)
+    #expect(terms.count == 1)
+    _ = try await GroundedAnswerService(retriever: reader, model: Model()).answer(question)
+    #expect(await reader.calls == 1)
+    #expect(await reader.queries == terms)
+}
+
+private actor RankedRetriever: AnswerRetrieving {
+    var queries: [String] = []
+    func search(_ queries: [String], limit: Int) -> [[AnswerEvidence]] {
+        self.queries = queries
+        return queries.map { query in
+            let id = query == "hiking water" ? "combined-only" : "both-terms"
+            return [.init(id: id, title: id, excerpt: "Pack water and a warm jacket.")]
+        }
+    }
+}
+
+@Test func multiTermQueriesKeepCombinedSearchAndMatchCountRanking() async throws {
+    let reader = RankedRetriever()
+    let model = Model()
+    _ = try await GroundedAnswerService(retriever: reader, model: model).answer(
+        "What about hiking hiking water?")
+    #expect(await reader.queries == ["hiking water", "hiking", "water"])
+    #expect(await model.sources.map(\.source.id) == ["both-terms", "combined-only"])
 }
 
 @Test func unavailableModelDoesNotReadCaptures() async throws {
