@@ -255,7 +255,9 @@ final class AppState {
         let captureService = CaptureService(
             store: store,
             guards: [SecureInputGuard(probes: [SystemSecureInputProbe(), AXReader()])])
-        let enrichment = EnrichmentService(store: store, steps: [TabFirstBodyStep()])
+        let enrichment = EnrichmentService(
+            store: store, steps: [TabFirstBodyStep()],
+            generationGate: session.runtime.map { GenerationGate(runtime: $0) })
         let favicons = FaviconStore(paths: store.paths)
         let settings = self.settings
         let openURL: @MainActor (URL) -> Void = { [settings, contextSuppressions] url in

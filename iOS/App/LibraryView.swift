@@ -12,6 +12,7 @@ struct LibraryView: View {
     }
     @Bindable var model: LibraryModel
     @State private var capturing = false
+    @State private var asking = false
     @State private var showingSyncSettings = false
     @State private var navigationPath: [UUID] = []
     @State private var stagedText = ""
@@ -95,6 +96,10 @@ struct LibraryView: View {
                         .accessibilityIdentifier("deviceSyncSettings")
                 }
                 ToolbarItem(placement: .topBarTrailing) {
+                    Button("Ask Cap", systemImage: "sparkles") { asking = true }
+                        .accessibilityIdentifier("askCapButton")
+                }
+                ToolbarItem(placement: .topBarTrailing) {
                     Button("Capture", systemImage: "plus") {
                         stagedText = ""
                         draftID = UUID()
@@ -105,6 +110,9 @@ struct LibraryView: View {
             }
             .sheet(isPresented: $capturing, onDismiss: consumeSystemAction) {
                 CaptureForm(model: model, initialText: stagedText).id(draftID)
+            }
+            .sheet(isPresented: $asking, onDismiss: consumeSystemAction) {
+                AskLibraryView(library: model)
             }
             .sheet(isPresented: $showingSyncSettings, onDismiss: consumeSystemAction) {
                 SyncSettingsView(
@@ -124,7 +132,7 @@ struct LibraryView: View {
     }
 
     private func consumeSystemAction() {
-        if capturing || showingSyncSettings, let action = systemBridge.pendingAction {
+        if capturing || showingSyncSettings || asking, let action = systemBridge.pendingAction {
             switch action {
             case .find, .open: return
             case .stageText: break
@@ -292,6 +300,11 @@ struct CaptureDetailView: View {
                 }
                 if let body = capture.body {
                     Section("Saved page text") { Text(body).textSelection(.enabled) }
+                }
+                if let text = capture.ocrText, !text.isEmpty {
+                    Section("Recognized image text") {
+                        Text(text).textSelection(.enabled)
+                    }.accessibilityIdentifier("captureOCRText")
                 }
                 if !capture.generatedTags.isEmpty {
                     Section("Generated tags") {

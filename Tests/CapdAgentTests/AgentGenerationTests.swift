@@ -10,6 +10,120 @@ import Testing
 
 @Suite("Agent generation freshness")
 struct AgentGenerationTests {
+    @Test func inlineEnrichmentPullsCanonicalDuplicateBeforeExtracting() async throws {
+        let fixture = try InlineGenerationFixture(body: "Healthy canonical body")
+        defer { fixture.clean() }
+        let latch = GenerationLatch(held: false)
+        let result = try await fixture.enrichment(latch: latch).process(captureID: fixture.localID)
+        #expect(result == nil)
+        #expect(await latch.calls == 0)
+        #expect((await fixture.runtime.sync()).pullSucceeded)
+        #expect(
+            try fixture.server.baseline().captures.first?.generated.body == "Healthy canonical body"
+        )
+        #expect(try fixture.store.syncClient!.pendingOperations().isEmpty)
+        #expect(
+            try await fixture.store.reader.read {
+                try Capture.fetchAll($0).count == 1
+                    && Capture.fetchOne($0, key: fixture.localID)?.body == "Healthy canonical body"
+            })
+    }
+
+    @Test(arguments: [false, true])
+    func inlineEnrichmentUnavailableSyncPreservesSavedCreate(paused: Bool) async throws {
+        let fixture = try InlineGenerationFixture(body: "Healthy canonical body")
+        defer { fixture.clean() }
+        if paused {
+            var configuration = try #require(
+                try MacSyncConfiguration.load(paths: fixture.store.paths))
+            configuration.enabled = false
+            try configuration.install(paths: fixture.store.paths)
+        } else {
+            await fixture.wire.setOffline(true)
+        }
+        let latch = GenerationLatch(held: false)
+        await #expect(throws: GenerationGateError.self) {
+            try await fixture.enrichment(latch: latch).process(captureID: fixture.localID)
+        }
+        #expect(await latch.calls == 0)
+        let saved = try await fixture.store.reader.read {
+            try #require(try Capture.fetchOne($0, key: fixture.localID))
+        }
+        #expect(saved.enrichmentState == .pending && saved.attemptCount == 0 && saved.body == nil)
+        let operations = try fixture.store.syncClient!.pendingOperations()
+        #expect(operations.count == 1)
+        if case .create = operations.first?.mutation {
+        } else {
+            Issue.record("Saved create must remain queued")
+        }
+        let reopened = try Store(paths: fixture.store.paths, syncBinding: fixture.wire.binding)
+        #expect(
+            try await reopened.reader.read {
+                try Capture.fetchOne($0, key: fixture.localID)?.contentHash == saved.contentHash
+            })
+        var configuration = try #require(try MacSyncConfiguration.load(paths: fixture.store.paths))
+        configuration.enabled = true
+        try configuration.install(paths: fixture.store.paths)
+        await fixture.wire.setOffline(false)
+        #expect(
+            try await fixture.enrichment(latch: latch).process(captureID: fixture.localID) == nil)
+        #expect(await latch.calls == 0)
+        #expect(try fixture.store.syncClient!.pendingOperations().isEmpty)
+    }
+
+    @Test(arguments: [false, true])
+    func inlineEnrichmentRejectsAwaitedOutcomeAfterRemoteChange(failing: Bool) async throws {
+        let fixture = try InlineGenerationFixture()
+        defer { fixture.clean() }
+        guard (await fixture.runtime.sync()).pullSucceeded else {
+            Issue.record("Synthetic initial sync failed")
+            return
+        }
+        let latch = GenerationLatch()
+        let work = Task {
+            try await fixture.enrichment(latch: latch, failing: failing).process(
+                captureID: fixture.localID)
+        }
+        await latch.waitForStart()
+        let baseline = try fixture.server.baseline()
+        let canonical = try #require(baseline.captures.first { $0.id == fixture.canonicalID })
+        _ = try fixture.server.apply(
+            SyncOperation(
+                deviceID: fixture.remote,
+                sequence: (baseline.deviceSequences[fixture.remote] ?? 0) + 1,
+                captureID: fixture.canonicalID, baseRevision: canonical.revision,
+                mutation: .edit(
+                    CaptureEdit(
+                        generatedPatch: GeneratedContentPatch(body: .set("New remote body"))))))
+        await latch.release()
+        await #expect(throws: GenerationGateError.self) { try await work.value }
+        #expect(try fixture.store.syncClient!.pendingOperations().isEmpty)
+        #expect(try fixture.server.baseline().captures.first?.generated.body == "New remote body")
+        #expect(
+            try await fixture.store.reader.read {
+                try Capture.fetchOne($0, key: fixture.localID)?.body == "New remote body"
+                    && Capture.fetchOne($0, key: fixture.localID)?.enrichmentState == .ok
+            })
+    }
+
+    @Test func inlineLocalOnlyEnrichmentRemainsAvailable() async throws {
+        let root = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent(
+            "capd-inline-local-\(UUID())")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = try Store(paths: StoragePaths(root: root))
+        let saved = try CaptureService(store: store).ingest(
+            CaptureRequest(url: "https://example.invalid/local")
+        ).capture
+        let runtime: MacSyncRuntime? = nil
+        let latch = GenerationLatch(held: false)
+        let service = EnrichmentService(
+            store: store, steps: [GenerationStep(latch: latch)],
+            generationGate: runtime.map { GenerationGate(runtime: $0) })
+        #expect(try await service.process(captureID: saved.id!)?.body == "Stale generated body")
+        #expect(await latch.calls == 1)
+        #expect(store.syncClient == nil)
+    }
+
     @Test func fullRetagResetBoundsWritesAndPreservesLargeContent() async throws {
         let fixture = try await GenerationFixture(kind: .text, count: 101, tagged: true)
         defer { fixture.clean() }
@@ -410,6 +524,73 @@ private final class GenerationInterleaver: TransactionObserver {
         }
     }
     func databaseDidRollback(_ db: Database) { changed = false }
+}
+
+private struct InlineGenerationFixture: Sendable {
+    let root: URL
+    let store: Store
+    let runtime: MacSyncRuntime
+    let server: SyncServer
+    let wire: GenerationWire
+    let localID: Int64
+    let canonicalID: UUID
+    let remote: UUID
+
+    init(body: String? = nil) throws {
+        root = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent(
+            "capd-inline-\(UUID())")
+        let paths = StoragePaths(root: root.appendingPathComponent("library"))
+        let binding = SyncLibraryBinding(libraryID: UUID(), serviceID: UUID())
+        let device = UUID()
+        remote = UUID()
+        server = try SyncServer(
+            databaseURL: root.appendingPathComponent("authority.sqlite"),
+            blobDirectory: root.appendingPathComponent("blobs"), libraryID: binding.libraryID,
+            serviceID: binding.serviceID)
+        let url = URL(string: "https://example.invalid/inline")!
+        let canonical = SharedCapture(
+            source: CaptureSource(
+                kind: .link, contentHash: CaptureIdentity.contentHash(for: url),
+                url: url.absoluteString), createdAt: Date(timeIntervalSince1970: 1_700_000_000))
+        canonicalID = canonical.id
+        _ = try server.apply(
+            SyncOperation(
+                deviceID: remote, sequence: 1, captureID: canonical.id, baseRevision: 0,
+                mutation: .create(canonical)))
+        if let body {
+            _ = try server.apply(
+                SyncOperation(
+                    deviceID: remote, sequence: 2, captureID: canonical.id, baseRevision: 1,
+                    mutation: .edit(
+                        CaptureEdit(generatedPatch: GeneratedContentPatch(body: .set(body))))))
+        }
+        let enrollment = try SyncEnrollment(
+            endpoint: URL(string: "https://sync.example.invalid/v1/sync")!, binding: binding,
+            deviceID: device)
+        let configuration = MacSyncConfiguration(enrollment: enrollment)
+        store = try Store(paths: paths, syncBinding: binding, deviceID: device)
+        try configuration.install(paths: paths)
+        wire = GenerationWire(
+            binding: binding, deviceID: device,
+            handler: SyncHTTPHandler(
+                serviceID: binding.serviceID,
+                authorizer: GenerationAuthorizer(
+                    principal: SyncPrincipal(
+                        serviceID: binding.serviceID, libraryID: binding.libraryID, deviceID: device
+                    )), server: { [server] _ in server }))
+        runtime = MacSyncRuntime(
+            store: store, configuration: configuration, transport: wire,
+            credential: { "synthetic-generation" })
+        localID = try #require(
+            CaptureService(store: store).ingest(CaptureRequest(url: url.absoluteString)).capture.id)
+    }
+
+    func enrichment(latch: GenerationLatch, failing: Bool = false) -> EnrichmentService {
+        EnrichmentService(
+            store: store, steps: [GenerationStep(latch: latch, failing: failing)],
+            generationGate: GenerationGate(runtime: runtime))
+    }
+    func clean() { try? FileManager.default.removeItem(at: root) }
 }
 
 private struct GenerationFixture: Sendable {

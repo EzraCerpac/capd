@@ -13,6 +13,14 @@ public struct GenerationGate: Sendable {
         self.observe = observe
     }
 
+    public init(runtime: MacSyncRuntime) {
+        self.init {
+            let result = await runtime.sync()
+            guard result.pullSucceeded else { throw GenerationGateError.syncUnavailable }
+            return result.cursor
+        }
+    }
+
     func begin() async throws -> Int64 {
         try Task.checkCancellation()
         let revision = try await observe()

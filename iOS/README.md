@@ -5,6 +5,12 @@ resolves note variants, and deletes captures. The share extension writes to the 
 App Group SQLite database while the main app is closed. The library refreshes when
 active. Web fetching, OCR and image capture are not implemented in the mobile UI.
 
+Ask Cap answers questions from saved local text using Apple's on-device model
+when available. It displays supporting quotes and opens saved sources. Questions
+and answers are not persisted, and there is no remote fallback. Saved sources are
+checked again before an answer appears; source links open their current saved
+version. See [local answers](../docs/designs/iphone-local-answers.md).
+
 Device sync settings includes an opt-in for Spotlight and Shortcuts. It indexes
 saved titles and manual tags. The complete library is reconciled after local edits
 and sync projection, independently of the visible filter. Strict search links

@@ -327,7 +327,7 @@ public final class MobileStore: Sendable {
         }
     }
 
-    private static func libraryRevision(_ db: Database) throws -> MobileLibraryRevision {
+    static func libraryRevision(_ db: Database) throws -> MobileLibraryRevision {
         guard
             let row = try Row.fetchOne(
                 db,

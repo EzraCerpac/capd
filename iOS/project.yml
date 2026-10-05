@@ -4,6 +4,8 @@ options:
     iOS: "17.0"
   createIntermediateGroups: true
 packages:
+  CapdAnswers:
+    path: ../Packages/CapdAnswers
   CapdDesignSystem:
     path: ../Packages/CapdDesignSystem
   CapdSync:
@@ -31,6 +33,7 @@ targets:
         INFOPLIST_FILE: App/Info.plist
         CODE_SIGN_ENTITLEMENTS: Shared/CapdPhone.entitlements
     dependencies:
+      - package: CapdAnswers
       - package: CapdMobile
       - package: CapdDesignSystem
       - package: CapdSystemIntegration
