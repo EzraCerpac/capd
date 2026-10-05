@@ -154,7 +154,22 @@ public final class MobileStore: Sendable {
             "localID", "id", "title", "selection", "note", "body", "ocrText", "createdAt",
             "manualTags", "generatedTags",
         ]
-        let changed = fields.map { "OLD.\($0) IS NOT NEW.\($0)" }.joined(separator: " OR ")
+        let sortedTags: (String) -> String = { reference in
+            """
+            (SELECT json_group_array(value) FROM (
+                SELECT value FROM json_each(\(reference)) ORDER BY value COLLATE BINARY))
+            """
+        }
+        let changed = fields.map { field -> String in
+            guard field == "manualTags" || field == "generatedTags" else {
+                return "OLD.\(field) IS NOT NEW.\(field)"
+            }
+            // Tag order changes neither matched prose nor FTS document length.
+            return """
+                CASE WHEN OLD.\(field) IS NEW.\(field) THEN 0 ELSE
+                    \(sortedTags("OLD.\(field)")) IS NOT \(sortedTags("NEW.\(field)")) END
+                """
+        }.joined(separator: " OR ")
         try db.execute(
             sql: """
                 CREATE TRIGGER mobile_answer_evidence_update

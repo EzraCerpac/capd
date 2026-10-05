@@ -9,17 +9,18 @@ import os
 
 @Suite("Answer evidence projection revision")
 struct MobileAnswerEvidenceRevisionTests {
-    @Test(arguments: ["create", "edit", "rejected"])
+    @Test(arguments: ["create", "createTagOrder", "edit", "rejected"])
     func acknowledgementBookkeepingKeepsGeneratedAnswer(action: String) async throws {
         let fixture = EvidenceRevisionFixture()
         defer { fixture.clean() }
         let store = try MobileStore(url: fixture.url)
         let server = try fixture.server()
-        let saved = MobileCapture(
+        var saved = MobileCapture(
             kind: .text, title: "Hiking", selection: "Pack water and a warm jacket.",
             createdAt: Date(timeIntervalSince1970: 1_700_000_000))
+        if action == "createTagOrder" { saved.manualTags = ["zebra", "apple"] }
         try store.save(saved)
-        if action != "create" {
+        if action != "create" && action != "createTagOrder" {
             try store.push(to: server)
             try store.pull(from: server)
             if action == "edit" {
@@ -52,6 +53,67 @@ struct MobileAnswerEvidenceRevisionTests {
         await model.finish()
         let answer = try await task.value
         #expect(answer.sources.first?.source.id == saved.id.uuidString)
+    }
+
+    @Test(arguments: ["manualTags", "generatedTags"])
+    func reorderedEscapedUnicodeTagsKeepPromptEvidenceAndAnswer(field: String) async throws {
+        let fixture = EvidenceRevisionFixture()
+        defer { fixture.clean() }
+        let store = try MobileStore(url: fixture.url)
+        try store.save(
+            MobileCapture(kind: .text, title: "Hiking", selection: "Pack water and a warm jacket."))
+        let writer = try DatabaseQueue(path: fixture.url.path)
+        let tags = ["zebra", "apple", "quoted\"tag", "path\\tag", "雪", "e\u{301}", "é"]
+        let original = String(decoding: try JSONEncoder().encode(tags), as: UTF8.self)
+        let reordered = String(
+            decoding: try JSONEncoder().encode(Array(tags.reversed())), as: UTF8.self)
+        try await writer.write { db in
+            try db.execute(sql: "UPDATE mobile_captures SET \(field)=?", arguments: [original])
+        }
+        let reader = try MobileAnswerRetrieval(databaseURL: fixture.url)
+        let before = try await reader.evidenceRevision()
+        let evidence = try await reader.search("hiking", limit: 12)
+        let model = EvidenceRevisionModel()
+        let task = Task {
+            try await GroundedAnswerService(retriever: reader, model: model).answer("hiking")
+        }
+        await model.waitUntilStarted()
+        try await writer.write { db in
+            try db.execute(sql: "UPDATE mobile_captures SET \(field)=?", arguments: [reordered])
+        }
+        #expect(try await reader.search("hiking", limit: 12) == evidence)
+        #expect(try await reader.evidenceRevision() == before)
+        await model.finish()
+        #expect(try await task.value.sources.count == 1)
+    }
+
+    @Test(arguments: ["membership", "multiplicity"])
+    func changedTagValuesAndDuplicateCountInvalidateRetrievalProvenance(change: String)
+        async throws
+    {
+        let fixture = EvidenceRevisionFixture()
+        defer { fixture.clean() }
+        let store = try MobileStore(url: fixture.url)
+        var saved = MobileCapture(
+            kind: .text, title: "Hiking", selection: "Pack water and a warm jacket.")
+        saved.manualTags = ["tag"]
+        try store.save(saved)
+        let reader = try MobileAnswerRetrieval(databaseURL: fixture.url)
+        let before = try await reader.evidenceRevision()
+        let model = EvidenceRevisionModel()
+        let task = Task {
+            try await GroundedAnswerService(retriever: reader, model: model).answer("hiking")
+        }
+        await model.waitUntilStarted()
+        let writer = try DatabaseQueue(path: fixture.url.path)
+        let tags = change == "membership" ? ["other"] : ["tag", "tag"]
+        let encoded = String(decoding: try JSONEncoder().encode(tags), as: UTF8.self)
+        try await writer.write { db in
+            try db.execute(sql: "UPDATE mobile_captures SET manualTags=?", arguments: [encoded])
+        }
+        #expect(try await reader.evidenceRevision() != before)
+        await model.finish()
+        await #expect(throws: AnswerError.evidenceChanged) { try await task.value }
     }
 
     @Test(arguments: [
