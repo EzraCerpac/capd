@@ -298,8 +298,9 @@ struct StoreSyncTests {
                 server: server, binding: binding, deviceID: client.deviceID)
             try client.push(to: transport)
             try client.pull(from: transport)
-            let before = try store.reader.read { try Capture.fetchAll($0) }
-            let digest = SHA256.hash(data: try JSONEncoder().encode(before)).description
+            let before = try store.reader.read {
+                try Capture.fetchAll($0, sql: "SELECT * FROM captures ORDER BY id")
+            }
             let sequence = try store.reader.read {
                 try Int64.fetchOne($0, sql: "SELECT sequence FROM sync_meta")
             }
@@ -366,8 +367,10 @@ struct StoreSyncTests {
                 }
                 #expect(refused)
             }
-            let after = try store.reader.read { try Capture.fetchAll($0) }
-            #expect(SHA256.hash(data: try JSONEncoder().encode(after)).description == digest)
+            let after = try store.reader.read {
+                try Capture.fetchAll($0, sql: "SELECT * FROM captures ORDER BY id")
+            }
+            #expect(after == before)
             #expect(
                 try store.reader.read {
                     try Int64.fetchOne($0, sql: "SELECT sequence FROM sync_meta")
@@ -1245,7 +1248,7 @@ struct StoreSyncTests {
             let canonical = SharedCapture(
                 source: CaptureSource(
                     kind: .text, contentHash: local.contentHash, selection: "Alias kestrel"),
-                createdAt: local.createdAt)
+                createdAt: Date(timeIntervalSince1970: 1_600_000_000))
             try peer.enqueue(captureID: canonical.id, mutation: .create(canonical))
             try peer.push(
                 to: StoreTestTransport(server: server, binding: binding, deviceID: peer.deviceID))
@@ -1258,10 +1261,13 @@ struct StoreSyncTests {
                 server: server, binding: binding, deviceID: client.deviceID)
             let receipt = try #require(try client.push(to: transport).first)
             #expect(receipt.capture?.id == canonical.id)
+            #expect(receipt.capture?.createdAt == canonical.createdAt)
             #expect(original.captureID != canonical.id)
             try client.pull(from: transport)
             let projected = try #require(try SearchService(store: store).capture(id: local.id!))
             #expect(projected.seenCount == 2)
+            #expect(projected.id == local.id)
+            #expect(projected.createdAt == canonical.createdAt)
             #expect(try store.reader.read { try Capture.fetchCount($0) } == 1)
             #expect(try SearchService(store: store).search("kestrel").count == 1)
             #expect(
@@ -1272,6 +1278,67 @@ struct StoreSyncTests {
                 } == canonical.id.uuidString)
             _ = try store.updateRating(id: local.id!, rating: 5)
             #expect(try client.pendingOperations().first?.captureID == canonical.id)
+            try client.push(to: transport)
+            try client.pull(from: transport)
+            #expect(try server.baseline().captures.first?.createdAt == canonical.createdAt)
+            #expect(try client.captures().first?.createdAt == canonical.createdAt)
+            #expect(
+                try SearchService(store: store).capture(id: local.id!)?.createdAt
+                    == canonical.createdAt)
+            let reopened = try Store(paths: paths, syncBinding: binding)
+            let retained = try #require(try SearchService(store: reopened).capture(id: local.id!))
+            #expect(retained.id == local.id)
+            #expect(retained.createdAt == canonical.createdAt)
+            #expect(try reopened.syncClient?.pendingOperations().isEmpty == true)
+        }
+    }
+
+    @Test("An existing aliased projection adopts the accepted immutable creation time")
+    func existingAliasProjectionUsesCanonicalCreationTime() throws {
+        try fixture { paths, binding, server in
+            let store = try Store(paths: paths, syncBinding: binding)
+            let local = try CaptureService(store: store).ingest(
+                CaptureRequest(
+                    text: "Retained alias source",
+                    capturedAt: Date(timeIntervalSince1970: 1_700_000_000))
+            ).capture
+            let client = try #require(store.syncClient)
+            let operation = try #require(try client.pendingOperations().first)
+            let pending = try store.reader.read {
+                try Data.fetchAll($0, sql: "SELECT payload FROM sync_outbox ORDER BY sequence")
+            }
+            let canonical = SharedCapture(
+                source: CaptureSource(
+                    kind: .text, contentHash: local.contentHash, selection: local.selection),
+                createdAt: Date(timeIntervalSince1970: 1_600_000_000))
+            let receipt = try server.apply(
+                SyncOperation(
+                    deviceID: UUID(), sequence: 1, captureID: canonical.id, baseRevision: 0,
+                    mutation: .create(canonical)))
+            let accepted = try #require(receipt.capture)
+            #expect(accepted.revision == 1)
+            try store.dbPool.write { db in
+                try db.execute(
+                    sql: "INSERT INTO sync_aliases (id,canonical) VALUES (?,?)",
+                    arguments: [operation.captureID.uuidString, accepted.id.uuidString])
+                try StoreSync.project(db, record: accepted, paths: paths)
+            }
+            let projected = try #require(try SearchService(store: store).capture(id: local.id!))
+            #expect(projected.id == local.id)
+            #expect(projected.createdAt == accepted.createdAt)
+            let exported = StoreSync.snapshot(projected, id: accepted.id)
+            #expect(exported.id == accepted.id)
+            #expect(exported.source == accepted.source)
+            #expect(exported.createdAt == accepted.createdAt)
+            #expect(try store.reader.read { try Capture.fetchCount($0) } == 1)
+            #expect(
+                try store.reader.read {
+                    try Data.fetchAll($0, sql: "SELECT payload FROM sync_outbox ORDER BY sequence")
+                } == pending)
+            let reopened = try Store(paths: paths, syncBinding: binding)
+            #expect(
+                try SearchService(store: reopened).capture(id: local.id!)?.createdAt
+                    == accepted.createdAt)
         }
     }
 

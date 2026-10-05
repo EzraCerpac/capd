@@ -128,6 +128,7 @@ enum StoreSync {
             ?? Capture(
                 id: localID, kind: CaptureKind(rawValue: record.source.kind.rawValue)!,
                 createdAt: record.createdAt)
+        capture.createdAt = record.createdAt
         capture.url = record.source.url
         capture.host = record.source.host
         capture.title = record.source.title
