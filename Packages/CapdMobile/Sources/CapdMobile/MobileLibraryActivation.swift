@@ -64,6 +64,14 @@ public struct MobileReviewedImport: Sendable {
     }
 }
 
+public enum MobileBackupReplacementError: Error, LocalizedError {
+    case pendingCredentialRecovery
+
+    public var errorDescription: String? {
+        "Finish the existing connection recovery before preparing another backup. The previous backup and credential are retained."
+    }
+}
+
 /// No administrative HTTP routes and no authority mutation. Host import is an explicit handoff.
 public struct MobileLibraryActivation: Sendable {
     private let root: URL
@@ -76,13 +84,22 @@ public struct MobileLibraryActivation: Sendable {
 
     /// Caller first suspends and drains its scheduler. Share saves receive transitionBusy
     /// while this coherent SQLite backup is made, and can retry their retained draft.
-    public func prepare(endpoint: URL, binding: SyncLibraryBinding) throws
-        -> MobileLibraryPreparation
-    {
+    public func prepare(
+        endpoint: URL, binding: SyncLibraryBinding,
+        replacing preparation: MobileLibraryPreparation? = nil
+    ) throws -> MobileLibraryPreparation {
         let lease = try MobileLibraryLease(root: root, exclusive: true)
         defer { withExtendedLifetime(lease) {} }
         let selected = try MobileLibraryAccess.selected(in: root)
         guard selected.enrollment == nil else { throw MobileActivationError.invalidConfiguration }
+        if let preparation {
+            guard selected == preparation.configuration,
+                try retainedPreparation(preparation) == preparation
+            else { throw MobileActivationError.sessionReplaced }
+            guard (try? hasPendingCredentialRecovery(for: preparation)) == false else {
+                throw MobileBackupReplacementError.pendingCredentialRecovery
+            }
+        }
         let enrollment = try SyncEnrollment(endpoint: endpoint, binding: binding, deviceID: UUID())
         try MobileLibraryConfiguration(generation: UUID(), enrollment: enrollment).validate()
         let original = try selected.databaseURL(in: root)
@@ -143,6 +160,49 @@ public struct MobileLibraryActivation: Sendable {
             to: directory.appendingPathComponent("preparation.json"),
             options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
         return preparation
+    }
+
+    /// Withdraw only an unpublished, unused replacement when the previous backup needs recovery.
+    /// Its backup bytes remain archived; no journal or credential is changed.
+    public func withdrawUnusedReplacement(
+        _ candidate: MobileLibraryPreparation, preserving previous: MobileLibraryPreparation
+    ) throws {
+        let lease = try MobileLibraryLease(root: root, exclusive: true)
+        defer { withExtendedLifetime(lease) {} }
+        guard candidate.backupID != previous.backupID,
+            candidate.configuration == previous.configuration,
+            previous.configuration.enrollment == nil,
+            try MobileLibraryAccess.selected(in: root) == previous.configuration,
+            try retainedPreparation(previous) == previous,
+            (try? hasPendingCredentialRecovery(for: previous)) != false,
+            try !hasPendingCredentialRecovery(for: candidate)
+        else { throw MobileActivationError.invalidConfiguration }
+        let source = candidate.directory(in: root).appendingPathComponent("preparation.json")
+        let retained = candidate.directory(in: root).appendingPathComponent(
+            "retained-unused-preparation.json")
+        if !FileManager.default.fileExists(atPath: source.path) {
+            guard try readPreparation(retained) == candidate else {
+                throw MobileActivationError.invalidConfiguration
+            }
+            return
+        }
+        guard try retainedPreparation(candidate) == candidate,
+            !FileManager.default.fileExists(atPath: retained.path)
+        else { throw MobileActivationError.invalidConfiguration }
+        try FileManager.default.moveItem(at: source, to: retained)
+    }
+
+    private func retainedPreparation(_ preparation: MobileLibraryPreparation) throws
+        -> MobileLibraryPreparation
+    {
+        try readPreparation(
+            preparation.directory(in: root).appendingPathComponent("preparation.json"))
+    }
+
+    private func readPreparation(_ file: URL) throws -> MobileLibraryPreparation {
+        try JSONDecoder().decode(
+            MobileLibraryPreparation.self, from: Self.readBounded(file, maximum: 32 * 1_024 * 1_024)
+        )
     }
 
     /// Decode the newest valid preparation among eight candidates; incomplete backups remain archived.
@@ -494,10 +554,14 @@ public struct MobileLibraryActivation: Sendable {
                     + identifiers.flatMap {
                         ["typeof(\($0))", "\($0) COLLATE BINARY"]
                     }
+                // The auxiliary evidence token changes neither capture nor sync state.
+                let filter =
+                    name == "grdb_migrations"
+                    ? " WHERE identifier IS NOT 'mobile-answer-evidence-v5'" : ""
                 let rows = try Row.fetchCursor(
                     db,
                     sql:
-                        "SELECT \(identifiers.joined(separator: ",")) FROM \(quoted) ORDER BY \(order.joined(separator: ","))"
+                        "SELECT \(identifiers.joined(separator: ",")) FROM \(quoted)\(filter) ORDER BY \(order.joined(separator: ","))"
                 )
                 while let row = try rows.next() {
                     hash.update(data: Data([0xf2]))
