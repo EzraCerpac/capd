@@ -333,6 +333,47 @@ class MigrationTests(unittest.TestCase):
             plan = db.execute("EXPLAIN QUERY PLAN " + lookup, image_identity).fetchall()
             self.assertTrue(any("USING INDEX sync_records_identity" in row[3] for row in plan), plan)
 
+    def test_large_escaped_record_within_budget_imports_and_replays(self):
+        body = "/" * 8_330_000
+        self.db.execute("UPDATE captures SET body=? WHERE id=81", (body,))
+        self.db.commit()
+        ids = migration.backfill_legacy(self.source, "captures.sqlite")
+        migration.backup(self.source, self.archive)
+        authority, binding = self.authority()
+        import_id = str(uuid.uuid4())
+        result = migration.import_initial_mac(self.archive, authority, binding, import_id)
+        self.assertEqual(2, result["count"])
+        with contextlib.closing(sqlite3.connect(authority / "server.sqlite")) as db:
+            record = json.loads(db.execute("SELECT payload FROM sync_records WHERE id=?", (ids[81],)).fetchone()[0])
+            self.assertEqual(body, record["generated"]["body"])
+            self.assertEqual((1, 1), db.execute("SELECT cursor,floor FROM sync_meta").fetchone())
+        self.assertTrue(migration.import_initial_mac(self.archive, authority, binding, import_id)["replayed"])
+
+    def test_oversized_escaped_legacy_fields_refuse_import_atomically(self):
+        self.db.execute("ALTER TABLE captures ADD COLUMN selection TEXT")
+        for field in ("body", "ocr_text", "note", "selection", "title"):
+            with self.subTest(field=field):
+                self.db.execute("UPDATE captures SET body=NULL,ocr_text=NULL,note='Second',selection=NULL,title='Axolotl' WHERE id=81")
+                self.db.execute("UPDATE captures SET " + field + "=? WHERE id=81", ("/" * 8_388_608,))
+                self.db.execute("DROP TABLE IF EXISTS sync_legacy_snapshot")
+                self.db.commit()
+                if self.archive.exists():
+                    shutil.rmtree(self.archive)
+                migration.backfill_legacy(self.source, "captures.sqlite")
+                migration.backup(self.source, self.archive)
+                authority, binding = self.authority()
+                before_assets = migration.inventory(authority / "assets")
+                with contextlib.closing(sqlite3.connect(authority / "server.sqlite")) as db:
+                    before_sql = migration.sql_signature(db)
+                try:
+                    with self.assertRaisesRegex(migration.PreparationError, "capture exceeds the shared response budget"):
+                        migration.import_initial_mac(self.archive, authority, binding, str(uuid.uuid4()))
+                    with contextlib.closing(sqlite3.connect(authority / "server.sqlite")) as db:
+                        self.assertEqual(before_sql, migration.sql_signature(db))
+                    self.assertEqual(before_assets, migration.inventory(authority / "assets"))
+                finally:
+                    shutil.rmtree(authority)
+
     def test_initial_import_failure_rollback_and_bound_authority_checks(self):
         migration.backfill_legacy(self.source, "captures.sqlite")
         migration.backup(self.source, self.archive)

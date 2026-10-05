@@ -67,9 +67,7 @@ struct SyncSettingsView: View {
                             Text(completed, style: .relative)
                         }
                     }
-                    if state.phase == .attention, state.conflictCount == 0,
-                        state.rejectedChanges == 0
-                    {
+                    if state.phase == .attention, state.lastError != nil {
                         Button("Retry connection", action: retry)
                             .accessibilityIdentifier("retryDeviceSync")
                     }

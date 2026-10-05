@@ -18,6 +18,9 @@ import uuid
 MARKER = ".capd-synthetic-fixture"
 MARKER_BYTES = b"synthetic-capd-library-v1\n"
 FORMAT = "capd-synthetic-backup-v1"
+MAXIMUM_SHARED_FRAME_BYTES = 16_777_216
+# Reserve more than the shared single-record envelopes and counter/date encoding growth.
+MAXIMUM_IMPORTED_CAPTURE_BYTES = MAXIMUM_SHARED_FRAME_BYTES - 65_536
 
 
 class PreparationError(Exception):
@@ -374,6 +377,10 @@ def imported_capture(identity, payload, import_id):
     record["metadata"] = metadata
     if row.get("note") is not None:
         record["note"] = row["note"]
+    # ASCII JSON bounds Swift string encoding after accounting for its escaped slashes.
+    # This deliberately refuses a small margin of otherwise admissible shared records.
+    if len(encode(record).replace(b"/", b"\\/")) > MAXIMUM_IMPORTED_CAPTURE_BYTES:
+        raise PreparationError("capture exceeds the shared response budget")
     return record
 
 
