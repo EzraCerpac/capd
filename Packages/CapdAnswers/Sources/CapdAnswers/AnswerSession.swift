@@ -29,18 +29,16 @@ public final class AnswerSession {
 
     public func ask() {
         guard !isAnswering else { return }
-        refreshAvailability()
         answer = nil
         message = nil
-        let question = question.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !question.isEmpty else {
-            message = AnswerError.emptyQuestion.localizedDescription
+        let question: String
+        do {
+            question = try GroundedAnswerService.validatedQuestion(self.question)
+        } catch {
+            message = error.localizedDescription
             return
         }
-        guard question.count <= 500 else {
-            message = AnswerError.questionTooLong.localizedDescription
-            return
-        }
+        refreshAvailability()
         if case .unavailable(let reason) = availability {
             message = reason.explanation
             return

@@ -86,7 +86,7 @@ public struct OnDeviceAnswerModel: AnswerGenerating {
             let session = LanguageModelSession(model: model, instructions: instructions)
             do {
                 // Count schema and instructions as well as retrieved evidence. Earlier 26
-                // releases use the service's conservative character cap and overflow handling.
+                // releases use the service's byte caps and overflow handling.
                 if #available(iOS 26.4, macOS 26.4, *) {
                     let promptTokens = try await model.tokenCount(for: prompt)
                     let instructionTokens = try await model.tokenCount(
