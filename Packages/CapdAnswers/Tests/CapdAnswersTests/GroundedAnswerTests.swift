@@ -391,6 +391,37 @@ private actor HeldModel: AnswerGenerating {
     #expect(session.availability == .unavailable(.modelNotReady))
 }
 
+private struct InternalRetrievalError: LocalizedError {
+    var errorDescription: String? { "Synthetic internal database detail" }
+}
+
+private struct FailedRetriever: AnswerRetrieving {
+    func evidenceRevision() throws -> String { throw InternalRetrievalError() }
+    func search(_ queries: [String], limit: Int) -> [[AnswerEvidence]] {
+        Issue.record("Failed revision must prevent searching")
+        return []
+    }
+}
+
+@MainActor
+@Test(arguments: [false, true])
+func unknownRetrievalErrorsRemainGeneric(factoryFails: Bool) async throws {
+    let model = Model()
+    let session = AnswerSession(
+        model: model,
+        retriever: {
+            if factoryFails { throw InternalRetrievalError() }
+            return FailedRetriever()
+        })
+    session.question = "hiking"
+    session.ask()
+    for _ in 0..<200 where session.isAnswering { try await Task.sleep(for: .milliseconds(5)) }
+    #expect(!session.isAnswering)
+    #expect(session.answer == nil)
+    #expect(session.message == "Could not read the saved library. Try again.")
+    #expect(await model.calls == 0)
+}
+
 private actor RevisionRetriever: AnswerRetrieving {
     private var revision = 0
     func evidenceRevision() -> String { String(revision) }

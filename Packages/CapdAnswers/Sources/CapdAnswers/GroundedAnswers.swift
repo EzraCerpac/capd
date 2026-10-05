@@ -26,6 +26,7 @@ public enum AnswerAvailability: Sendable, Equatable {
 public enum AnswerError: Error, LocalizedError, Equatable {
     case unavailable(AnswerAvailability.Reason)
     case emptyQuestion, questionTooLong
+    case libraryUpgradeRequired
     case insufficientEvidence, contextTooLarge, contentRejected, generationFailed, evidenceChanged
 
     public var errorDescription: String? {
@@ -33,6 +34,7 @@ public enum AnswerError: Error, LocalizedError, Equatable {
         case .unavailable(let reason): reason.explanation
         case .emptyQuestion: "Type a question first."
         case .questionTooLong: "Keep the question to 500 characters or fewer."
+        case .libraryUpgradeRequired: "Open this library in the app before asking a question."
         case .insufficientEvidence:
             "There is not enough matching saved text to answer. Try a specific topic, title, or phrase."
         case .contextTooLarge:
