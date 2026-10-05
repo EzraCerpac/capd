@@ -192,7 +192,7 @@ extension Store {
         id: Int64,
         tags: [String],
         taxonomy: Taxonomy,
-        now: Date = Date(), inputFingerprint: String? = nil
+        now: Date = Date(), inputFingerprint: String? = nil, expectedCapture: Capture? = nil
     ) throws -> Bool {
         try write { db in
             let before = try Capture.fetchOne(db, key: id)
@@ -200,6 +200,12 @@ extension Store {
                 guard let before else { return false }
                 if let inputFingerprint, inputFingerprint != TaggingFingerprint.of(before) {
                     return false
+                }
+                if let expectedCapture {
+                    guard before.tagsVersion == 0,
+                        before.tagsVersion == expectedCapture.tagsVersion,
+                        before.tags == expectedCapture.tags
+                    else { return false }
                 }
             }
             try db.execute(

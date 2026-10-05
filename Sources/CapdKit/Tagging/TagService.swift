@@ -77,7 +77,7 @@ public struct TagService: Sendable {
             taxonomy.updatedAt = now
             if try store.completeTagging(
                 id: id, tags: accepted, taxonomy: taxonomy, now: now,
-                inputFingerprint: TaggingFingerprint.of(capture))
+                inputFingerprint: TaggingFingerprint.of(capture), expectedCapture: capture)
             {
                 processed += 1
             } else {

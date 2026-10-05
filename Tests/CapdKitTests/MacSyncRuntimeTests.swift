@@ -8,6 +8,72 @@ import Testing
 
 @Suite("Synthetic Mac runtime")
 struct MacSyncRuntimeTests {
+    @Test func taggingCompletionCannotReplaceRemoteProcessingOfUnchangedInput() async throws {
+        let f = try RuntimeFixture()
+        defer { f.clean() }
+        let device = UUID()
+        var remote = SharedCapture(source: CaptureSource(kind: .text, contentHash: "tagging-race"))
+        remote.generated.taggingProcessed = false
+        try f.server.apply(
+            SyncOperation(
+                deviceID: device, sequence: 1, captureID: remote.id, baseRevision: 0,
+                mutation: .create(remote)))
+        let session = try await f.activate()
+        #expect(await session.runtime!.sync().phase == .idle)
+        let candidate = try #require(try session.store.untaggedCaptures(limit: 1).first)
+        let tagger = RuntimeHeldTagger()
+        let tagging = Task {
+            try await TagService(store: session.store, tagger: tagger).tagNext(batch: 1)
+        }
+        await tagger.waitForStart()
+        let fingerprint = TaggingFingerprint.of(candidate)
+        try f.server.apply(
+            SyncOperation(
+                deviceID: device, sequence: 2, captureID: remote.id, baseRevision: 1,
+                mutation: .edit(
+                    CaptureEdit(
+                        generatedPatch: GeneratedContentPatch(
+                            tags: ["remote"],
+                            taggingProcessing: .processed(inputFingerprint: fingerprint))))))
+        #expect(await session.runtime!.sync().phase == .idle)
+        let taxonomy = try session.store.taxonomy()
+        let outboxBefore = try await outbox(session.store)
+        await tagger.release()
+        #expect(try await tagging.value == 0)
+        let current = try #require(try await session.store.reader.read { try Capture.fetchOne($0) })
+        #expect(current.tagList == ["remote"])
+        #expect(try session.store.taxonomy() == taxonomy)
+        #expect(try await outbox(session.store) == outboxBefore)
+        #expect(try session.store.syncClient?.pendingOperations().isEmpty == true)
+    }
+
+    @Test(arguments: [false, true])
+    func joiningWaiterCancellationPreservesOwnerFlight(timed: Bool) async throws {
+        let f = try RuntimeFixture()
+        defer { f.clean() }
+        let session = try await f.activate()
+        _ = try CaptureService(store: session.store).ingest(
+            CaptureRequest(text: "Shared sync flight"))
+        let before = try await outbox(session.store)
+        await f.wire.setFault(.gated)
+        let owner = Task { await session.runtime!.sync() }
+        try await f.wire.waitForRequest()
+        let joined = Task {
+            if timed { return await session.runtime!.sync(within: .milliseconds(25)) }
+            return await session.runtime!.sync()
+        }
+        if !timed { joined.cancel() }
+        let joinedStatus = await joined.value
+        #expect(joinedStatus.phase == (timed ? .attention : .paused))
+        #expect(try await outbox(session.store) == before)
+        #expect(await f.wire.cancelledRequests == 0)
+        await f.wire.releaseGate()
+        #expect(await owner.value.phase == .idle)
+        #expect(try session.store.syncClient?.pendingOperations().isEmpty == true)
+        #expect(try f.server.baseline().captures.count == 1)
+        #expect(await f.wire.applies == 1)
+    }
+
     @Test func optionalExistingLoopbackProxyPersistsWithoutChangingEnrollment() async throws {
         let f = try RuntimeFixture()
         defer { f.clean() }
@@ -645,12 +711,14 @@ private struct RuntimeAuthorizer: SyncAuthorizer {
 }
 
 private actor RuntimeWire: AsyncSyncTransport {
-    enum Fault { case none, offline, hold, lostApply, missingProcessing }
+    enum Fault { case none, offline, hold, gated, lostApply, missingProcessing }
     nonisolated let binding: SyncLibraryBinding
     nonisolated let deviceID: UUID
     let handler: SyncHTTPHandler
     var fault: Fault = .none
     var requests = 0
+    var cancelledRequests = 0
+    private let requestGate = RuntimeRequestGate()
     var applies = 0
     var applyBodies: [Data] = []
     var wholeBaselines = 0
@@ -659,6 +727,10 @@ private actor RuntimeWire: AsyncSyncTransport {
         self.binding = binding
         self.deviceID = deviceID
         self.handler = handler
+    }
+    func releaseGate() async {
+        fault = .none
+        await requestGate.release()
     }
     func setFault(_ fault: Fault) {
         self.fault = fault
@@ -671,6 +743,12 @@ private actor RuntimeWire: AsyncSyncTransport {
         requests += 1
         if fault == .offline { throw SyncError.transportDisconnected }
         if fault == .hold { try await Task.sleep(for: .seconds(30)) }
+        if fault == .gated {
+            do { try await requestGate.wait() } catch {
+                cancelledRequests += 1
+                throw error
+            }
+        }
         let reply = handler.handle(request)
         let envelope = try JSONDecoder().decode(SyncHTTPEnvelope.self, from: request.body)
         if case .baseline = envelope.action { wholeBaselines += 1 }
@@ -723,5 +801,54 @@ private struct RuntimeTagger: Tagger {
     }
     func reviseTaxonomy(_ usage: [TagUsage]) async throws -> TaxonomyRevision {
         TaxonomyRevision(keep: usage.map(\.tag), merges: [:])
+    }
+}
+
+private actor RuntimeRequestGate {
+    private let events: AsyncStream<Void>
+    private let continuation: AsyncStream<Void>.Continuation
+    init() { (events, continuation) = AsyncStream.makeStream() }
+    func wait() async throws {
+        var iterator = events.makeAsyncIterator()
+        _ = await iterator.next()
+        try Task.checkCancellation()
+    }
+    func release() {
+        continuation.yield(())
+        continuation.finish()
+    }
+}
+
+private actor RuntimeHeldTagger: Tagger {
+    private let started: AsyncStream<Void>
+    private let startedContinuation: AsyncStream<Void>.Continuation
+    private let releaseEvents: AsyncStream<Void>
+    private let releaseContinuation: AsyncStream<Void>.Continuation
+    init() {
+        (started, startedContinuation) = AsyncStream.makeStream()
+        (releaseEvents, releaseContinuation) = AsyncStream.makeStream()
+    }
+    nonisolated func availability() -> TaggerAvailability { .available }
+    func assignTags(_ input: TaggingInput, taxonomy: [String], mayInventNew: Bool) async throws
+        -> [String]
+    {
+        startedContinuation.yield(())
+        var iterator = releaseEvents.makeAsyncIterator()
+        _ = await iterator.next()
+        return ["stale"]
+    }
+    func waitForStart() async {
+        var iterator = started.makeAsyncIterator()
+        _ = await iterator.next()
+    }
+    func release() {
+        releaseContinuation.yield(())
+        releaseContinuation.finish()
+    }
+    func planTaxonomy(_ samples: [TaggingInput], existing: [String]) async throws -> [String] {
+        existing
+    }
+    func reviseTaxonomy(_ usage: [TagUsage]) async throws -> TaxonomyRevision {
+        TaxonomyRevision(keep: [], merges: [:])
     }
 }

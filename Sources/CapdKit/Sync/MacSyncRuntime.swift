@@ -1,5 +1,6 @@
 import CapdSync
 import Foundation
+import Synchronization
 
 public struct MacNoteConflict: Codable, Equatable, Sendable, Identifiable {
     public let id: UUID
@@ -27,7 +28,12 @@ public actor MacSyncRuntime {
     private let configuration: MacSyncConfiguration
     private let transport: any AsyncSyncTransport
     private let credential: @Sendable () throws -> String
-    private var flight: (id: UUID, task: Task<MacSyncStatus, Never>)?
+    private struct Flight: Sendable {
+        let id: UUID
+        let task: Task<MacSyncStatus, Never>
+        let waiters: MacSyncWaiters
+    }
+    private var flight: Flight?
     private var polling: Task<Void, Never>?
     private var phase: MacSyncStatus.Phase = .idle
     private var issue: String?
@@ -51,8 +57,13 @@ public actor MacSyncRuntime {
 
     @discardableResult
     public func sync() async -> MacSyncStatus {
-        if let flight { return await wait(flight.task) }
+        let waiterID = UUID()
+        if let flight {
+            flight.waiters.register(waiterID)
+            return await wait(flight, waiterID: waiterID)
+        }
         let id = UUID()
+        let waiters = MacSyncWaiters(owner: waiterID)
         let store = store
         let configuration = configuration
         let transport = transport
@@ -94,14 +105,14 @@ public actor MacSyncRuntime {
                     issue: Self.message(error))
             }
         }
-        flight = (id, task)
-        let result = await wait(task)
-        if flight?.id == id {
-            flight = nil
-            phase = result.phase
-            issue = result.issue
+        let running = Flight(id: id, task: task, waiters: waiters)
+        flight = running
+        Task.detached { [weak self] in
+            let result = await task.value
+            waiters.complete(result)
+            await self?.finish(id: id, result: result)
         }
-        return result
+        return await wait(running, waiterID: waiterID)
     }
 
     public func start(interval: Duration = .seconds(5)) {
@@ -131,25 +142,47 @@ public actor MacSyncRuntime {
             return result
         }
         if let completed { return completed }
-        phase = .attention
-        issue = "Sync timed out. Saved changes remain queued."
-        return status()
+        let timeoutIssue = "Sync timed out. Saved changes remain queued."
+        if flight == nil {
+            phase = .attention
+            issue = timeoutIssue
+        }
+        return Self.snapshot(store: store, phase: .attention, issue: timeoutIssue)
     }
 
     public func stop() async {
         polling?.cancel()
         polling = nil
-        let running = flight?.task
-        running?.cancel()
-        _ = await running?.value
-        phase = .paused
+        let running = flight
+        running?.task.cancel()
+        _ = await running?.task.value
+        if flight == nil || flight?.id == running?.id {
+            flight = nil
+            phase = .paused
+        }
     }
 
-    private func wait(_ task: Task<MacSyncStatus, Never>) async -> MacSyncStatus {
-        await withTaskCancellationHandler {
-            await task.value
-        } onCancel: {
-            task.cancel()
+    private func finish(id: UUID, result: MacSyncStatus) {
+        guard flight?.id == id else { return }
+        flight = nil
+        phase = result.phase
+        issue = result.issue
+    }
+
+    private func wait(_ running: Flight, waiterID: UUID) async -> MacSyncStatus {
+        switch await running.waiters.wait(waiterID, task: running.task) {
+        case .completed(let result):
+            finish(id: running.id, result: result)
+            return result
+        case .cancelled(let exclusive):
+            if exclusive {
+                let result = await running.task.value
+                finish(id: running.id, result: result)
+                return result
+            }
+            return Self.snapshot(
+                store: store, phase: .paused,
+                issue: "Sync was cancelled. Saved changes remain queued.")
         }
     }
 
@@ -188,5 +221,87 @@ public actor MacSyncRuntime {
                 ?? "Sync needs attention. Saved changes remain queued."
         }
         return "Sync could not finish. Saved changes remain queued."
+    }
+}
+
+private final class MacSyncWaiters: Sendable {
+    enum Outcome: Sendable {
+        case completed(MacSyncStatus)
+        case cancelled(exclusive: Bool)
+    }
+    private enum Waiter: Sendable {
+        case waiting(CheckedContinuation<Outcome, Never>?)
+        case cancelled(exclusive: Bool)
+    }
+    private struct State: Sendable {
+        var result: MacSyncStatus?
+        var waiters: [UUID: Waiter] = [:]
+    }
+    private let owner: UUID
+    private let state: Mutex<State>
+
+    init(owner: UUID) {
+        self.owner = owner
+        state = Mutex(State(waiters: [owner: .waiting(nil)]))
+    }
+
+    func register(_ id: UUID) {
+        state.withLock { $0.waiters[id] = .waiting(nil) }
+    }
+
+    func wait(_ id: UUID, task: Task<MacSyncStatus, Never>) async -> Outcome {
+        await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                let outcome = state.withLock { state -> Outcome? in
+                    if case .cancelled(let exclusive)? = state.waiters[id] {
+                        state.waiters.removeValue(forKey: id)
+                        return .cancelled(exclusive: exclusive)
+                    }
+                    if let result = state.result {
+                        state.waiters.removeValue(forKey: id)
+                        return .completed(result)
+                    }
+                    state.waiters[id] = .waiting(continuation)
+                    return nil
+                }
+                if let outcome { continuation.resume(returning: outcome) }
+            }
+        } onCancel: {
+            let cancelled = state.withLock {
+                state -> (CheckedContinuation<Outcome, Never>?, Bool) in
+                guard state.result == nil, case .waiting(let continuation)? = state.waiters[id]
+                else {
+                    return (nil, false)
+                }
+                let waitingCount = state.waiters.values.reduce(0) { count, waiter in
+                    if case .waiting = waiter { return count + 1 }
+                    return count
+                }
+                let exclusive = id == owner && waitingCount == 1
+                if continuation != nil {
+                    state.waiters.removeValue(forKey: id)
+                } else {
+                    state.waiters[id] = .cancelled(exclusive: exclusive)
+                }
+                return (continuation, exclusive)
+            }
+            if cancelled.1 { task.cancel() }
+            cancelled.0?.resume(returning: .cancelled(exclusive: cancelled.1))
+        }
+    }
+
+    func complete(_ result: MacSyncStatus) {
+        let continuations = state.withLock { state in
+            state.result = result
+            var continuations: [CheckedContinuation<Outcome, Never>] = []
+            for (id, waiter) in state.waiters {
+                if case .waiting(let continuation) = waiter, let continuation {
+                    continuations.append(continuation)
+                    state.waiters.removeValue(forKey: id)
+                }
+            }
+            return continuations
+        }
+        for continuation in continuations { continuation.resume(returning: .completed(result)) }
     }
 }

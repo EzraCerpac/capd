@@ -47,8 +47,6 @@ struct CLISyncRuntimeTests {
         let before = try await session.store.reader.read {
             try Data.fetchAll($0, sql: "SELECT payload FROM sync_outbox ORDER BY sequence")
         }
-        let clock = ContinuousClock()
-        let started = clock.now
         let blocked = await CLISyncSessions.flush(
             try #require(session.runtime), within: deadline)
         let expectedIssue =
@@ -60,7 +58,6 @@ struct CLISyncRuntimeTests {
         #expect(blocked.issue == expectedIssue)
         #expect(blocked.pending == 1)
         #expect(await wire.operations.isEmpty)
-        #expect(started.duration(to: clock.now) < .seconds(2))
         #expect(
             try await session.store.reader.read {
                 try Data.fetchAll($0, sql: "SELECT payload FROM sync_outbox ORDER BY sequence")

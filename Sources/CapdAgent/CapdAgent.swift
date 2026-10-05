@@ -67,7 +67,7 @@ struct CapdAgent {
 
             Task {
                 var taggingRetry = TagRetryPolicy()
-                await session.runtime?.start(interval: pollInterval)
+                await startSync(session.runtime)
                 await sweep(
                     enrichment: enrichment,
                     olderThan: session.runtime == nil ? nil : EnrichmentService.staleClaimAge)
@@ -98,6 +98,11 @@ struct CapdAgent {
             logger.error("capd-agent failed to start: \(reason, privacy: .public)")
             exit(EXIT_FAILURE)
         }
+    }
+
+    static func startSync(_ runtime: MacSyncRuntime?) async {
+        _ = await runtime?.sync()
+        await runtime?.start(interval: pollInterval)
     }
 
     private static func tag(with tagging: TagService) async throws {
