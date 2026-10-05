@@ -559,6 +559,120 @@ struct ClientResponseValidationTests {
         #expect(try f.client.captures() == before)
     }
 
+    @Test(arguments: [false, true], [false, true])
+    func baselineMustRetainAcceptedRevisions(omitted: Bool, tombstone: Bool) throws {
+        let f = try ResponseFixture()
+        defer { f.clean() }
+        let original = f.capture("baseline dominance")
+        try f.client.enqueue(captureID: original.id, mutation: .create(original))
+        let created = try #require(f.client.push(to: f.server).first?.capture)
+        try f.client.enqueue(captureID: original.id, mutation: .edit(CaptureEdit(rating: 5)))
+        try f.client.push(to: f.server)
+        if tombstone {
+            try f.client.enqueue(captureID: original.id, mutation: .delete)
+            try f.client.push(to: f.server)
+        }
+        let queued = f.capture("observed pending create")
+        let create = try f.client.enqueue(captureID: queued.id, mutation: .create(queued))
+        _ = try f.server.apply(create)
+        try f.client.pull(from: f.server)
+        try f.client.enqueue(
+            captureID: queued.id, mutation: .edit(CaptureEdit(note: NoteEdit("Queued"))))
+        let authority = try f.server.baseline()
+        let blob = try f.server.blobs.put(Data("baseline asset".utf8))
+        var asset = SharedCapture(source: CaptureSource(kind: .image, blob: blob))
+        asset.revision = authority.cursor + 1
+        let captures =
+            [asset] + authority.captures.filter { $0.id != original.id }
+            + (omitted ? [] : [created])
+        let baseline = Baseline(
+            cursor: asset.revision, captures: captures, deviceSequences: authority.deviceSequences)
+        let before = try f.durableState()
+        let files = try FileManager.default.contentsOfDirectory(
+            atPath: f.client.blobs.directory.path)
+        let probe = DownloadProbe()
+        #expect(throws: SyncError.invalidCursor) {
+            try f.client.pull(
+                from: ResponseTransport(
+                    server: f.server, snapshot: baseline, onDownload: { probe.record() }))
+        }
+        #expect(try f.durableState() == before)
+        #expect(probe.count == 0)
+        #expect(
+            try FileManager.default.contentsOfDirectory(atPath: f.client.blobs.directory.path)
+                == files)
+        try f.client.push(to: f.server)
+        #expect(try f.client.pendingOperations().isEmpty)
+        #expect(try f.client.captures().first(where: { $0.id == queued.id })?.note == "Queued")
+    }
+
+    @Test func baselineDominanceIsRecheckedAfterAssetDownload() throws {
+        let f = try ResponseFixture()
+        defer { f.clean() }
+        let original = f.capture("baseline download race")
+        try f.client.enqueue(captureID: original.id, mutation: .create(original))
+        try f.client.push(to: f.server)
+        try f.client.pull(from: f.server)
+        let historical = try f.server.baseline()
+        let blob = try f.server.blobs.put(Data("racing baseline asset".utf8))
+        var asset = SharedCapture(source: CaptureSource(kind: .image, blob: blob))
+        asset.revision = historical.cursor + 1
+        let baseline = Baseline(
+            cursor: asset.revision, captures: historical.captures + [asset],
+            deviceSequences: historical.deviceSequences)
+        let client = f.client
+        let server = f.server
+        let probe = DownloadProbe()
+        #expect(throws: SyncError.invalidCursor) {
+            try client.pull(
+                from: ResponseTransport(
+                    server: server, snapshot: baseline,
+                    onDownload: {
+                        probe.record()
+                        try! client.enqueue(
+                            captureID: original.id, mutation: .edit(CaptureEdit(rating: 5)))
+                        try! client.push(to: server)
+                    }))
+        }
+        let accepted = try #require(server.baseline().captures.first)
+        #expect(probe.count == 1)
+        #expect(try client.cursor() == historical.cursor)
+        #expect(try f.writer.read { try SyncDatabase.records($0) } == [accepted])
+        #expect(try client.captures() == [accepted])
+        #expect(try client.pendingOperations().isEmpty)
+        #expect(try f.observedIDs().isEmpty)
+        #expect(try f.writer.read { try SyncDatabase.canonical($0, asset.id) } == asset.id)
+    }
+
+    @Test(arguments: [false, true])
+    func baselinePreservesAcknowledgementsAheadOfCursor(omitted: Bool) throws {
+        let f = try ResponseFixture()
+        defer { f.clean() }
+        let original = f.capture("acknowledgement ahead")
+        try f.client.enqueue(captureID: original.id, mutation: .create(original))
+        try f.client.push(to: f.server)
+        try f.client.pull(from: f.server)
+        let historical = try f.server.baseline()
+        try f.client.enqueue(captureID: original.id, mutation: .edit(CaptureEdit(rating: 5)))
+        let accepted = try #require(f.client.push(to: f.server).first?.capture)
+        try f.client.enqueue(
+            captureID: original.id, mutation: .edit(CaptureEdit(note: NoteEdit("Queued"))))
+        let unsent = f.capture("pending only")
+        try f.client.enqueue(captureID: unsent.id, mutation: .create(unsent))
+        let visible = try f.client.captures()
+        let pending = try f.client.pendingOperations()
+        let baseline = Baseline(
+            cursor: historical.cursor, captures: omitted ? [] : historical.captures,
+            deviceSequences: historical.deviceSequences)
+        try f.client.pull(from: ResponseTransport(server: f.server, snapshot: baseline))
+        #expect(try f.writer.read { try SyncDatabase.record($0, id: original.id) } == accepted)
+        #expect(try f.client.captures() == visible)
+        #expect(try f.client.pendingOperations() == pending)
+        #expect(try f.client.cursor() == historical.cursor)
+        try f.client.push(to: f.server)
+        #expect(try f.client.pendingOperations().isEmpty)
+    }
+
     @Test(arguments: [-1, 3])
     func baselineRevisionMustBeWithinSnapshot(revision: Int64) throws {
         let f = try ResponseFixture()
@@ -942,6 +1056,19 @@ private struct ResponseFixture {
     }
 
     func clean() { try? FileManager.default.removeItem(at: root) }
+
+    func durableState() throws -> [String: [Row]] {
+        try writer.read { db in
+            var state: [String: [Row]] = [:]
+            for table in [
+                "sync_meta", "sync_records", "sync_visible", "sync_outbox", "sync_aliases",
+                "sync_observed", "sync_receipts", "sync_rejections",
+            ] {
+                state[table] = try Row.fetchAll(db, sql: "SELECT * FROM \(table) ORDER BY rowid")
+            }
+            return state
+        }
+    }
 
     func observedIDs() throws -> Set<String> {
         try writer.read { try String.fetchSet($0, sql: "SELECT id FROM sync_observed") }

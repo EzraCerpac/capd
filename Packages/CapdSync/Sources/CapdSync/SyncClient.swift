@@ -529,10 +529,7 @@ public final class SyncClient: Sendable {
         try write { db in
             guard try Int64.fetchOne(db, sql: "SELECT cursor FROM sync_meta") == oldCursor
             else { throw SyncError.invalidCursor }
-            for record in baseline.captures {
-                try SyncDatabase.validateHistorical(record)
-                try validateIdentity(record, replacing: SyncDatabase.record(db, id: record.id))
-            }
+            try validateBaselineRecords(baseline, in: db)
             let acceptedSequence = baseline.deviceSequences[deviceID] ?? 0
             try pruneHistory(db)
             let observed = try String.fetchSet(db, sql: "SELECT id FROM sync_observed")
@@ -561,10 +558,27 @@ public final class SyncClient: Sendable {
             Set(baseline.captures.map(\.id)).count == baseline.captures.count,
             baseline.captures.allSatisfy({ $0.revision >= 0 && $0.revision <= baseline.cursor })
         else { throw SyncError.invalidCursor }
-        try read { db in
-            for record in baseline.captures {
-                try SyncDatabase.validateHistorical(record)
-                try validateIdentity(record, replacing: SyncDatabase.record(db, id: record.id))
+        try read { try validateBaselineRecords(baseline, in: $0) }
+    }
+
+    private func validateBaselineRecords(_ baseline: Baseline, in db: Database) throws {
+        for record in baseline.captures {
+            try SyncDatabase.validateHistorical(record)
+            try validateIdentity(record, replacing: SyncDatabase.record(db, id: record.id))
+        }
+        let revisions = Dictionary(
+            uniqueKeysWithValues: baseline.captures.map { ($0.id.uuidString, $0.revision) })
+        let rows = try Row.fetchCursor(
+            db,
+            sql: """
+                SELECT id, json_extract(CAST(payload AS TEXT), '$.revision') AS revision
+                FROM sync_records WHERE revision <= ?
+                """, arguments: [baseline.cursor])
+        while let row = try rows.next() {
+            let id: String = row["id"]
+            let revision: Int64 = row["revision"]
+            guard let incoming = revisions[id], incoming >= revision else {
+                throw SyncError.invalidCursor
             }
         }
     }
