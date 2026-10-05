@@ -41,7 +41,9 @@ text, retaining passages found by later queries for the same capture. Title-only
 matches retain a prose fallback. Tags alone are not evidence.
 
 The service deduplicates captures, chooses at most six sources, and limits each
-excerpt to 1,000 characters and total excerpts to 5,000. Structured answers must
+excerpt to 1,000 UTF-8 bytes and total excerpts to 5,000 bytes, including passage
+separators. These limits cover excerpts rather than the full prompt or model tokens.
+Structured answers must
 cite supplied source numbers and quote text present in the corresponding excerpt.
 Unsupported citations or insufficient evidence produce a clear failure message.
 Quote membership does not establish semantic entailment; the UI presents the
