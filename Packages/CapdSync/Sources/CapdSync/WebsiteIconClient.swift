@@ -252,12 +252,14 @@ extension SyncClient {
     func cacheWebsiteIcon(_ record: WebsiteIconRecord?, fetch: (BlobReference) throws -> Data)
         throws
     {
+        try Task.checkCancellation()
         guard let content = record?.content else { return }
         if let bytes = try? blobs.read(content.blob) {
             try WebsiteIconPNG.validate(bytes)
             return
         }
         let bytes = try fetch(content.blob)
+        try Task.checkCancellation()
         guard BlobReference(data: bytes) == content.blob else { throw SyncError.invalidBlob }
         try WebsiteIconPNG.validate(bytes)
         _ = try blobs.put(bytes)
@@ -272,23 +274,28 @@ extension SyncClient {
 
     public func pushWebsiteIcons(to transport: any WebsiteIconSyncTransport) throws {
         try checkWebsiteIconTransport(transport)
+        try Task.checkCancellation()
         try transport.checkWebsiteIconCapability()
         for operation in try pendingWebsiteIconOperations() {
+            try Task.checkCancellation()
             if case .upsert(let content) = operation.mutation {
                 let bytes = try blobs.read(content.blob)
                 try WebsiteIconPNG.validate(bytes)
                 for offset in stride(
                     from: 0, to: bytes.count, by: SyncHTTPHandler.maximumChunkBytes)
                 {
+                    try Task.checkCancellation()
                     let end = min(bytes.count, offset + SyncHTTPHandler.maximumChunkBytes)
                     try transport.uploadWebsiteIcon(
                         content.blob, offset: offset, chunk: bytes.subdata(in: offset..<end),
                         final: end == bytes.count)
                 }
             }
+            try Task.checkCancellation()
             let receipt = try transport.applyWebsiteIcon(operation)
             try validateWebsiteIconReceiptBeforeCaching(receipt, operation: operation)
             try cacheWebsiteIcon(receipt.record, fetch: transport.downloadWebsiteIcon)
+            try Task.checkCancellation()
             try acknowledgeWebsiteIcon(receipt, operation: operation)
         }
     }
@@ -435,6 +442,7 @@ extension SyncClient {
         throws
     {
         try checkWebsiteIconTransport(transport)
+        try Task.checkCancellation()
         try transport.checkWebsiteIconCapability()
         do {
             do {
@@ -444,6 +452,7 @@ extension SyncClient {
                 for change in page.changes {
                     try cacheWebsiteIcon(change.record, fetch: transport.downloadWebsiteIcon)
                 }
+                try Task.checkCancellation()
                 try commitWebsiteIconPage(page, cursor: cursor)
 
             }
@@ -453,6 +462,7 @@ extension SyncClient {
             for record in baseline.records {
                 try cacheWebsiteIcon(record, fetch: transport.downloadWebsiteIcon)
             }
+            try Task.checkCancellation()
             try commitWebsiteIconBaseline(baseline)
         }
     }

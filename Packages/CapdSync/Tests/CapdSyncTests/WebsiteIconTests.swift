@@ -652,6 +652,85 @@ struct WebsiteIconTests {
         #expect(try f.server.websiteIconBaseline().records == [replacement])
     }
 
+    @Test func synchronousCanceledDownloadPreservesCursorOutboxAndAssets() async throws {
+        let f = try IconFixture()
+        defer { f.clean() }
+        let a = try f.client("a", device: f.a)
+        let b = try f.client("b", device: f.b)
+        let capture = f.capture()
+        try a.enqueue(captureID: capture.id, mutation: .create(capture))
+        try a.push(to: f.transport(f.a))
+        let blob = try a.blobs.put(iconPNG)
+        try a.enqueueWebsiteIcon(
+            origin: f.origin, mutation: .upsert(WebsiteIconContent(blob: blob)))
+        try a.pushWebsiteIcons(to: f.transport(f.a))
+        let pending = try b.enqueueWebsiteIcon(
+            origin: WebsiteIconOrigin(url: "https://pending.capd.dev")!, mutation: .tombstone)
+        let before = try b.websiteIcons(includeDeleted: true)
+        let epoch = try b.websiteIconRevision()
+        let canceled = SyncHTTPTransport(
+            binding: f.binding, deviceID: f.b, credential: { f.b.uuidString },
+            execute: { request in
+                let action = try SyncDatabase.decode(SyncHTTPEnvelope.self, request.body).action
+                let response = f.handler(f.b).handle(request)
+                if case .downloadWebsiteIcon = action { withUnsafeCurrentTask { $0?.cancel() } }
+                return response
+            })
+        let task = Task.detached { try b.pullWebsiteIcons(from: canceled) }
+        await #expect(throws: CancellationError.self) { try await task.value }
+        #expect(try b.websiteIconCursor() == 0)
+        #expect(try b.websiteIcons(includeDeleted: true) == before)
+        #expect(try b.pendingWebsiteIconOperations() == [pending])
+        #expect(try b.websiteIconRevision() == epoch)
+        #expect(throws: SyncError.blobMissing) { try b.blobs.read(blob) }
+        try b.pullWebsiteIcons(from: f.transport(f.b))
+        #expect(try b.websiteIconCursor() == 1)
+        #expect(try b.blobs.read(blob) == iconPNG)
+        #expect(try b.pendingWebsiteIconOperations() == [pending])
+    }
+
+    @Test func synchronousCanceledReceiptRetainsExactRetryAndCanceledStartMakesNoRequests()
+        async throws
+    {
+        let f = try IconFixture()
+        defer { f.clean() }
+        let a = try f.client("a", device: f.a)
+        let capture = f.capture()
+        try a.enqueue(captureID: capture.id, mutation: .create(capture))
+        try a.push(to: f.transport(f.a))
+        let blob = try a.blobs.put(iconPNG)
+        let pending = try a.enqueueWebsiteIcon(
+            origin: f.origin, mutation: .upsert(WebsiteIconContent(blob: blob)))
+        let canceled = SyncHTTPTransport(
+            binding: f.binding, deviceID: f.a, credential: { f.a.uuidString },
+            execute: { request in
+                let action = try SyncDatabase.decode(SyncHTTPEnvelope.self, request.body).action
+                let response = f.handler(f.a).handle(request)
+                if case .applyWebsiteIcon = action { withUnsafeCurrentTask { $0?.cancel() } }
+                return response
+            })
+        let receipt = Task.detached { try a.pushWebsiteIcons(to: canceled) }
+        await #expect(throws: CancellationError.self) { try await receipt.value }
+        #expect(try a.pendingWebsiteIconOperations() == [pending])
+        #expect(try a.blobs.read(blob) == iconPNG)
+        try a.pushWebsiteIcons(to: f.transport(f.a))
+        #expect(try a.pendingWebsiteIconOperations().isEmpty)
+        #expect(try f.server.websiteIconBaseline().deviceSequences[f.a] == pending.sequence)
+        let calls = IconCounter()
+        let counted = SyncHTTPTransport(
+            binding: f.binding, deviceID: f.a, credential: { f.a.uuidString },
+            execute: { request in
+                calls.increment()
+                return f.handler(f.a).handle(request)
+            })
+        let initial = Task.detached {
+            withUnsafeCurrentTask { $0?.cancel() }
+            try a.pushWebsiteIcons(to: counted)
+        }
+        await #expect(throws: CancellationError.self) { try await initial.value }
+        #expect(calls.value == 0)
+    }
+
 }
 
 private let iconPNG = Data(
