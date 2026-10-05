@@ -19,8 +19,16 @@ MARKER = ".capd-synthetic-fixture"
 MARKER_BYTES = b"synthetic-capd-library-v1\n"
 FORMAT = "capd-synthetic-backup-v1"
 MAXIMUM_SHARED_FRAME_BYTES = 16_777_216
-# Reserve more than the shared single-record envelopes and counter/date encoding growth.
-MAXIMUM_IMPORTED_CAPTURE_BYTES = MAXIMUM_SHARED_FRAME_BYTES - 65_536
+# Leave room for fields outside the capture records in a shared frame.
+IMPORTED_FRAME_ENVELOPE_RESERVE_BYTES = 65_536
+# revision, noteRevision, seenCount, and the longer JSON spelling of `false`.
+IMPORTED_CAPTURE_COUNTER_GROWTH_BYTES = 2 * (19 - 1) + (19 - 1) + 1
+MAXIMUM_IMPORTED_CAPTURE_BYTES = (
+    MAXIMUM_SHARED_FRAME_BYTES - IMPORTED_FRAME_ENVELOPE_RESERVE_BYTES
+)
+MAXIMUM_IMPORTED_BASELINE_BYTES = (
+    MAXIMUM_SHARED_FRAME_BYTES - IMPORTED_FRAME_ENVELOPE_RESERVE_BYTES
+)
 
 
 class PreparationError(Exception):
@@ -354,11 +362,14 @@ def _validate_imported_capture(record):
             raise PreparationError("shared tags must be arrays of strings")
     # ASCII JSON bounds Swift string encoding after accounting for its escaped slashes.
     # This deliberately refuses a small margin of otherwise admissible shared records.
-    if len(encode(record).replace(b"/", b"\\/")) > MAXIMUM_IMPORTED_CAPTURE_BYTES:
+    encoded = encode(record)
+    encoded_size = len(encoded) + encoded.count(b"/")
+    if encoded_size > MAXIMUM_IMPORTED_CAPTURE_BYTES:
         raise PreparationError("capture exceeds the shared response budget")
+    return encoded_size
 
 
-def imported_capture(identity, payload, import_id):
+def _imported_capture(identity, payload, import_id):
     row = payload["legacyRow"]
     seen_count = row["seen_count"]
     rating = row.get("rating", 3)
@@ -402,8 +413,11 @@ def imported_capture(identity, payload, import_id):
     record["metadata"] = metadata
     if row.get("note") is not None:
         record["note"] = row["note"]
-    _validate_imported_capture(record)
-    return record
+    return record, _validate_imported_capture(record)
+
+
+def imported_capture(identity, payload, import_id):
+    return _imported_capture(identity, payload, import_id)[0]
 
 
 def import_initial_mac(archive, authority, binding, import_id, authority_database="server.sqlite", failure=None,
@@ -436,6 +450,7 @@ def _import_initial_mac(archive, manifest, authority, binding, import_id, author
         if not snapshots or {row[0] for row in snapshots} != capture_ids:
             raise PreparationError("a complete nonempty legacy backfill is required")
         records = []
+        baseline_bytes = 2
         legacy.row_factory = sqlite3.Row
         for local_id, identity, payload in snapshots:
             if identities.get(local_id) != identity:
@@ -445,10 +460,21 @@ def _import_initial_mac(archive, manifest, authority, binding, import_id, author
             row = {key: sql_value(current[key]) for key in current.keys()}
             if decoded != legacy_snapshot(row, source):
                 raise PreparationError("legacy backfill differs from archived source")
-            record = imported_capture(identity, decoded, import_id)
+            record, encoded_size = _imported_capture(identity, decoded, import_id)
+            baseline_bytes += encoded_size + IMPORTED_CAPTURE_COUNTER_GROWTH_BYTES
+            if records:
+                baseline_bytes += 1
+            if baseline_bytes > MAXIMUM_IMPORTED_BASELINE_BYTES:
+                raise PreparationError("baseline exceeds the shared response budget")
             records.append((local_id, identity, payload, decoded, record))
-        hashes = [row[4]["source"].get("contentHash") for row in records if row[4]["source"].get("contentHash") is not None]
-        if len(set(hashes)) != len(hashes):
+        fingerprints = []
+        for row in records:
+            content_hash = row[4]["source"].get("contentHash")
+            if content_hash is not None:
+                fingerprints.append(
+                    (row[4]["source"]["kind"], unicodedata.normalize("NFC", content_hash))
+                )
+        if len(set(fingerprints)) != len(fingerprints):
             raise PreparationError("duplicate legacy content fingerprints require reconciliation")
     created = []
     with contextlib.closing(connect(authority / authority_database)) as db:
