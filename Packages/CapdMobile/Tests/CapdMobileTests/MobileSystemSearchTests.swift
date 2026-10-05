@@ -60,7 +60,7 @@ private struct DiscoveryFixture: Sendable {
             var item = MobileCapture(id: extra, kind: .text, title: "Extra")
             try item.insert(db)
             try db.execute(
-                sql: "UPDATE mobile_captures SET manualTags='invalid retained JSON' WHERE id=?",
+                sql: "UPDATE mobile_captures SET manualTags='[1]' WHERE id=?",
                 arguments: [extra.uuidString])
         }
         let rejected = try f.session.store.systemSearchDiscoverySnapshot()
@@ -69,6 +69,21 @@ private struct DiscoveryFixture: Sendable {
         try await f.writer.write { db in
             try db.execute(
                 sql: "DELETE FROM mobile_captures WHERE id=?", arguments: [extra.uuidString])
+            try db.execute(
+                sql: "UPDATE mobile_captures SET manualTags='[1]' WHERE id=?",
+                arguments: [original.capture.id.uuidString])
+        }
+        let retainedCount = try await f.writer.read { db in
+            try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM mobile_captures")
+        }
+        #expect(retainedCount == 1000)
+        #expect(throws: DecodingError.self) {
+            try f.session.store.systemSearchDiscoverySnapshot()
+        }
+        try await f.writer.write { db in
+            try db.execute(
+                sql: "UPDATE mobile_captures SET manualTags='[]' WHERE id=?",
+                arguments: [original.capture.id.uuidString])
         }
         try f.session.store.delete(id: original.capture.id)
         let deleted = try f.session.store.systemSearchDiscoverySnapshot()
