@@ -4,7 +4,7 @@ import GRDB
 /// A single-library authority. HTTP access requires an immutable libraryID.
 public final class SyncServer: SyncTransport, Sendable {
     public enum NoteResolutionError: Error { case capacity, unavailable, stale }
-    private let writer: any DatabaseWriter
+    let writer: any DatabaseWriter
     private let binding: SyncLibraryBinding?
     public let blobs: BlobStore
     public let libraryID: UUID?
@@ -46,14 +46,14 @@ public final class SyncServer: SyncTransport, Sendable {
         blobs = try BlobStore(directory: blobDirectory, binding: binding)
     }
 
-    private func read<T>(_ body: (Database) throws -> T) throws -> T {
+    func read<T>(_ body: (Database) throws -> T) throws -> T {
         try writer.read { db in
             try SyncDatabase.checkBinding(db, binding)
             return try body(db)
         }
     }
 
-    private func write<T>(_ body: (Database) throws -> T) throws -> T {
+    func write<T>(_ body: (Database) throws -> T) throws -> T {
         try writer.write { db in
             try SyncDatabase.checkBinding(db, binding)
             return try body(db)

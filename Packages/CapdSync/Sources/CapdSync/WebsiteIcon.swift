@@ -174,15 +174,18 @@ public struct WebsiteIconFeedPage: Codable, Equatable, Sendable {
 
 public struct WebsiteIconBaseline: Codable, Equatable, Sendable {
     public let cursor: Int64
+    public let captureCursor: Int64
     public let records: [WebsiteIconRecord]
     public let deviceSequences: [UUID: Int64]
     public let totalIconCount: Int
 
     public init(
-        cursor: Int64, records: [WebsiteIconRecord], deviceSequences: [UUID: Int64],
+        cursor: Int64, captureCursor: Int64 = 0, records: [WebsiteIconRecord],
+        deviceSequences: [UUID: Int64],
         totalIconCount: Int? = nil
     ) {
         self.cursor = cursor
+        self.captureCursor = captureCursor
         self.records = records
         self.deviceSequences = deviceSequences
         self.totalIconCount = totalIconCount ?? records.count
@@ -198,4 +201,6 @@ public protocol WebsiteIconSyncTransport: BoundSyncTransport {
     func websiteIconChanges(after cursor: Int64, limit: Int) throws -> WebsiteIconFeedPage
     func websiteIconBaseline() throws -> WebsiteIconBaseline
     func checkWebsiteIconCapability() throws
+    func uploadWebsiteIcon(_ blob: BlobReference, offset: Int, chunk: Data, final: Bool) throws
+    func downloadWebsiteIcon(_ blob: BlobReference) throws -> Data
 }

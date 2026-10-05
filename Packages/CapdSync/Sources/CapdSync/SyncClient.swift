@@ -11,9 +11,9 @@ public final class SyncClient: Sendable {
     public let binding: SyncLibraryBinding?
     public let deviceID: UUID
     public let blobs: BlobStore
-    private let writer: any DatabaseWriter
-    private let writerIdentity: ObjectIdentifier
-    private let projectionGate = ProjectionGate()
+    let writer: any DatabaseWriter
+    let writerIdentity: ObjectIdentifier
+    let projectionGate = ProjectionGate()
     private let project: Projection
 
     public convenience init(
@@ -68,14 +68,14 @@ public final class SyncClient: Sendable {
         try write(pruneHistory)
     }
 
-    private func read<T>(_ body: (Database) throws -> T) throws -> T {
+    func read<T>(_ body: (Database) throws -> T) throws -> T {
         try writer.read { db in
             try SyncDatabase.checkBinding(db, binding)
             return try body(db)
         }
     }
 
-    private func write<T>(_ body: (Database) throws -> T) throws -> T {
+    func write<T>(_ body: (Database) throws -> T) throws -> T {
         try writer.write { db in
             try SyncDatabase.checkBinding(db, binding)
             return try body(db)
@@ -276,7 +276,9 @@ public final class SyncClient: Sendable {
         try read { db in
             ContentSnapshotImport(
                 snapshotID: snapshotID, targetBinding: targetBinding, sourceDeviceID: deviceID,
-                captures: try SyncDatabase.records(db, table: "sync_visible"))
+                captures: try SyncDatabase.records(db, table: "sync_visible"),
+                websiteIcons: try WebsiteIconDatabase.exists(db)
+                    ? Self.exportWebsiteIcons(in: db, includeDeleted: true) : nil)
         }
     }
 
@@ -1059,7 +1061,7 @@ public enum SyncTransactionError: Error, Equatable, Sendable {
     case wrongWriter, requiresTransaction, projectionFeedback
 }
 
-private final class ProjectionGate: @unchecked Sendable {
+final class ProjectionGate: @unchecked Sendable {
     private let lock = NSLock()
     private var activeThread: ObjectIdentifier?
 
