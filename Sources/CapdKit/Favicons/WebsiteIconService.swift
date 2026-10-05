@@ -8,6 +8,20 @@ public struct WebsiteIconService: Sendable {
     private let fetch: @Sendable (WebsiteIconOrigin) async throws -> WebsiteIconFetchOutcome
     private let now: @Sendable () -> Date
 
+    public init(store: Store) {
+        self.init(
+            store: store,
+            fetch: { origin in
+                do {
+                    return .normalizedPNG(try await PinnedWebsiteIconTransport().fetch(origin))
+                } catch WebsiteIconTransportError.status(let status)
+                    where status == 404 || status == 410
+                {
+                    return .missing
+                }
+            })
+    }
+
     public init(
         store: Store,
         fetch: @escaping @Sendable (WebsiteIconOrigin) async throws -> WebsiteIconFetchOutcome,
