@@ -292,72 +292,75 @@ private func removeAuxiliaryEvidence(_ db: Database) throws {
     try db.execute(sql: "DELETE FROM grdb_migrations WHERE identifier='mobile-answer-evidence-v5'")
 }
 
-#if MOBILE_AUXILIARY_EVIDENCE_UPGRADE
-    @Test(arguments: ["unchanged", "captureChanged", "otherMigration"])
-    func interruptedV4RecoverySurvivesOnlyAuxiliaryV5Upgrade(change: String) async throws {
-        let f = ConnectionRecoveryFixture()
-        defer { f.clean() }
-        _ = try MobileLibrarySession.open(root: f.root, role: .app, credentials: f.credentials)
-        let originalURL = f.root.appendingPathComponent("Library/captures.sqlite")
-        let db = try DatabaseQueue(path: originalURL.path)
-        try await db.write { try removeAuxiliaryEvidence($0) }
-        #expect(
-            try await db.read {
-                try Int.fetchOne(
-                    $0,
-                    sql:
-                        "SELECT COUNT(*) FROM grdb_migrations WHERE identifier='mobile-answer-evidence-v5'"
-                )
-            } == 0)
-        let old = try f.activation.prepare(endpoint: f.endpoint, binding: f.binding)
-        try await f.interrupt(old)
-        let journal = old.directory(in: f.root).appendingPathComponent("activation-credential.json")
-        let bytes = try Data(contentsOf: journal)
-        let oldDigest = try MobileLibraryActivation.stateDigest(db)
-        #expect(oldDigest == old.sourceStateDigest)
-        let upgraded = try MobileStore(url: originalURL)
-        #expect(
-            try await db.read {
-                try Int.fetchOne(
-                    $0,
-                    sql:
-                        "SELECT COUNT(*) FROM grdb_migrations WHERE identifier='mobile-answer-evidence-v5'"
-                )
-            } == 1)
-        #expect(try MobileLibraryActivation.stateDigest(db) == oldDigest)
-        #expect(try Data(contentsOf: journal) == bytes)
-        #expect(try f.activation.preparations() == [old])
-        #expect(try f.credentials.read(for: old.enrollment) == "synthetic-recovery-only")
-        if change == "captureChanged" {
-            try upgraded.save(CaptureInput.make(text: "Changed retained source", isLink: false))
-        } else if change == "otherMigration" {
-            try await db.write {
-                try $0.execute(
-                    sql:
-                        "INSERT INTO grdb_migrations(identifier) VALUES ('unrelated-future-migration')"
-                )
-            }
-        }
-        let server = try SyncServer(
-            databaseURL: f.root.appendingPathComponent("authority.sqlite"),
-            blobDirectory: f.root.appendingPathComponent("authority-assets"),
-            libraryID: f.binding.libraryID, serviceID: f.binding.serviceID)
-        let remote = RecoveryRemote(server, old.enrollment)
-        if change == "unchanged" {
-            let selected = try await f.activation.activate(
-                old, handoff: nil, credential: "", transport: remote)
-            #expect(selected.enrollment == old.enrollment)
-            #expect(try !f.activation.hasPendingCredentialRecovery(for: old))
-        } else {
-            await #expect(throws: MobileActivationError.stalePreparation) {
-                try await f.activation.activate(
-                    old, handoff: nil, credential: "", transport: remote)
-            }
-            #expect(try Data(contentsOf: journal) == bytes)
-            #expect(try f.activation.hasPendingCredentialRecovery(for: old))
-            #expect(try MobileLibraryAccess.selected(in: f.root) == .legacy)
-        }
-        #expect(try f.credentials.read(for: old.enrollment) == "synthetic-recovery-only")
+@Test(arguments: ["unchanged", "captureChanged", "otherMigration"])
+func interruptedV4RecoverySurvivesOnlyAuxiliaryV5Upgrade(change: String) async throws {
+    let f = ConnectionRecoveryFixture()
+    defer { f.clean() }
+    _ = try MobileLibrarySession.open(root: f.root, role: .app, credentials: f.credentials)
+    let originalURL = f.root.appendingPathComponent("Library/captures.sqlite")
+    let db = try DatabaseQueue(path: originalURL.path)
+    let expectedMigrationCount = try await db.read {
+        try Int.fetchOne(
+            $0,
+            sql:
+                "SELECT COUNT(*) FROM grdb_migrations WHERE identifier='mobile-answer-evidence-v5'")
     }
-
-#endif
+    try await db.write { try removeAuxiliaryEvidence($0) }
+    #expect(
+        try await db.read {
+            try Int.fetchOne(
+                $0,
+                sql:
+                    "SELECT COUNT(*) FROM grdb_migrations WHERE identifier='mobile-answer-evidence-v5'"
+            )
+        } == 0)
+    let old = try f.activation.prepare(endpoint: f.endpoint, binding: f.binding)
+    try await f.interrupt(old)
+    let journal = old.directory(in: f.root).appendingPathComponent("activation-credential.json")
+    let bytes = try Data(contentsOf: journal)
+    let oldDigest = try MobileLibraryActivation.stateDigest(db)
+    #expect(oldDigest == old.sourceStateDigest)
+    let upgraded = try MobileStore(url: originalURL)
+    #expect(
+        try await db.read {
+            try Int.fetchOne(
+                $0,
+                sql:
+                    "SELECT COUNT(*) FROM grdb_migrations WHERE identifier='mobile-answer-evidence-v5'"
+            )
+        } == expectedMigrationCount)
+    #expect(try MobileLibraryActivation.stateDigest(db) == oldDigest)
+    #expect(try Data(contentsOf: journal) == bytes)
+    #expect(try f.activation.preparations() == [old])
+    #expect(try f.credentials.read(for: old.enrollment) == "synthetic-recovery-only")
+    if change == "captureChanged" {
+        try upgraded.save(CaptureInput.make(text: "Changed retained source", isLink: false))
+    } else if change == "otherMigration" {
+        try await db.write {
+            try $0.execute(
+                sql:
+                    "INSERT INTO grdb_migrations(identifier) VALUES ('unrelated-future-migration')"
+            )
+        }
+    }
+    let server = try SyncServer(
+        databaseURL: f.root.appendingPathComponent("authority.sqlite"),
+        blobDirectory: f.root.appendingPathComponent("authority-assets"),
+        libraryID: f.binding.libraryID, serviceID: f.binding.serviceID)
+    let remote = RecoveryRemote(server, old.enrollment)
+    if change == "unchanged" {
+        let selected = try await f.activation.activate(
+            old, handoff: nil, credential: "", transport: remote)
+        #expect(selected.enrollment == old.enrollment)
+        #expect(try !f.activation.hasPendingCredentialRecovery(for: old))
+    } else {
+        await #expect(throws: MobileActivationError.stalePreparation) {
+            try await f.activation.activate(
+                old, handoff: nil, credential: "", transport: remote)
+        }
+        #expect(try Data(contentsOf: journal) == bytes)
+        #expect(try f.activation.hasPendingCredentialRecovery(for: old))
+        #expect(try MobileLibraryAccess.selected(in: f.root) == .legacy)
+    }
+    #expect(try f.credentials.read(for: old.enrollment) == "synthetic-recovery-only")
+}

@@ -180,7 +180,8 @@ struct MobileAnswerEvidenceRevisionTests {
         }
     }
 
-    @Test func legacyProjectionFailsClosedUntilWriterUpgradeWithoutChangingEvidenceOrOutbox()
+    @Test @MainActor
+    func legacyProjectionFailsClosedUntilWriterUpgradeWithoutChangingEvidenceOrOutbox()
         async throws
     {
         let fixture = EvidenceRevisionFixture()
@@ -207,9 +208,18 @@ struct MobileAnswerEvidenceRevisionTests {
         }
         let reader = try MobileAnswerRetrieval(databaseURL: fixture.url)
         let model = EvidenceRevisionModel()
-        await #expect(throws: MobileAnswerRetrievalError.libraryUpgradeRequired) {
+        await #expect(throws: AnswerError.libraryUpgradeRequired) {
             try await GroundedAnswerService(retriever: reader, model: model).answer("hiking")
         }
+        let session = AnswerSession(model: model, retriever: { reader })
+        session.question = "hiking"
+        session.ask()
+        for _ in 0..<200 where session.isAnswering {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        #expect(!session.isAnswering)
+        #expect(session.answer == nil)
+        #expect(session.message == "Open this library in the app before asking a question.")
         #expect(await model.callCount == 0)
         #expect(try store.pending() == pending)
         #expect(try store.capture(id: saved.id) == original)

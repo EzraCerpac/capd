@@ -132,32 +132,17 @@ protocol LibraryAnswerModel: Sendable {
     ) async throws -> LibraryAnswerDraft
 }
 
-private struct LibraryAnswerEvidenceSnapshot: Equatable {
-    let id: Int64?
-    let kind: CaptureKind
-    let title: String?
-    let url: String?
-    let host: String?
-    let note: String?
-    let selection: String?
-    let body: String?
-    let ocrText: String?
-    let includesTags: Bool
-    let tags: String?
+private struct LibraryAnswerEvidenceSnapshot {
+    let captureID: Int64
+    let prompt: LibraryAnswerPromptSource
+    let snippet: Snippet?
+    let limit: Int
+}
 
-    init(_ capture: Capture, includesTags: Bool) {
-        id = capture.id
-        kind = capture.kind
-        title = capture.title
-        url = capture.url
-        host = capture.host
-        note = capture.note
-        selection = capture.selection
-        body = capture.body
-        ocrText = capture.ocrText
-        self.includesTags = includesTags
-        tags = includesTags ? capture.tags : nil
-    }
+private struct LibraryAnswerEvidence {
+    let excerpt: String
+    let includedSnippet: String?
+    let partialSnippetEnd: Bool
 }
 
 /// Retrieves a small, relevant evidence set before asking Apple's on-device model to
@@ -200,10 +185,12 @@ public struct LibraryAnswerService: Sendable {
         var evidence: [LibraryAnswerEvidenceSnapshot] = []
         for hit in hits {
             guard let captureID = hit.capture.id, remaining > 0 else { continue }
-            let excerpt = Self.evidence(from: hit, limit: min(Self.excerptLimit, remaining))
+            let limit = min(Self.excerptLimit, remaining)
+            let excerpt = Self.evidence(
+                from: hit.capture, snippet: hit.snippet, limit: limit
+            ).excerpt
             guard !excerpt.isEmpty else { continue }
             remaining -= excerpt.count
-            evidence.append(.init(hit.capture, includesTags: !Self.snippetSupportedByProse(hit)))
 
             let number = sources.count + 1
             let title = Self.title(for: hit.capture)
@@ -217,8 +204,11 @@ public struct LibraryAnswerService: Sendable {
                     url: hit.capture.url,
                     host: hit.capture.host,
                     excerpt: excerpt))
-            prompts.append(
-                .init(number: number, title: title, location: location, excerpt: excerpt))
+            let prompt = LibraryAnswerPromptSource(
+                number: number, title: title, location: location, excerpt: excerpt)
+            prompts.append(prompt)
+            evidence.append(
+                .init(captureID: captureID, prompt: prompt, snippet: hit.snippet, limit: limit))
         }
         guard !sources.isEmpty else { throw LibraryAnswerError.noMatches }
 
@@ -244,17 +234,31 @@ public struct LibraryAnswerService: Sendable {
         try Task.checkCancellation()
         let current = try search.captures(ids: sources.map(\.captureID))
         try Task.checkCancellation()
-        guard current.count == evidence.count,
-            evidence.allSatisfy({ snapshot in
-                guard let capture = current.first(where: { $0.id == snapshot.id }) else {
-                    return false
-                }
-                return LibraryAnswerEvidenceSnapshot(capture, includesTags: snapshot.includesTags)
-                    == snapshot
-            })
-        else { throw LibraryAnswerError.evidenceChanged }
+        guard current.count == evidence.count else { throw LibraryAnswerError.evidenceChanged }
+        var validatedSources: [LibraryAnswer.Source] = []
+        for snapshot in evidence {
+            guard let capture = current.first(where: { $0.id == snapshot.captureID }) else {
+                throw LibraryAnswerError.evidenceChanged
+            }
+            let projected = Self.evidence(
+                from: capture, snippet: snapshot.snippet, limit: snapshot.limit)
+            let prompt = LibraryAnswerPromptSource(
+                number: snapshot.prompt.number, title: Self.title(for: capture),
+                location: capture.url ?? capture.host ?? "Capture #\(snapshot.captureID)",
+                excerpt: projected.excerpt)
+            guard prompt == snapshot.prompt,
+                Self.snippetSupported(
+                    projected.includedSnippet, by: capture,
+                    partialEnd: projected.partialSnippetEnd)
+            else { throw LibraryAnswerError.evidenceChanged }
+            validatedSources.append(
+                .init(
+                    number: prompt.number, captureID: snapshot.captureID, kind: capture.kind,
+                    title: prompt.title, url: capture.url, host: capture.host,
+                    excerpt: prompt.excerpt))
+        }
         try Task.checkCancellation()
-        return LibraryAnswer(question: question, passages: passages, sources: sources)
+        return LibraryAnswer(question: question, passages: passages, sources: validatedSources)
     }
 
     /// Natural-language questions contain connective words that make an all-token FTS query
@@ -333,38 +337,58 @@ public struct LibraryAnswerService: Sendable {
         "who", "why", "with",
     ]
 
-    private static func snippetSupportedByProse(_ hit: SearchHit) -> Bool {
-        guard let snippet = hit.snippet?.text, !snippet.isEmpty else { return true }
+    private static func snippetSupported(
+        _ snippet: String?, by capture: Capture, partialEnd: Bool
+    ) -> Bool {
+        guard let snippet, !snippet.isEmpty else { return true }
         let fragments = snippet.split(separator: "…").map {
             $0.trimmingCharacters(in: .whitespacesAndNewlines)
         }.filter { !$0.isEmpty }
-        guard !fragments.isEmpty else { return false }
+        guard !fragments.isEmpty else { return true }
         return [
-            hit.capture.title, hit.capture.host, hit.capture.note, hit.capture.selection,
-            hit.capture.body,
-            hit.capture.ocrText,
+            capture.title, capture.host, capture.note, capture.selection, capture.body,
+            capture.ocrText, capture.tags,
         ].compactMap { $0 }.contains { field in
-            let text = field
-            var start = text.startIndex
-            for fragment in fragments {
+            var start = field.startIndex
+            for (index, fragment) in fragments.enumerated() {
+                let words = fragment.split(whereSeparator: \.isWhitespace).map(String.init)
+                guard let first = words.first else { continue }
                 var found = false
-                while let range = text.range(of: fragment, range: start..<text.endIndex) {
+                while let range = field.range(of: first, range: start..<field.endIndex) {
                     start = range.upperBound
-                    let startsWord =
-                        fragment.first?.isLetter == true || fragment.first?.isNumber == true
-                    let endsWord =
-                        fragment.last?.isLetter == true || fragment.last?.isNumber == true
+                    var end = range.upperBound
                     let before =
-                        range.lowerBound > text.startIndex
-                        ? text[text.index(before: range.lowerBound)] : nil
-                    let after = range.upperBound < text.endIndex ? text[range.upperBound] : nil
-                    let startsMidWord =
-                        startsWord && before.map { $0.isLetter || $0.isNumber } == true
-                    let endsMidWord = endsWord && after.map { $0.isLetter || $0.isNumber } == true
-                    if !startsMidWord && !endsMidWord {
-                        found = true
-                        break
+                        range.lowerBound > field.startIndex
+                        ? field[field.index(before: range.lowerBound)] : nil
+                    if first.first.map({ $0.isLetter || $0.isNumber }) == true,
+                        before.map({ $0.isLetter || $0.isNumber }) == true
+                    {
+                        continue
                     }
+                    var matches = true
+                    for word in words.dropFirst() {
+                        let separator = end
+                        while end < field.endIndex, field[end].isWhitespace {
+                            field.formIndex(after: &end)
+                        }
+                        guard end > separator, field[end...].hasPrefix(word) else {
+                            matches = false
+                            break
+                        }
+                        end = field.index(end, offsetBy: word.count)
+                    }
+                    guard matches else { continue }
+                    let after = end < field.endIndex ? field[end] : nil
+                    let allowsPartialEnd = partialEnd && index == fragments.count - 1
+                    if !allowsPartialEnd,
+                        fragment.last.map({ $0.isLetter || $0.isNumber }) == true,
+                        after.map({ $0.isLetter || $0.isNumber }) == true
+                    {
+                        continue
+                    }
+                    start = end
+                    found = true
+                    break
                 }
                 guard found else { return false }
             }
@@ -372,24 +396,82 @@ public struct LibraryAnswerService: Sendable {
         }
     }
 
-    private static func evidence(from hit: SearchHit, limit: Int) -> String {
-        let capture = hit.capture
-        var parts: [String] = []
-        if let title = capture.title, !title.isEmpty { parts.append("Title: \(title)") }
-        if let url = capture.url, !url.isEmpty { parts.append("URL: \(url)") }
-        if let note = capture.note, !note.isEmpty { parts.append("Note: \(note)") }
-        if let selection = capture.selection, !selection.isEmpty {
-            parts.append("Selected text: \(selection)")
+    private static func evidence(
+        from capture: Capture, snippet: Snippet?, limit: Int
+    ) -> LibraryAnswerEvidence {
+        var excerpt = ""
+        var count = 0
+        var pendingSpace = false
+        var pendingCharacter = ""
+        var pendingSnippet = false
+        var includedSnippet: String?
+        var partialSnippetEnd = false
+
+        func emit(_ character: Character, isSnippet: Bool, next: Character?) {
+            guard count < limit else { return }
+            if character.isWhitespace {
+                pendingSpace = true
+                return
+            }
+            if pendingSpace, count > 0 {
+                excerpt.append(" ")
+                count += 1
+                if count == limit { return }
+                if isSnippet, includedSnippet?.isEmpty == false { includedSnippet?.append(" ") }
+            }
+            pendingSpace = false
+            excerpt.append(character)
+            count += 1
+            if isSnippet {
+                if includedSnippet == nil { includedSnippet = "" }
+                includedSnippet?.append(character)
+                partialSnippetEnd =
+                    count == limit
+                    && next.map { !$0.isWhitespace && $0 != "…" } == true
+            }
         }
-        if let snippet = hit.snippet?.text, !snippet.isEmpty {
-            parts.append("Relevant excerpt: \(snippet)")
+
+        func append(_ text: String, isSnippet: Bool = false) {
+            for character in text {
+                guard count < limit else { return }
+                if pendingCharacter.isEmpty {
+                    pendingCharacter = String(character)
+                    pendingSnippet = isSnippet
+                    continue
+                }
+                let combined = pendingCharacter + String(character)
+                if combined.count == 1 {
+                    pendingCharacter = combined
+                    pendingSnippet = pendingSnippet || isSnippet
+                } else {
+                    let first = combined.first!
+                    let last = combined.last!
+                    emit(first, isSnippet: pendingSnippet, next: last)
+                    pendingCharacter = String(last)
+                    pendingSnippet = isSnippet
+                }
+            }
         }
-        if let body = capture.body ?? capture.ocrText, !body.isEmpty {
-            parts.append("Content: \(body)")
+
+        func part(_ label: String, _ text: String?, isSnippet: Bool = false) {
+            guard count < limit, let text, !text.isEmpty else { return }
+            if !excerpt.isEmpty || !pendingCharacter.isEmpty { append("\n") }
+            append(label + ": ")
+            append(text, isSnippet: isSnippet)
         }
-        let collapsed = parts.joined(separator: "\n").split(whereSeparator: \.isWhitespace)
-            .joined(separator: " ")
-        return String(collapsed.prefix(limit))
+
+        part("Title", capture.title)
+        part("URL", capture.url)
+        part("Note", capture.note)
+        part("Selected text", capture.selection)
+        part("Relevant excerpt", snippet?.text, isSnippet: true)
+        part("Content", capture.body ?? capture.ocrText)
+        if let character = pendingCharacter.first {
+            emit(character, isSnippet: pendingSnippet, next: nil)
+        }
+        return .init(
+            excerpt: excerpt, includedSnippet: includedSnippet, partialSnippetEnd: partialSnippetEnd
+        )
     }
 
     private static func title(for capture: Capture) -> String {

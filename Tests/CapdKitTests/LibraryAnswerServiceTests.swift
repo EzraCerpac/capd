@@ -137,7 +137,7 @@ struct LibraryAnswerServiceTests {
                 ])
             }
             let service = LibraryAnswerService(search: SearchService(store: store), model: model)
-            if change == "unchanged" || change == "revision" {
+            if change == "unchanged" || change == "revision" || change == "kind" {
                 let answer = try await service.answer("hiking")
                 #expect(answer.sources.map(\.captureID).contains(id))
                 #expect(answer.sources.count == 2)
@@ -146,6 +146,155 @@ struct LibraryAnswerServiceTests {
                     try await service.answer("hiking")
                 }
             }
+        }
+    }
+
+    @Test(arguments: ["bodySuffix", "unusedOCR", "omittedSnippet", "bodyPrefix"])
+    func validatesOnlyBoundedPromptEvidence(change: String) async throws {
+        try await withAnswerStore { store in
+            let prefix =
+                "Hiking requires water. " + String(repeating: "Saved context. ", count: 180)
+            var capture = Capture(
+                kind: .text, title: "Hiking", body: prefix + "Original suffix.",
+                ocrText: "Unused OCR text.", createdAt: Date())
+            if change == "omittedSnippet" {
+                capture.title = "Gear notes"
+                capture.selection = String(repeating: "Saved context. ", count: 180)
+                capture.tags = "hiking"
+            }
+            let id = try insert(capture, into: store)
+            let observed = Mutex("")
+            let model = StubAnswerModel { _, sources in
+                let excerpt = sources[0].excerpt
+                observed.withLock { $0 = excerpt }
+                #expect(excerpt.count == LibraryAnswerService.excerptLimit)
+                #expect(!excerpt.contains("Original suffix"))
+                #expect(!excerpt.contains("Unused OCR"))
+                if change == "omittedSnippet" {
+                    #expect(!excerpt.contains("Relevant excerpt:"))
+                }
+                await Task.yield()
+                try await store.dbPool.write { db in
+                    switch change {
+                    case "bodySuffix":
+                        try db.execute(
+                            sql: "UPDATE captures SET body = ? WHERE id = ?",
+                            arguments: [prefix + "Changed suffix.", id])
+                    case "unusedOCR":
+                        try db.execute(
+                            sql:
+                                "UPDATE captures SET ocr_text = 'Changed unused OCR.' WHERE id = ?",
+                            arguments: [id])
+                    case "omittedSnippet":
+                        try db.execute(
+                            sql: "UPDATE captures SET tags = 'cycling' WHERE id = ?",
+                            arguments: [id])
+                    default:
+                        try db.execute(
+                            sql:
+                                "UPDATE captures SET body = 'Changed visible content.' WHERE id = ?",
+                            arguments: [id])
+                    }
+                }
+                return LibraryAnswerDraft(statements: [
+                    .init(text: "Saved context is available.", sourceNumbers: [1])
+                ])
+            }
+            let service = LibraryAnswerService(search: SearchService(store: store), model: model)
+            if change == "bodyPrefix" {
+                await #expect(throws: LibraryAnswerError.evidenceChanged) {
+                    try await service.answer("hiking")
+                }
+            } else {
+                let answer = try await service.answer("hiking")
+                #expect(answer.sources.first?.captureID == id)
+                #expect(answer.sources.first?.excerpt == observed.withLock { $0 })
+            }
+        }
+    }
+
+    @Test(arguments: ["combining", "zwj", "emoji", "separator"])
+    func boundedProjectionPreservesNormalizedGraphemes(shape: String) async throws {
+        try await withAnswerStore { store in
+            let start: String
+            switch shape {
+            case "combining": start = "  \u{301}text\n\t"
+            case "zwj": start = "\u{200D}👩‍👩‍👧‍👦 text\n\t"
+            case "emoji": start = "🇺🇸👩‍🚀 text\n\t"
+            default: start = "text "
+            }
+            _ = try insert(
+                Capture(
+                    kind: .text, title: "Hiking",
+                    selection: start
+                        + String(repeating: "water ", count: 400), createdAt: Date()), into: store)
+            let search = SearchService(store: store)
+            let retrieval = LibraryAnswerService(
+                search: search, model: StubAnswerModel { _, _ in .init(statements: []) })
+            let hit = try #require(retrieval.retrieve("hiking").first)
+            let reference = [
+                "Title: Hiking", "Selected text: " + (hit.capture.selection ?? ""),
+                "Relevant excerpt: " + (hit.snippet?.text ?? ""),
+            ].joined(separator: "\n").split(whereSeparator: \.isWhitespace).joined(separator: " ")
+            let expected = String(reference.prefix(LibraryAnswerService.excerptLimit))
+            let model = StubAnswerModel { _, sources in
+                #expect(sources[0].excerpt == expected)
+                #expect(sources[0].excerpt.count <= LibraryAnswerService.excerptLimit)
+                return .init(statements: [.init(text: "Bring water.", sourceNumbers: [1])])
+            }
+            _ = try await LibraryAnswerService(search: search, model: model).answer("hiking")
+        }
+    }
+
+    @Test(arguments: ["word", "label", "space"])
+    func croppedSnippetUsesOnlyIncludedEvidence(boundary: String) async throws {
+        try await withAnswerStore { store in
+            let prefix = "Title: Gear notes Selected text: "
+            let retained =
+                boundary == "label"
+                ? " Relevant ex"
+                : " Relevant excerpt: " + (boundary == "word" ? "hiki" : "hiking ")
+            var capture = Capture(
+                kind: .text, title: "Gear notes",
+                selection: String(
+                    repeating: "x",
+                    count: LibraryAnswerService.excerptLimit
+                        - prefix.count - retained.count), createdAt: Date())
+            capture.tags = "hiking backpack"
+            let id = try insert(capture, into: store)
+            let model = StubAnswerModel { _, sources in
+                #expect(sources[0].excerpt.hasSuffix(retained))
+                #expect(sources[0].excerpt.count == LibraryAnswerService.excerptLimit)
+                try await store.dbPool.write { db in
+                    try db.execute(
+                        sql: "UPDATE captures SET tags = ? WHERE id = ?",
+                        arguments: [boundary == "label" ? "cycling" : "hiking outdoors", id])
+                }
+                return .init(statements: [.init(text: "Saved gear notes.", sourceNumbers: [1])])
+            }
+            _ = try await LibraryAnswerService(
+                search: SearchService(store: store), model: model
+            ).answer("hiking")
+        }
+    }
+
+    @Test func tagSnippetAllowsUnrelatedTagAddition() async throws {
+        try await withAnswerStore { store in
+            var capture = Capture(kind: .text, title: "Gear notes", createdAt: Date())
+            capture.tags = "hiking"
+            let id = try insert(capture, into: store)
+            let model = StubAnswerModel { _, sources in
+                #expect(sources[0].excerpt.contains("Relevant excerpt: hiking"))
+                try await store.dbPool.write { db in
+                    try db.execute(
+                        sql: "UPDATE captures SET tags = 'outdoors hiking' WHERE id = ?",
+                        arguments: [id])
+                }
+                return .init(statements: [.init(text: "Hiking is saved here.", sourceNumbers: [1])])
+            }
+            _ = try await LibraryAnswerService(
+                search: SearchService(store: store), model: model
+            ).answer("hiking")
         }
     }
 

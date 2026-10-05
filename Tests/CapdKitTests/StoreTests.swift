@@ -323,8 +323,11 @@ struct StoreTests {
         try withTemporaryPaths { paths in
             let store = try Store(paths: paths)
             try store.dbPool.write { db in
+                let known = try Migrations.migrator.appliedMigrations(db)
+                var future = "future"
+                while known.contains(future) { future.append("-future") }
                 try db.execute(
-                    sql: "INSERT INTO grdb_migrations (identifier) VALUES ('006')")
+                    sql: "INSERT INTO grdb_migrations (identifier) VALUES (?)", arguments: [future])
             }
 
             #expect(throws: StoreError.databaseIsNewerThanApp) {

@@ -40,7 +40,7 @@ public actor MobileAnswerRetrieval: AnswerRetrieving {
                 let revision = try String.fetchOne(
                     db, sql: "SELECT revision FROM mobile_answer_evidence WHERE id=1")
             else {
-                throw MobileAnswerRetrievalError.libraryUpgradeRequired
+                throw AnswerError.libraryUpgradeRequired
             }
             return revision
         }
@@ -222,13 +222,5 @@ public actor MobileAnswerRetrieval: AnswerRetrieving {
             bytes += cost
         }
         return String(text[start..<end])
-    }
-}
-
-enum MobileAnswerRetrievalError: Error, LocalizedError, Equatable {
-    case libraryUpgradeRequired
-
-    var errorDescription: String? {
-        "Open this library in the app before asking a question."
     }
 }
