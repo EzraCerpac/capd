@@ -1,12 +1,387 @@
 import CapdSync
+import CryptoKit
 import Foundation
 import GRDB
+import Synchronization
 import Testing
 
 @testable import CapdKit
 
 @Suite("Opt-in Mac Store sync")
 struct StoreSyncTests {
+    @Test func largeNoteChainCrossesAcknowledgedPredecessor() throws {
+        try fixture { paths, binding, server in
+            let store = try Store(paths: paths, syncBinding: binding)
+            let client = try #require(store.syncClient)
+            let quarter = SyncHTTPHandler.maximumBodyBytes / 4
+            let record = SharedCapture(
+                source: CaptureSource(kind: .text, contentHash: "mixed-note-chain"), note: "a")
+            _ = try server.apply(
+                SyncOperation(
+                    deviceID: UUID(), sequence: 1, captureID: record.id, baseRevision: 0,
+                    mutation: .create(record)))
+            let principal = SyncPrincipal(
+                serviceID: binding.serviceID, libraryID: binding.libraryID,
+                deviceID: client.deviceID)
+            let handler = SyncHTTPHandler(
+                serviceID: binding.serviceID,
+                authorizer: StoreBudgetAuthorizer(principal: principal), server: { _ in server })
+            let wire = SyncHTTPTransport(
+                binding: binding, deviceID: client.deviceID, credential: { "synthetic-budget" },
+                execute: { handler.handle($0) })
+            try client.pull(from: wire)
+            let final = String(repeating: "c", count: quarter * 3)
+            let operations = try store.dbPool.write {
+                try client.enqueue(
+                    in: $0,
+                    edits: [
+                        (
+                            record.id,
+                            CaptureEdit(note: NoteEdit(String(repeating: "b", count: quarter)))
+                        ),
+                        (record.id, CaptureEdit(rating: 3)),
+                        (record.id, CaptureEdit(note: NoteEdit(final))),
+                    ])
+            }
+            #expect(throws: SyncError.transportDisconnected) {
+                try client.push(to: StorePartialPushTransport(base: wire))
+            }
+            let remaining = try client.pendingOperations()
+            #expect(remaining.map(\.id) == operations.dropFirst().map(\.id))
+            try client.enqueue(captureID: record.id, mutation: .edit(CaptureEdit(rating: 4)))
+            try client.push(to: wire)
+            #expect(try client.pendingOperations().count == 0)
+            let accepted = try #require(wire.baseline().captures.first)
+            #expect(
+                SHA256.hash(data: Data(accepted.note!.utf8)).description
+                    == SHA256.hash(data: Data(final.utf8)).description)
+            #expect(accepted.noteConflicts.isEmpty)
+            #expect(accepted.rating == 4)
+        }
+    }
+
+    @Test func largeSequentialNotesRemainSendable() throws {
+        try fixture { paths, binding, server in
+            let store = try Store(paths: paths, syncBinding: binding)
+            let client = try #require(store.syncClient)
+            let size = SyncHTTPHandler.maximumBodyBytes / 2
+            let record = SharedCapture(
+                source: CaptureSource(kind: .text, contentHash: "large-note-chain"),
+                note: String(repeating: "a", count: size))
+            _ = try server.apply(
+                SyncOperation(
+                    deviceID: UUID(), sequence: 1, captureID: record.id, baseRevision: 0,
+                    mutation: .create(record)))
+            let principal = SyncPrincipal(
+                serviceID: binding.serviceID, libraryID: binding.libraryID,
+                deviceID: client.deviceID)
+            let handler = SyncHTTPHandler(
+                serviceID: binding.serviceID,
+                authorizer: StoreBudgetAuthorizer(principal: principal), server: { _ in server })
+            let wire = SyncHTTPTransport(
+                binding: binding, deviceID: client.deviceID, credential: { "synthetic-budget" },
+                execute: { handler.handle($0) })
+            try client.pull(from: wire)
+            let final = String(repeating: "c", count: size)
+            let operations = try store.dbPool.write {
+                try client.enqueue(
+                    in: $0,
+                    edits: [
+                        (
+                            record.id,
+                            CaptureEdit(note: NoteEdit(String(repeating: "b", count: size)))
+                        ), (record.id, CaptureEdit(note: NoteEdit(final))),
+                    ])
+            }
+            #expect(operations.map(\.sequence) == [1, 2])
+            #expect(operations[1].predecessorID == operations[0].id)
+            try client.push(to: wire)
+            #expect(try client.pendingOperations().count == 0)
+            let accepted = try #require(wire.baseline().captures.first)
+            let digest = SHA256.hash(data: Data(accepted.note!.utf8)).description
+            #expect(digest == SHA256.hash(data: Data(final.utf8)).description)
+            #expect(accepted.noteConflicts.isEmpty)
+        }
+    }
+
+    @Test func acceptedDeviceKnowledgeRollsBackAndSurvivesRecoveryAndReopen() throws {
+        try fixture { paths, binding, server in
+            let store = try Store(paths: paths, syncBinding: binding)
+            let client = try #require(store.syncClient)
+            let peer = UUID()
+            let first = SharedCapture(
+                source: CaptureSource(kind: .text, contentHash: "observed-first"))
+            _ = try server.apply(
+                SyncOperation(
+                    deviceID: peer, sequence: 1, captureID: first.id, baseRevision: 0,
+                    mutation: .create(first)))
+            for sequence in 2...9 {
+                _ = try server.apply(
+                    SyncOperation(
+                        deviceID: peer, sequence: Int64(sequence), captureID: UUID(),
+                        baseRevision: 0, mutation: .edit(CaptureEdit(rating: 3))))
+            }
+            try server.expireFeed(through: 1)
+            let transport = StoreTestTransport(
+                server: server, binding: binding, deviceID: client.deviceID)
+            try client.pull(from: transport)
+            func known(_ store: Store) throws -> [UUID: Int64] {
+                try store.reader.read { db in
+                    Dictionary(
+                        uniqueKeysWithValues: try Row.fetchAll(
+                            db, sql: "SELECT id, sequence FROM sync_devices"
+                        ).map { (UUID(uuidString: $0["id"] as String)!, $0["sequence"] as Int64) })
+                }
+            }
+            #expect(try known(store) == [peer: 9])
+            let secondPeer = UUID()
+            let second = SharedCapture(
+                source: CaptureSource(kind: .text, contentHash: "observed-second"))
+            _ = try server.apply(
+                SyncOperation(
+                    deviceID: secondPeer, sequence: 1, captureID: second.id, baseRevision: 0,
+                    mutation: .create(second)))
+            try store.dbPool.write {
+                try $0.execute(
+                    sql:
+                        "CREATE TRIGGER abort_observed_projection BEFORE INSERT ON captures WHEN NEW.content_hash='observed-second' BEGIN SELECT RAISE(ABORT,'synthetic projection failure'); END"
+                )
+            }
+            #expect(throws: (any Error).self) { try client.pull(from: transport) }
+            #expect(try known(store) == [peer: 9])
+            #expect(try client.cursor() == 1)
+            #expect(try client.captures().count == 1)
+            try store.dbPool.write { try $0.execute(sql: "DROP TRIGGER abort_observed_projection") }
+            try client.pull(from: transport)
+            let baseline = try server.baseline()
+            #expect(try known(store) == [peer: 9, secondPeer: 1])
+            let ahead = SharedCapture(
+                source: CaptureSource(kind: .text, contentHash: "observed-ahead"))
+            try client.enqueue(captureID: ahead.id, mutation: .create(ahead))
+            try client.push(to: transport)
+            #expect(try known(store) == [peer: 9, secondPeer: 1, client.deviceID: 1])
+            let recovery = StoreSnapshotTransport(base: transport, snapshot: baseline)
+            try client.pull(from: recovery)
+            #expect(try client.captures().count == 3)
+            #expect(try known(store) == [peer: 9, secondPeer: 1, client.deviceID: 1])
+            let reopened = try Store(paths: paths, syncBinding: binding, deviceID: client.deviceID)
+            #expect(try known(reopened) == known(store))
+            let malformed = Baseline(
+                cursor: baseline.cursor, captures: baseline.captures,
+                deviceSequences: [peer: 1, secondPeer: -1])
+            #expect(throws: (any Error).self) {
+                try client.pull(from: StoreSnapshotTransport(base: transport, snapshot: malformed))
+            }
+            #expect(try known(store) == [peer: 9, secondPeer: 1, client.deviceID: 1])
+            #expect(try client.captures().count == 3)
+        }
+    }
+
+    @Test(arguments: ["intermediate", "conflict", "duplicate"])
+    func knownAuthorityReplyGrowthIsRejected(kind: String) throws {
+        try fixture { paths, binding, server in
+            let store = try Store(paths: paths, syncBinding: binding)
+            let client = try #require(store.syncClient)
+            let quarter = SyncHTTPHandler.maximumBodyBytes / 4
+            let original = String(
+                repeating: "a", count: kind == "intermediate" ? quarter * 2 : quarter)
+            let record = SharedCapture(
+                source: CaptureSource(kind: .text, contentHash: "known-authority-budget"),
+                note: original)
+            let peer = UUID()
+            _ = try server.apply(
+                SyncOperation(
+                    deviceID: peer, sequence: 1, captureID: record.id, baseRevision: 0,
+                    mutation: .create(record)))
+            if kind != "intermediate" {
+                _ = try server.apply(
+                    SyncOperation(
+                        deviceID: peer, sequence: 2, captureID: record.id, baseRevision: 0,
+                        mutation: .edit(
+                            CaptureEdit(note: NoteEdit(String(repeating: "b", count: quarter))))))
+            }
+            let transport = StoreTestTransport(
+                server: server, binding: binding, deviceID: client.deviceID)
+            try client.pull(from: transport)
+            if kind != "intermediate" {
+                try client.pull(from: transport)
+                #expect(try client.cursor() == 2)
+                #expect(try client.captures().first?.noteConflicts.count == 2)
+            }
+            let originalRecords = try client.captures()
+            let digest = SHA256.hash(data: try JSONEncoder().encode(originalRecords)).description
+            #expect(throws: SyncHTTPError.resourceLimit) {
+                if kind == "intermediate" {
+                    try store.dbPool.write { db in
+                        try client.enqueue(
+                            in: db,
+                            edits: [
+                                (
+                                    record.id,
+                                    CaptureEdit(
+                                        generatedPatch: GeneratedContentPatch(
+                                            body: .set(String(repeating: "x", count: quarter * 2))))
+                                ),
+                                (record.id, CaptureEdit(note: NoteEdit(nil))),
+                            ])
+                    }
+                } else if kind == "conflict" {
+                    try client.enqueue(
+                        captureID: record.id,
+                        mutation: .edit(
+                            CaptureEdit(
+                                note: NoteEdit(String(repeating: "c", count: quarter + quarter / 2))
+                            )))
+                } else {
+                    let incoming = SharedCapture(
+                        source: record.source,
+                        note: String(repeating: "c", count: quarter + quarter / 2))
+                    try client.enqueue(captureID: incoming.id, mutation: .create(incoming))
+                }
+            }
+            let queued = try client.pendingOperations()
+            let count = queued.count
+            #expect(count == 0)
+            #expect(
+                SHA256.hash(data: try JSONEncoder().encode(client.captures())).description == digest
+            )
+            if let operation = queued.first {
+                let principal = SyncPrincipal(
+                    serviceID: binding.serviceID, libraryID: binding.libraryID,
+                    deviceID: client.deviceID)
+                let handler = SyncHTTPHandler(
+                    serviceID: binding.serviceID,
+                    authorizer: StoreBudgetAuthorizer(principal: principal), server: { _ in server }
+                )
+                let body = try JSONEncoder().encode(
+                    SyncHTTPEnvelope(
+                        version: 4, expectedServiceID: binding.serviceID,
+                        expectedLibraryID: binding.libraryID, expectedDeviceID: client.deviceID,
+                        action: .apply(operation)))
+                let reply = try JSONDecoder().decode(
+                    SyncHTTPReply.self,
+                    from: handler.handle(
+                        SyncHTTPRequest(
+                            method: "POST", path: "/v1/sync",
+                            headers: [
+                                "Authorization": "Bearer synthetic-budget",
+                                "Content-Type": "application/json",
+                            ], body: body)
+                    ).body)
+                if case .failure(let error) = reply.result {
+                    #expect(error == .resourceLimit)
+                } else {
+                    Issue.record("Oversized known authority reply was accepted")
+                }
+            }
+        }
+    }
+
+    @Test(arguments: ["create", "edit", "generated", "batch"])
+    func oversizedLocalWritesCannotBlockOutbox(kind: String) throws {
+        try fixture { paths, binding, server in
+            let store = try Store(paths: paths, syncBinding: binding)
+            let client = try #require(store.syncClient)
+            let half = String(repeating: "x", count: SyncHTTPHandler.maximumBodyBytes / 2)
+            let capture = try store.upsertCapture(
+                Capture(
+                    kind: .link, url: "https://example.invalid/local-budget",
+                    note: kind == "generated" ? half : nil,
+                    body: kind == "generated" ? nil : half, contentHash: "local-budget",
+                    createdAt: Date(timeIntervalSince1970: 1_700_000_000))
+            ).capture
+            if kind == "generated" { _ = try store.claimForEnrichment(id: capture.id!) }
+            let companion = try CaptureService(store: store).ingest(
+                CaptureRequest(text: "Later safe change")
+            ).capture
+            let transport = StoreTestTransport(
+                server: server, binding: binding, deviceID: client.deviceID)
+            try client.push(to: transport)
+            try client.pull(from: transport)
+            let before = try store.reader.read { try Capture.fetchAll($0) }
+            let digest = SHA256.hash(data: try JSONEncoder().encode(before)).description
+            let sequence = try store.reader.read {
+                try Int64.fetchOne($0, sql: "SELECT sequence FROM sync_meta")
+            }
+            let files = try FileManager.default.contentsOfDirectory(
+                atPath: client.blobs.directory.path)
+            #expect(throws: SyncHTTPError.self) {
+                switch kind {
+                case "create":
+                    _ = try CaptureService(store: store).ingest(
+                        CaptureRequest(text: "Oversized create", note: half + half + "over"))
+                case "edit":
+                    _ = try store.updateNote(id: capture.id!, note: half)
+                case "generated":
+                    _ = try store.completeEnrichment(
+                        id: capture.id!,
+                        result: StepResult(
+                            bodyExtraction: BodyExtractionResult(
+                                body: half, status: .ok, source: .fetch)), state: .ok)
+                default:
+                    try store.dbPool.write { db in
+                        let ids = try [companion, capture].map {
+                            try StoreSync.identity(db, capture: $0)
+                        }
+                        try client.enqueue(
+                            in: db,
+                            edits: [
+                                (ids[0], CaptureEdit(note: NoteEdit("Partial batch"))),
+                                (ids[1], CaptureEdit(note: NoteEdit(half))),
+                            ])
+                    }
+                }
+            }
+            let queued = try client.pendingOperations()
+            let queuedCount = queued.count
+            #expect(queuedCount == 0)
+            if !queued.isEmpty {
+                let principal = SyncPrincipal(
+                    serviceID: binding.serviceID, libraryID: binding.libraryID,
+                    deviceID: client.deviceID)
+                let handler = SyncHTTPHandler(
+                    serviceID: binding.serviceID,
+                    authorizer: StoreBudgetAuthorizer(principal: principal), server: { _ in server }
+                )
+                var refused = false
+                for operation in queued {
+                    let body = try JSONEncoder().encode(
+                        SyncHTTPEnvelope(
+                            version: 4, expectedServiceID: binding.serviceID,
+                            expectedLibraryID: binding.libraryID, expectedDeviceID: client.deviceID,
+                            action: .apply(operation)))
+                    let response = handler.handle(
+                        SyncHTTPRequest(
+                            method: "POST", path: "/v1/sync",
+                            headers: [
+                                "Authorization": "Bearer synthetic-budget",
+                                "Content-Type": "application/json",
+                            ], body: body))
+                    let reply = try JSONDecoder().decode(SyncHTTPReply.self, from: response.body)
+                    if case .failure(let error) = reply.result {
+                        #expect(error == .requestTooLarge || error == .resourceLimit)
+                        refused = true
+                        break
+                    }
+                }
+                #expect(refused)
+            }
+            let after = try store.reader.read { try Capture.fetchAll($0) }
+            #expect(SHA256.hash(data: try JSONEncoder().encode(after)).description == digest)
+            #expect(
+                try store.reader.read {
+                    try Int64.fetchOne($0, sql: "SELECT sequence FROM sync_meta")
+                } == sequence)
+            #expect(
+                try FileManager.default.contentsOfDirectory(atPath: client.blobs.directory.path)
+                    == files)
+            _ = try store.updateNote(id: companion.id!, note: "Still sendable")
+            try client.push(to: transport)
+            #expect(try client.pendingOperations().isEmpty)
+            #expect(try server.baseline().captures.contains { $0.note == "Still sendable" })
+        }
+    }
+
     @Test("Bulk synchronized deletion rebuilds once and rolls back an incomplete batch")
     func bulkDeletionProjectsOnceAndRollsBack() throws {
         try fixture { paths, binding, server in
@@ -1000,4 +1375,51 @@ private struct StoreTestTransport: BoundSyncTransport {
         try server.upload(blob, offset: offset, chunk: chunk, final: final)
     }
     func download(_ blob: BlobReference) throws -> Data { try server.download(blob) }
+}
+
+private struct StoreBudgetAuthorizer: SyncAuthorizer {
+    let principal: SyncPrincipal
+    func authorize(bearerCredential: String) throws -> SyncPrincipal? {
+        bearerCredential == "synthetic-budget" ? principal : nil
+    }
+}
+
+private struct StoreSnapshotTransport: BoundSyncTransport {
+    let base: StoreTestTransport
+    let snapshot: Baseline
+    var binding: SyncLibraryBinding { base.binding }
+    var deviceID: UUID { base.deviceID }
+    func apply(_ operation: SyncOperation) throws -> SyncReceipt { try base.apply(operation) }
+    func changes(after cursor: Int64, limit: Int) throws -> FeedPage {
+        throw SyncError.cursorExpired
+    }
+    func baseline() throws -> Baseline { snapshot }
+    func upload(_ blob: BlobReference, offset: Int, chunk: Data, final: Bool) throws {
+        try base.upload(blob, offset: offset, chunk: chunk, final: final)
+    }
+    func download(_ blob: BlobReference) throws -> Data { try base.download(blob) }
+}
+
+private final class StorePartialPushTransport: BoundSyncTransport {
+    let base: SyncHTTPTransport
+    private let calls = Mutex(0)
+    init(base: SyncHTTPTransport) { self.base = base }
+    var binding: SyncLibraryBinding { base.binding }
+    var deviceID: UUID { base.deviceID }
+    func apply(_ operation: SyncOperation) throws -> SyncReceipt {
+        let count = calls.withLock {
+            $0 += 1
+            return $0
+        }
+        guard count == 1 else { throw SyncError.transportDisconnected }
+        return try base.apply(operation)
+    }
+    func changes(after cursor: Int64, limit: Int) throws -> FeedPage {
+        try base.changes(after: cursor, limit: limit)
+    }
+    func baseline() throws -> Baseline { try base.baseline() }
+    func upload(_ blob: BlobReference, offset: Int, chunk: Data, final: Bool) throws {
+        try base.upload(blob, offset: offset, chunk: chunk, final: final)
+    }
+    func download(_ blob: BlobReference) throws -> Data { try base.download(blob) }
 }

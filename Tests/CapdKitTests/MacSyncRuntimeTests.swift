@@ -64,6 +64,7 @@ struct MacSyncRuntimeTests {
         }
         if !timed { joined.cancel() }
         let joinedStatus = await joined.value
+        #expect(!joinedStatus.pullSucceeded)
         #expect(joinedStatus.phase == (timed ? .attention : .paused))
         #expect(try await outbox(session.store) == before)
         #expect(await f.wire.cancelledRequests == 0)
@@ -153,6 +154,7 @@ struct MacSyncRuntimeTests {
         let status = await session.runtime!.sync()
         #expect(status.phase == .attention)
         #expect(status.rejected == 0)
+        #expect(status.pullSucceeded)
         #expect(status.issue?.contains("Conflicting notes") == true)
         let conflict = try #require(status.noteConflicts.first)
         #expect(conflict.title == "Note conflict")
@@ -165,6 +167,7 @@ struct MacSyncRuntimeTests {
         #expect(try reopened.store.noteConflicts() == status.noteConflicts)
         await f.wire.setFault(.offline)
         let offline = await session.runtime!.sync()
+        #expect(!offline.pullSucceeded)
         #expect(offline.phase == .attention)
         #expect(offline.noteConflicts == status.noteConflicts)
         await f.wire.setFault(.none)
@@ -484,6 +487,7 @@ struct MacSyncRuntimeTests {
         await f.wire.setFault(.hold)
         let timed = await session.runtime!.sync(within: .milliseconds(50))
         #expect(timed.phase == .attention)
+        #expect(!timed.pullSucceeded)
         #expect(timed.issue?.contains("timed out") == true)
         #expect(try await outbox(session.store) == bytes)
         await f.wire.setFault(.none)
@@ -499,6 +503,7 @@ struct MacSyncRuntimeTests {
         let rejected = await session.runtime!.sync()
         #expect(rejected.phase == .attention)
         #expect(rejected.rejected == 1)
+        #expect(rejected.pullSucceeded)
         #expect(rejected.issue?.contains("rejected") == true)
         #expect(try session.store.syncClient?.rejectedWork().count == 1)
     }

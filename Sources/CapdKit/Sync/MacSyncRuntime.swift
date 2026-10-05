@@ -19,6 +19,8 @@ public struct MacSyncStatus: Codable, Equatable, Sendable {
     public var cursor: Int64
     public var noteConflicts: [MacNoteConflict] = []
     public var issue: String?
+    /// True only when this returned sync cycle successfully drained the remote feed.
+    public var pullSucceeded = false
     public static let localOnly = MacSyncStatus(
         phase: .unconfigured, pending: 0, rejected: 0, cursor: 0)
 }
@@ -94,7 +96,7 @@ public actor MacSyncRuntime {
                     if try client.cursor() == cursor { break }
                 }
                 try Task.checkCancellation()
-                return Self.snapshot(store: store, phase: .idle)
+                return Self.snapshot(store: store, phase: .idle, pullSucceeded: true)
             } catch is CancellationError {
                 return Self.snapshot(
                     store: store, phase: .paused,
@@ -186,7 +188,9 @@ public actor MacSyncRuntime {
         }
     }
 
-    static func snapshot(store: Store, phase: MacSyncStatus.Phase, issue: String? = nil)
+    static func snapshot(
+        store: Store, phase: MacSyncStatus.Phase, issue: String? = nil, pullSucceeded: Bool = false
+    )
         -> MacSyncStatus
     {
         guard let client = store.syncClient else {
@@ -196,7 +200,7 @@ public actor MacSyncRuntime {
             let pending = try client.pendingOperations().count
             let rejected = try client.rejectedWork().count
             let conflicts = try store.noteConflicts()
-            return MacSyncStatus(
+            var result = MacSyncStatus(
                 phase: !conflicts.isEmpty || (phase == .idle && rejected > 0) ? .attention : phase,
                 pending: pending, rejected: rejected, cursor: try client.cursor(),
                 noteConflicts: conflicts,
@@ -204,6 +208,8 @@ public actor MacSyncRuntime {
                     ?? (!conflicts.isEmpty ? "Conflicting notes need review." : nil)
                     ?? (rejected > 0 ? "Some saved changes were rejected and need attention." : nil)
             )
+            result.pullSucceeded = pullSucceeded
+            return result
         } catch {
             return MacSyncStatus(
                 phase: .attention, pending: 0, rejected: 0, cursor: 0,

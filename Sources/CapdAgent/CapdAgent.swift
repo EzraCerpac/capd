@@ -104,7 +104,7 @@ struct CapdAgent {
         guard let runtime else { return true }
         while !Task.isCancelled {
             let result = await runtime.sync()
-            if result.phase == .idle {
+            if result.pullSucceeded {
                 await runtime.start(interval: pollInterval)
                 return true
             }

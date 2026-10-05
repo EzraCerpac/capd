@@ -10,6 +10,85 @@ import Testing
 
 @Suite("EnrichmentQueue")
 struct EnrichmentQueueTests {
+    @Test(arguments: ["conflict", "rejected"])
+    func successfulAttentionPullAllowsStartupWork(attention: String) async throws {
+        try await withTemporaryPaths { paths in
+            let binding = SyncLibraryBinding(libraryID: UUID(), serviceID: UUID())
+            let device = UUID()
+            let remote = UUID()
+            let server = try SyncServer(
+                databaseURL: paths.root.appendingPathComponent("authority.sqlite"),
+                blobDirectory: paths.root.appendingPathComponent("authority-blobs"),
+                libraryID: binding.libraryID, serviceID: binding.serviceID)
+            let record = SharedCapture(
+                source: CaptureSource(
+                    kind: .link, contentHash: "attention-startup",
+                    url: "https://example.invalid/attention"), note: "Original")
+            _ = try server.apply(
+                SyncOperation(
+                    deviceID: remote, sequence: 1, captureID: record.id, baseRevision: 0,
+                    mutation: .create(record)))
+            if attention == "conflict" {
+                _ = try server.apply(
+                    SyncOperation(
+                        deviceID: remote, sequence: 2, captureID: record.id, baseRevision: 1,
+                        mutation: .edit(CaptureEdit(note: NoteEdit("First variant")))))
+                _ = try server.apply(
+                    SyncOperation(
+                        deviceID: UUID(), sequence: 1, captureID: record.id, baseRevision: 1,
+                        mutation: .edit(CaptureEdit(note: NoteEdit("Second variant")))))
+            }
+            let enrollment = try SyncEnrollment(
+                endpoint: URL(string: "https://sync.example.invalid/v1/sync")!, binding: binding,
+                deviceID: device)
+            let credentials = MemorySyncCredentialStore()
+            try credentials.save("synthetic-agent-credential", for: enrollment)
+            let wire = StartupWire(
+                binding: binding, deviceID: device,
+                handler: SyncHTTPHandler(
+                    serviceID: binding.serviceID,
+                    authorizer: StartupAuthorizer(
+                        principal: SyncPrincipal(
+                            serviceID: binding.serviceID, libraryID: binding.libraryID,
+                            deviceID: device)), server: { _ in server }))
+            let session = try await MacLibrarySession.activate(
+                paths: paths, configuration: MacSyncConfiguration(enrollment: enrollment),
+                credentials: credentials, transport: wire)
+            let runtime = try #require(session.runtime)
+            if attention == "rejected" {
+                try session.store.syncClient?.enqueue(
+                    captureID: UUID(),
+                    mutation: .edit(CaptureEdit(note: NoteEdit("Missing capture"))))
+            }
+            await wire.holdPull(after: 2)
+            let startup = Task { await CapdAgent.startSync(runtime, retryDelay: .zero) }
+            await wire.waitForPull()
+            let waitingStatus = await runtime.status()
+            #expect(waitingStatus.phase == .attention || waitingStatus.phase == .syncing)
+            startup.cancel()
+            let ready = await startup.value
+            #expect(ready)
+            await wire.releasePull()
+            let status = await runtime.sync()
+            #expect(status.pullSucceeded)
+            await runtime.stop()
+            let enrichment = EnrichmentService(
+                store: session.store, steps: [StartupStep(wire: wire)])
+            #expect(try enrichment.pendingCount() == 1)
+            if ready {
+                await EnrichmentQueue(enrichment: enrichment, isOnMainsPower: { false }).drain()
+            }
+            #expect(await wire.enrichments == 1)
+            #expect(try enrichment.pendingCount() == 0)
+            #expect(status.phase == .attention)
+            if attention == "conflict" {
+                #expect(status.noteConflicts.count == 1)
+            } else {
+                #expect(status.rejected == 1)
+            }
+        }
+    }
+
     @Test(
         "Agent startup pulls remote content before claiming local enrichment",
         arguments: ["none", "offline", "attention", "busy", "paused"])
@@ -265,6 +344,7 @@ private actor StartupWire: AsyncSyncTransport {
     nonisolated let deviceID: UUID
     let handler: SyncHTTPHandler
     private var holding = false
+    private var skipPulls = 0
     private var failure = "none"
     private let pulls: AsyncStream<Void>
     private let pullContinuation: AsyncStream<Void>.Continuation
@@ -278,7 +358,10 @@ private actor StartupWire: AsyncSyncTransport {
         (pulls, pullContinuation) = AsyncStream.makeStream()
         (releases, releaseContinuation) = AsyncStream.makeStream()
     }
-    func holdPull() { holding = true }
+    func holdPull(after count: Int = 0) {
+        holding = true
+        skipPulls = count
+    }
     func failNextPull(_ failure: String) { self.failure = failure }
     func waitForPull() async {
         var iterator = pulls.makeAsyncIterator()
@@ -299,9 +382,13 @@ private actor StartupWire: AsyncSyncTransport {
             throw SyncHTTPError.unauthorized
         }
         if holding, case .changes = envelope.action {
-            pullContinuation.yield(())
-            var iterator = releases.makeAsyncIterator()
-            _ = await iterator.next()
+            if skipPulls > 0 {
+                skipPulls -= 1
+            } else {
+                pullContinuation.yield(())
+                var iterator = releases.makeAsyncIterator()
+                _ = await iterator.next()
+            }
         }
         return handler.handle(request)
     }
