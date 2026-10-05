@@ -21,6 +21,36 @@ struct CLISyncRuntimeTests {
         }
     }
 
+    @Test(arguments: ["missing", "corrupt", "mismatch"])
+    func configurationFailuresUseStoreUnavailableExitCode(failure: String) throws {
+        try withScratchRoot { root in
+            let paths = StoragePaths(root: root)
+            try paths.createDirectories()
+            if failure != "missing" {
+                if failure == "mismatch" { _ = try Store(paths: paths) }
+                let enrollment = try SyncEnrollment(
+                    endpoint: URL(string: "https://sync.example.invalid/v1/sync")!,
+                    binding: SyncLibraryBinding(libraryID: UUID(), serviceID: UUID()),
+                    deviceID: UUID())
+                try MacSyncConfiguration(enrollment: enrollment, enabled: false).install(
+                    paths: paths)
+                if failure == "corrupt" {
+                    try Data("not a database".utf8).write(to: paths.databaseURL)
+                }
+            }
+            let configuration = try? Data(contentsOf: MacSyncConfiguration.url(paths: paths))
+            for command in ["deactivate", "resume"] {
+                let result = try capd(["sync", command], root: root)
+                #expect(result.status == 3)
+                #expect(result.stderr.contains("store is unavailable"))
+                #expect(result.stdout.isEmpty)
+                #expect(
+                    (try? Data(contentsOf: MacSyncConfiguration.url(paths: paths))) == configuration
+                )
+            }
+        }
+    }
+
     @Test func partialWriteErrorsFlushBeforeReturningTheirExitCode() throws {
         try withScratchRoot { root in
             let paths = StoragePaths(root: root)
@@ -100,6 +130,10 @@ struct CLISyncRuntimeTests {
                 try Data.fetchAll($0, sql: "SELECT payload FROM sync_outbox ORDER BY sequence")
             } == original)
         #expect(try capd(["sync", "deactivate"], root: root).status == 0)
+        #expect(try capd(["sync", "resume"], root: root).status == 0)
+        #expect(try MacSyncConfiguration.load(paths: paths)?.enabled == true)
+        #expect(try capd(["sync", "deactivate"], root: root).status == 0)
+        #expect(try MacSyncConfiguration.load(paths: paths)?.enabled == false)
         #expect(try store.syncClient?.pendingOperations().count == 7)
     }
 

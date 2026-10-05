@@ -17,6 +17,7 @@ final class ReminderScheduler {
     private let environment: Environment
     private var task: Task<Void, Never>?
     private var nextWakeDate: Date?
+    private var presentationDelayID: UUID?
 
     init(environment: Environment) {
         self.environment = environment
@@ -34,6 +35,7 @@ final class ReminderScheduler {
     }
 
     func refresh() {
+        guard presentationDelayID == nil else { return }
         do {
             if try environment.nextDate() != nextWakeDate { reload() }
         } catch {
@@ -49,6 +51,12 @@ final class ReminderScheduler {
         while !Task.isCancelled {
             do {
                 if let capture = try environment.claimNextDue(environment.now()) {
+                    nextWakeDate = nil
+                    let delayID = UUID()
+                    presentationDelayID = delayID
+                    defer {
+                        if presentationDelayID == delayID { presentationDelayID = nil }
+                    }
                     environment.present(capture)
                     try await environment.sleep(.seconds(7))
                     continue

@@ -75,6 +75,56 @@ struct ReminderSchedulerTests {
         #expect(presented == [2])
     }
 
+    @Test("Sync refresh preserves the presentation throttle before showing another due reminder")
+    func refreshPreservesPresentationThrottle() async throws {
+        let now = Date()
+        var due: [Capture] = []
+        var nextDate: Date? = now
+        var presented: [Int64] = []
+        let throttle = ReminderSleepProbe()
+        let sleeper = ReminderThrottleGate()
+        let scheduler = ReminderScheduler(
+            environment: .init(
+                claimNextDue: { _ in
+                    guard !due.isEmpty else { return nil }
+                    let capture = due.removeFirst()
+                    nextDate = due.first?.reminderAt
+                    return capture
+                },
+                nextDate: { nextDate },
+                present: { presented.append($0.id!) },
+                now: { now },
+                sleep: { duration in
+                    if duration == .seconds(7) {
+                        await throttle.started()
+                        try await sleeper.wait()
+                    } else {
+                        await sleeper.scheduled()
+                    }
+                }))
+        scheduler.start()
+        await sleeper.waitForSchedule()
+        due = [
+            Capture(id: 1, kind: .text, reminderAt: now.addingTimeInterval(-2), createdAt: now),
+            Capture(id: 2, kind: .text, reminderAt: now.addingTimeInterval(-1), createdAt: now),
+        ]
+        scheduler.reload()
+        try #require(await throttle.waitForStart())
+        scheduler.refresh()
+        for _ in 0..<20 { await Task.yield() }
+        #expect(await sleeper.cancellations == 0)
+        #expect(presented == [1])
+        due[0].reminderAt = now.addingTimeInterval(-3)
+        nextDate = due[0].reminderAt
+        scheduler.refresh()
+        for _ in 0..<20 { await Task.yield() }
+        #expect(await sleeper.cancellations == 0)
+        #expect(presented == [1])
+        await sleeper.release()
+        await scheduler.settle()
+        #expect(presented == [1, 2])
+    }
+
     @Test("An overdue reminder is presented and claimed once")
     func presentsOverdueReminder() async {
         let capture = Capture(
@@ -121,5 +171,55 @@ private actor ReminderSleepProbe {
         var iterator = starts.makeAsyncIterator()
         if case .some = await iterator.next() { return true }
         return false
+    }
+}
+
+private actor ReminderThrottleGate {
+    private var continuations: [UUID: CheckedContinuation<Void, any Error>] = [:]
+    private var released = false
+    private let schedules: AsyncStream<Void>
+    private let scheduleContinuation: AsyncStream<Void>.Continuation
+    var cancellations = 0
+
+    init() {
+        (schedules, scheduleContinuation) = AsyncStream.makeStream()
+    }
+
+    func scheduled() { scheduleContinuation.yield(()) }
+
+    func waitForSchedule() async {
+        var iterator = schedules.makeAsyncIterator()
+        _ = await iterator.next()
+    }
+
+    func wait() async throws {
+        let id = UUID()
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation {
+                (continuation: CheckedContinuation<Void, any Error>) in
+                if Task.isCancelled {
+                    cancellations += 1
+                    continuation.resume(throwing: CancellationError())
+                } else if released {
+                    continuation.resume()
+                } else {
+                    continuations[id] = continuation
+                }
+            }
+        } onCancel: {
+            Task { await self.cancel(id) }
+        }
+    }
+
+    private func cancel(_ id: UUID) {
+        guard let continuation = continuations.removeValue(forKey: id) else { return }
+        cancellations += 1
+        continuation.resume(throwing: CancellationError())
+    }
+
+    func release() {
+        released = true
+        for continuation in continuations.values { continuation.resume() }
+        continuations.removeAll()
     }
 }

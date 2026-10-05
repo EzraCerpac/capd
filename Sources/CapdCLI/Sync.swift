@@ -71,14 +71,18 @@ struct Sync: ParsableCommand {
     }
 
     private static func setEnabled(_ enabled: Bool) throws {
-        let paths = try StoragePaths.live
-        let result = blocking {
-            do {
-                try await MacLibrarySession.setEnabled(enabled, paths: paths)
-                return Result<Void, any Error>.success(())
-            } catch { return .failure(error) }
+        do {
+            let paths = try StoragePaths.live
+            let result = blocking {
+                do {
+                    try await MacLibrarySession.setEnabled(enabled, paths: paths)
+                    return Result<Void, any Error>.success(())
+                } catch { return .failure(error) }
+            }
+            try result.get()
+        } catch {
+            throw CLIError(message: "The capture store is unavailable: \(describe(error))", code: 3)
         }
-        try result.get()
         print(
             enabled
                 ? "Sync networking resumed."
