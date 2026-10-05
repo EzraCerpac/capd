@@ -155,8 +155,13 @@ class LargeLibraryDryRunTests(unittest.TestCase):
         fixture = fixtures.RealSourceAdapterTests()
         fixture.setUp()
         self.addCleanup(fixture.tearDown)
-        fixture.fixture.db.execute("UPDATE captures SET body=?", ("x" * (9 * 1024 * 1024),))
+        body = "x" * (128 * 1024)
+        fixture.fixture.db.execute("UPDATE captures SET body=?", (body,))
+        fixture.fixture.db.executemany(
+            "INSERT INTO captures(kind,title,seen_count,created_at,body) VALUES(?,?,?,?,?)",
+            [("text", f"Large capture {index}", 1, "2024-01-01", body) for index in range(100)])
         fixture.fixture.db.commit()
+        capture_count = fixture.fixture.db.execute("SELECT COUNT(*) FROM captures").fetchone()[0]
         before = snapshot.source_files(fixture.source)
         snapshot.capture_quiesced(fixture.source, fixture.archive)
         binary = Path(__file__).resolve().parents[1] / "Packages/CapdSyncServer/.build/debug/capd-sync-server"
@@ -170,12 +175,15 @@ class LargeLibraryDryRunTests(unittest.TestCase):
 
         page_method = host_type.baseline_page
         malformed_pages = []
+        imported_pages = []
 
         def page(host, *args):
             result = page_method(host, *args)
-            if malformed and result["cursor"] == 1:
-                malformed_pages.append(result)
-                return dict(result, cursor=True)
+            if result["cursor"] == 1:
+                imported_pages.append((args, result))
+                if malformed:
+                    malformed_pages.append(result)
+                    return dict(result, cursor=True)
             return result
 
         with mock.patch.object(dry_run, "LocalHost", side_effect=host), \
@@ -197,15 +205,25 @@ class LargeLibraryDryRunTests(unittest.TestCase):
         authority = fixture.source.parent / "server" / hosts[0].binding["libraryID"].lower()
         with contextlib.closing(migration.connect(authority / "authority.sqlite", readonly=True)) as db:
             sizes = [row[0] for row in db.execute("SELECT length(payload) FROM sync_records")]
-        self.assertEqual(len(sizes), 2)
-        self.assertGreater(sum(sizes), 16_777_216)
-        self.assertLess(max(sizes), 16_777_216)
+        self.assertEqual(capture_count, 102)
+        self.assertEqual(len(sizes), capture_count)
+        self.assertGreater(sum(sizes), 8 * 1024 * 1024)
+        baseline_bytes = (2 + sum(sizes) + capture_count - 1
+                          + capture_count * migration.IMPORTED_CAPTURE_COUNTER_GROWTH_BYTES)
+        self.assertLess(baseline_bytes, migration.MAXIMUM_IMPORTED_BASELINE_BYTES)
+        self.assertLess(max(sizes), migration.MAXIMUM_IMPORTED_CAPTURE_BYTES)
+        self.assertEqual(imported_pages[0][0], (None, 100, None))
+        self.assertEqual(len(imported_pages[0][1]["captures"]), 100)
+        self.assertTrue(all(page["totalCaptureCount"] == capture_count for _, page in imported_pages))
         if malformed:
+            self.assertEqual(len(imported_pages), 1)
             self.assertEqual(len(malformed_pages), 1)
             self.assertFalse((fixture.source.parent / "dry-run-report.json").exists())
             return
+        self.assertEqual([len(page["captures"]) for _, page in imported_pages], [100, 2])
+        self.assertEqual(imported_pages[1][0], (imported_pages[0][1]["captures"][-1]["id"], 100, 1))
         report = json.loads((fixture.source.parent / "dry-run-report.json").read_bytes())
-        self.assertEqual(report["captureCount"], 2)
+        self.assertEqual(report["captureCount"], capture_count)
         self.assertTrue(report["allImportedFieldsMatchHTTPBaseline"])
         self.assertTrue(report["ownedHostStopped"])
         self.assertTrue(report["temporaryCredentialConfigRemoved"])

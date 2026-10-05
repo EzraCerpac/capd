@@ -24,6 +24,11 @@ final class PhoneLibraryConnection {
         guard let preparation else { return false }
         return (try? activation.hasPendingCredentialRecovery(for: preparation)) == true
     }
+    var canPrepareBackup: Bool {
+        guard !busy else { return false }
+        guard let preparation else { return true }
+        return (try? activation.hasPendingCredentialRecovery(for: preparation)) == false
+    }
     var transferDirectory: URL? { preparation?.transferDirectory(in: root) }
 
     init(
@@ -285,11 +290,24 @@ final class PhoneLibraryConnection {
         } catch { self.error = error.localizedDescription }
     }
 
+    private func validateReplacement(of previous: MobileLibraryPreparation?) throws {
+        guard preparation == previous else { throw MobileActivationError.sessionReplaced }
+        if let previous {
+            guard (try? activation.hasPendingCredentialRecovery(for: previous)) == false else {
+                throw MobileBackupReplacementError.pendingCredentialRecovery
+            }
+        }
+    }
+
     func prepare(address: String, serviceID: String, libraryID: String) async {
         guard !busy else { return }
+        let previous = preparation
+        do { try validateReplacement(of: previous) } catch {
+            self.error = error.localizedDescription
+            return
+        }
         busy = true
         error = nil
-        status = nil
         defer { busy = false }
         do {
             guard
@@ -304,9 +322,22 @@ final class PhoneLibraryConnection {
             await beforeTransition()
             let activation = activation
             do {
-                preparation = try await Task.detached(priority: .utility) {
-                    try activation.prepare(endpoint: endpoint, binding: binding)
+                try validateReplacement(of: previous)
+                let candidate = try await Task.detached(priority: .utility) {
+                    try activation.prepare(
+                        endpoint: endpoint, binding: binding, replacing: previous)
                 }.value
+                do { try validateReplacement(of: previous) } catch {
+                    let refusal = error
+                    if let previous {
+                        try await Task.detached(priority: .utility) {
+                            try activation.withdrawUnusedReplacement(
+                                candidate, preserving: previous)
+                        }.value
+                    }
+                    throw refusal
+                }
+                preparation = candidate
                 review = nil
                 reviewBytes = nil
                 receiptBytes = nil

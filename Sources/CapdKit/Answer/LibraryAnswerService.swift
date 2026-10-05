@@ -132,6 +132,34 @@ protocol LibraryAnswerModel: Sendable {
     ) async throws -> LibraryAnswerDraft
 }
 
+private struct LibraryAnswerEvidenceSnapshot: Equatable {
+    let id: Int64?
+    let kind: CaptureKind
+    let title: String?
+    let url: String?
+    let host: String?
+    let note: String?
+    let selection: String?
+    let body: String?
+    let ocrText: String?
+    let includesTags: Bool
+    let tags: String?
+
+    init(_ capture: Capture, includesTags: Bool) {
+        id = capture.id
+        kind = capture.kind
+        title = capture.title
+        url = capture.url
+        host = capture.host
+        note = capture.note
+        selection = capture.selection
+        body = capture.body
+        ocrText = capture.ocrText
+        self.includesTags = includesTags
+        tags = includesTags ? capture.tags : nil
+    }
+}
+
 /// Retrieves a small, relevant evidence set before asking Apple's on-device model to
 /// synthesize it. Retrieval and generation both stay on the Mac.
 public struct LibraryAnswerService: Sendable {
@@ -169,13 +197,13 @@ public struct LibraryAnswerService: Sendable {
         var remaining = Self.totalExcerptLimit
         var sources: [LibraryAnswer.Source] = []
         var prompts: [LibraryAnswerPromptSource] = []
-        var captures: [Capture] = []
+        var evidence: [LibraryAnswerEvidenceSnapshot] = []
         for hit in hits {
             guard let captureID = hit.capture.id, remaining > 0 else { continue }
             let excerpt = Self.evidence(from: hit, limit: min(Self.excerptLimit, remaining))
             guard !excerpt.isEmpty else { continue }
             remaining -= excerpt.count
-            captures.append(hit.capture)
+            evidence.append(.init(hit.capture, includesTags: !Self.snippetSupportedByProse(hit)))
 
             let number = sources.count + 1
             let title = Self.title(for: hit.capture)
@@ -216,9 +244,14 @@ public struct LibraryAnswerService: Sendable {
         try Task.checkCancellation()
         let current = try search.captures(ids: sources.map(\.captureID))
         try Task.checkCancellation()
-        guard
-            current.sorted(by: { ($0.id ?? 0) < ($1.id ?? 0) })
-                == captures.sorted(by: { ($0.id ?? 0) < ($1.id ?? 0) })
+        guard current.count == evidence.count,
+            evidence.allSatisfy({ snapshot in
+                guard let capture = current.first(where: { $0.id == snapshot.id }) else {
+                    return false
+                }
+                return LibraryAnswerEvidenceSnapshot(capture, includesTags: snapshot.includesTags)
+                    == snapshot
+            })
         else { throw LibraryAnswerError.evidenceChanged }
         try Task.checkCancellation()
         return LibraryAnswer(question: question, passages: passages, sources: sources)
@@ -299,6 +332,45 @@ public struct LibraryAnswerService: Sendable {
         "there", "these", "this", "to", "was", "were", "what", "when", "where", "which",
         "who", "why", "with",
     ]
+
+    private static func snippetSupportedByProse(_ hit: SearchHit) -> Bool {
+        guard let snippet = hit.snippet?.text, !snippet.isEmpty else { return true }
+        let fragments = snippet.split(separator: "…").map {
+            $0.trimmingCharacters(in: .whitespacesAndNewlines)
+        }.filter { !$0.isEmpty }
+        guard !fragments.isEmpty else { return false }
+        return [
+            hit.capture.title, hit.capture.host, hit.capture.note, hit.capture.selection,
+            hit.capture.body,
+            hit.capture.ocrText,
+        ].compactMap { $0 }.contains { field in
+            let text = field
+            var start = text.startIndex
+            for fragment in fragments {
+                var found = false
+                while let range = text.range(of: fragment, range: start..<text.endIndex) {
+                    start = range.upperBound
+                    let startsWord =
+                        fragment.first?.isLetter == true || fragment.first?.isNumber == true
+                    let endsWord =
+                        fragment.last?.isLetter == true || fragment.last?.isNumber == true
+                    let before =
+                        range.lowerBound > text.startIndex
+                        ? text[text.index(before: range.lowerBound)] : nil
+                    let after = range.upperBound < text.endIndex ? text[range.upperBound] : nil
+                    let startsMidWord =
+                        startsWord && before.map { $0.isLetter || $0.isNumber } == true
+                    let endsMidWord = endsWord && after.map { $0.isLetter || $0.isNumber } == true
+                    if !startsMidWord && !endsMidWord {
+                        found = true
+                        break
+                    }
+                }
+                guard found else { return false }
+            }
+            return true
+        }
+    }
 
     private static func evidence(from hit: SearchHit, limit: Int) -> String {
         let capture = hit.capture

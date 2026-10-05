@@ -41,7 +41,7 @@ func localAnswerRevalidatesEvidenceAfterAwaitedGeneration(change: String) async 
     default: break
     }
     await model.finish()
-    if change == "unchanged" {
+    if change == "unchanged" || change == "revision" {
         let answer = try await task.value
         #expect(answer.sources.first?.source.id == saved.id.uuidString)
     } else {

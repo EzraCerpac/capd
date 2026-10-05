@@ -52,10 +52,11 @@ struct LibraryView: View {
                         NavigationLink(value: capture.id) {
                             CapdSourceRow(
                                 title: capture.title,
-                                metadata: sourceMetadata(capture),
+                                metadata: MobileCapturePresentation.metadata(for: capture),
                                 snippet: capture.selection,
-                                symbol: capture.kind == .link ? "link" : "text.alignleft",
-                                tint: capture.kind == .link ? .blue : .orange,
+                                symbol: MobileCapturePresentation.symbol(for: capture),
+                                tint: capture.kind == .link
+                                    ? .blue : capture.kind == .image ? .purple : .orange,
                                 tags: capture.manualTags,
                                 status: capture.noteConflicts.isEmpty ? nil : "Notes to review")
 
@@ -301,10 +302,11 @@ struct CaptureDetailView: View {
                 if let body = capture.body {
                     Section("Saved page text") { Text(body).textSelection(.enabled) }
                 }
-                if let text = capture.ocrText, !text.isEmpty {
-                    Section("Recognized image text") {
-                        Text(text).textSelection(.enabled)
-                    }.accessibilityIdentifier("captureOCRText")
+                if let recognizedText = MobileCapturePresentation.recognizedText(for: capture) {
+                    Section("Recognized text") {
+                        Text(recognizedText).textSelection(.enabled)
+                            .accessibilityIdentifier("captureOCRText")
+                    }
                 }
                 if !capture.generatedTags.isEmpty {
                     Section("Generated tags") {
@@ -357,6 +359,7 @@ struct AnnotationForm: View {
     }
     private enum Field: Hashable { case note, tags }
     @State private var capture: MobileCapture
+    @State private var originalTags: [String]
     let model: LibraryModel
     @State private var note: String
     @State private var tags: String
@@ -366,6 +369,7 @@ struct AnnotationForm: View {
 
     init(capture: MobileCapture, model: LibraryModel) {
         _capture = State(initialValue: capture)
+        _originalTags = State(initialValue: capture.manualTags)
         self.model = model
         _note = State(initialValue: capture.note)
         _tags = State(initialValue: capture.manualTags.joined(separator: " "))
@@ -406,9 +410,8 @@ struct AnnotationForm: View {
                 ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Save changes") {
-                        let tokens = Array(
-                            Set(tags.split(whereSeparator: \.isWhitespace).map { $0.lowercased() })
-                        ).sorted()
+                        let tokens = MobileCapturePresentation.manualTagsToSave(
+                            draft: tags, original: originalTags)
                         if model.update(
                             capture: capture, note: note, tags: tokens,
                             resolving: resolve ? capture.noteConflicts.map(\.operationID) : [])
@@ -420,11 +423,4 @@ struct AnnotationForm: View {
             }
         }
     }
-}
-
-private func sourceMetadata(_ capture: MobileCapture) -> String {
-    if let raw = capture.url, let url = URLComponents(string: raw), let host = url.host {
-        return host + (url.path == "/" ? "" : url.path)
-    }
-    return "text · \(capture.selection.count.formatted()) chars"
 }

@@ -121,6 +121,8 @@ public final class MobileStore: Sendable {
                 sql: "INSERT INTO mobile_system_search VALUES (1, ?)",
                 arguments: [UUID().uuidString])
         }
+        migrator.registerMigration(
+            "mobile-answer-evidence-v5", migrate: Self.prepareAnswerEvidenceRevision)
         try migrator.migrate(database)
         client = try SyncClient(
             writer: database,
@@ -129,6 +131,53 @@ public final class MobileStore: Sendable {
                 binding: binding),
             deviceID: deviceID, binding: binding,
             project: Self.project)
+    }
+
+    private static func prepareAnswerEvidenceRevision(_ db: Database) throws {
+        try db.execute(
+            sql: """
+                CREATE TABLE mobile_answer_evidence (
+                    id INTEGER PRIMARY KEY CHECK(id=1), revision TEXT NOT NULL);
+                INSERT INTO mobile_answer_evidence VALUES (1, hex(randomblob(16)))
+                """)
+        for event in ["INSERT", "DELETE"] {
+            try db.execute(
+                sql: """
+                    CREATE TRIGGER mobile_answer_evidence_\(event.lowercased())
+                    AFTER \(event) ON mobile_captures BEGIN
+                        UPDATE mobile_answer_evidence SET revision=hex(randomblob(16)) WHERE id=1;
+                    END
+                    """)
+        }
+        // Ordering and FTS document lengths can change which saved prose reaches the prompt.
+        let fields = [
+            "localID", "id", "title", "selection", "note", "body", "ocrText", "createdAt",
+            "manualTags", "generatedTags",
+        ]
+        let sortedTags: (String) -> String = { reference in
+            """
+            (SELECT json_group_array(value) FROM (
+                SELECT value FROM json_each(\(reference)) ORDER BY value COLLATE BINARY))
+            """
+        }
+        let changed = fields.map { field -> String in
+            guard field == "manualTags" || field == "generatedTags" else {
+                return "OLD.\(field) IS NOT NEW.\(field)"
+            }
+            // Tag order changes neither matched prose nor FTS document length.
+            return """
+                CASE WHEN OLD.\(field) IS NEW.\(field) THEN 0 ELSE
+                    \(sortedTags("OLD.\(field)")) IS NOT \(sortedTags("NEW.\(field)")) END
+                """
+        }.joined(separator: " OR ")
+        try db.execute(
+            sql: """
+                CREATE TRIGGER mobile_answer_evidence_update
+                AFTER UPDATE OF \(fields.joined(separator: ",")) ON mobile_captures
+                WHEN \(changed) BEGIN
+                    UPDATE mobile_answer_evidence SET revision=hex(randomblob(16)) WHERE id=1;
+                END
+                """)
     }
 
     public func contentSnapshotImport(snapshotID: UUID, targetBinding: SyncLibraryBinding) throws

@@ -199,7 +199,8 @@ struct LibraryConnectionView: View {
                             }
                         }
                     }.disabled(
-                        connection.busy || address.isEmpty || serviceID.isEmpty || libraryID.isEmpty
+                        !connection.canPrepareBackup || address.isEmpty || serviceID.isEmpty
+                            || libraryID.isEmpty
                     )
                     .accessibilityIdentifier("prepareLibraryBackup")
                     Text(

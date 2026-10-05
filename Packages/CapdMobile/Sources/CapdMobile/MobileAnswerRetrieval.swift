@@ -35,10 +35,17 @@ public actor MobileAnswerRetrieval: AnswerRetrieving {
         let lease = try access?.lease()
         defer { withExtendedLifetime(lease) {} }
         try Task.checkCancellation()
-        let revision = try await database.read { db in try MobileStore.libraryRevision(db) }
+        let revision = try await database.read { db in
+            guard try db.tableExists("mobile_answer_evidence"),
+                let revision = try String.fetchOne(
+                    db, sql: "SELECT revision FROM mobile_answer_evidence WHERE id=1")
+            else {
+                throw MobileAnswerRetrievalError.libraryUpgradeRequired
+            }
+            return revision
+        }
         try Task.checkCancellation()
-        return
-            "\(revision.cursor):\(revision.sequence):\(revision.pendingChanges):\(revision.rejectedChanges)"
+        return revision
     }
 
     public func search(_ query: String, limit: Int) async throws -> [AnswerEvidence] {
@@ -215,5 +222,13 @@ public actor MobileAnswerRetrieval: AnswerRetrieving {
             bytes += cost
         }
         return String(text[start..<end])
+    }
+}
+
+enum MobileAnswerRetrievalError: Error, LocalizedError, Equatable {
+    case libraryUpgradeRequired
+
+    var errorDescription: String? {
+        "Open this library in the app before asking a question."
     }
 }
