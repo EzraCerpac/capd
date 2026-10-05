@@ -97,7 +97,7 @@ public struct SearchCapture: Codable, Equatable, Sendable, Identifiable {
 
 public enum SystemIntegrationError: Error, LocalizedError, Equatable {
     case unavailable, privacyDisabled, missingCapture, invalidInput, snapshotTooLarge,
-        invalidSnapshot
+        invalidSnapshot, actionPending
 
     public var errorDescription: String? {
         switch self {
@@ -107,6 +107,7 @@ public enum SystemIntegrationError: Error, LocalizedError, Equatable {
         case .invalidInput: "Enter up to 512 search characters or 8192 text characters."
         case .snapshotTooLarge: "This library exceeds the system search snapshot limit."
         case .invalidSnapshot: "System search could not validate the library snapshot."
+        case .actionPending: "Review the pending action in capd, then try again."
         }
     }
 }

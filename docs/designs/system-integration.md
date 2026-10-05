@@ -6,6 +6,8 @@
 
 Find Captures opens local search. Open Capture resolves a stable library/capture UUID against the current host before navigation. Draft Text Capture stages the text supplied in an explicit invocation for review; it never saves a capture. Search/open require the host's system-search consent; drafting text is independent. Entity queries return at most 20 matches and no unsolicited suggestions. There is no content/result dialog, model invocation, assistant schema, clipboard read, or ambient listening.
 
+The bridge retains one accepted action until the host consumes it. Additional intents fail with a retryable pending-action error, and routes surface that error without replacing the accepted action.
+
 Each app has one app-level shortcuts provider with three phrase templates and an `AppIntentsPackage` wrapper for package discovery. Foreground execution uses `supportedModes` on iOS/macOS 26 and `openAppWhenRun` for older supported versions. Absent/uninitialized hosts return an unavailable error. Cancelled tasks are checked before routing. Drafting is synchronous and reversible; the host must only show a composer, never persist from the callback. System cancellation after dispatch, Siri discovery, locked-device behavior, and cold app launch require signed-app verification on each OS. App Shortcuts are named actions; they do not implement arbitrary Siri generative Q&A.
 
 ## Index behavior

@@ -57,6 +57,7 @@ public final class CaptureSystemBridge: CaptureActionHost {
     }
 
     public func handle(_ action: CaptureAction) throws {
+        guard pendingAction == nil else { throw SystemIntegrationError.actionPending }
         pendingAction = action
         routingError = nil
     }

@@ -5,6 +5,90 @@ import Testing
 @testable import CapdSystemIntegration
 
 extension IntentHostTests {
+    @Test func secondDraftIntentDoesNotReplaceAnAcceptedDraft() async throws {
+        let runtime = CaptureIntentRuntime.shared
+        let previous = runtime.host
+        defer { runtime.host = previous }
+        let host = CaptureSystemBridge()
+        host.install()
+        let first = CaptureTextIntent()
+        first.text = "first synthetic draft awaiting review"
+        let second = CaptureTextIntent()
+        second.text = "second synthetic draft awaiting review"
+
+        _ = try await first.perform()
+        await #expect(throws: SystemIntegrationError.actionPending) {
+            _ = try await second.perform()
+        }
+        #expect(host.pendingAction == .stageText(first.text))
+        #expect(host.consumeAction() == .stageText(first.text))
+        #expect(host.consumeAction() == nil)
+
+        _ = try await second.perform()
+        #expect(host.consumeAction() == .stageText(second.text))
+        #expect(host.consumeAction() == nil)
+    }
+
+    @Test func routesDoNotReplaceAnAcceptedDraft() throws {
+        let runtime = CaptureIntentRuntime.shared
+        let previous = runtime.host
+        defer { runtime.host = previous }
+        let host = CaptureSystemBridge()
+        host.install()
+        let reference = CaptureReference(libraryID: UUID(), captureID: UUID())
+        let capture = SearchCapture(reference: reference, title: "Synthetic saved capture")
+        try host.refresh(
+            libraryID: reference.libraryID, captures: [capture], systemSearchEnabled: true)
+        let draft = CaptureAction.stageText("synthetic draft awaiting review")
+        try runtime.perform(draft)
+
+        for route in [CaptureRoute.find("synthetic"), .open(reference)] {
+            host.receive(route)
+            #expect(
+                host.consumeRoutingError()
+                    == SystemIntegrationError.actionPending.localizedDescription)
+            #expect(host.pendingAction == draft)
+        }
+        #expect(host.consumeAction() == draft)
+        host.receive(.open(reference))
+        #expect(host.consumeRoutingError() == nil)
+        #expect(host.consumeAction() == .open(reference))
+    }
+
+    @Test func occupiedActionRetainsPrivacyAndReferenceValidation() throws {
+        let runtime = CaptureIntentRuntime()
+        let host = CaptureSystemBridge()
+        runtime.host = host
+        let reference = CaptureReference(libraryID: UUID(), captureID: UUID())
+        let capture = SearchCapture(reference: reference, title: "Synthetic saved capture")
+        let draft = CaptureAction.stageText("synthetic draft awaiting review")
+        try runtime.perform(draft)
+        #expect(throws: SystemIntegrationError.privacyDisabled) {
+            try runtime.perform(.find("synthetic"))
+        }
+        try host.refresh(
+            libraryID: reference.libraryID, captures: [capture], systemSearchEnabled: true)
+        let otherLibrary = CaptureReference(libraryID: UUID(), captureID: reference.captureID)
+        #expect(throws: SystemIntegrationError.missingCapture) {
+            try runtime.perform(.open(otherLibrary))
+        }
+        #expect(host.pendingAction == draft)
+        host.invalidate()
+        #expect(host.consumeAction() == draft)
+
+        for action in [CaptureAction.find("synthetic"), .open(reference)] {
+            try host.refresh(
+                libraryID: reference.libraryID, captures: [capture], systemSearchEnabled: true)
+            try runtime.perform(action)
+            #expect(throws: SystemIntegrationError.actionPending) {
+                try runtime.perform(draft)
+            }
+            #expect(host.pendingAction == action)
+            host.invalidate()
+            #expect(host.consumeAction() == nil)
+        }
+    }
+
     @Test func repeatedFailingRoutesProduceConsumableErrors() throws {
         let runtime = CaptureIntentRuntime.shared
         let previous = runtime.host
