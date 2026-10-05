@@ -1,0 +1,393 @@
+import CapdSync
+import Foundation
+import SQLite3
+import XCTest
+
+@testable import CapdMCP
+
+final class ToolboxRegressionTests: XCTestCase {
+    func testResolutionChecksCurrentAuthorityInsteadOfStaleReadStore() throws {
+        let f = try MCPTests.Fixture()
+        defer { try? FileManager.default.removeItem(at: f.directory) }
+        let id = UUID()
+        XCTAssertEqual(
+            f.call("create_capture", f.create(id: id, note: "original"))["isError"], .bool(false))
+        _ = try f.server.apply(
+            SyncOperation(
+                deviceID: UUID(), sequence: 1, captureID: id, baseRevision: 1,
+                mutation: .edit(CaptureEdit(note: NoteEdit("first conflict")))))
+        let observed = try XCTUnwrap(try f.store.capture(id: id))
+        let frozenURL = f.directory.appendingPathComponent("observed.sqlite")
+        var source: OpaquePointer?
+        var destination: OpaquePointer?
+        XCTAssertEqual(
+            sqlite3_open(f.directory.appendingPathComponent("authority.sqlite").path, &source),
+            SQLITE_OK)
+        defer { sqlite3_close(source) }
+        XCTAssertEqual(sqlite3_open(frozenURL.path, &destination), SQLITE_OK)
+        defer { sqlite3_close(destination) }
+        let backup = try XCTUnwrap(sqlite3_backup_init(destination, "main", source, "main"))
+        XCTAssertEqual(sqlite3_backup_step(backup, -1), SQLITE_DONE)
+        XCTAssertEqual(sqlite3_backup_finish(backup), SQLITE_OK)
+        XCTAssertEqual(
+            sqlite3_exec(destination, "PRAGMA journal_mode=DELETE", nil, nil, nil), SQLITE_OK)
+        let frozen = try AcceptedStore(databaseURL: frozenURL, binding: f.binding)
+        let toolbox = try MCPToolbox(store: frozen, authority: f.server)
+        _ = try f.server.apply(
+            SyncOperation(
+                deviceID: UUID(), sequence: 1, captureID: id, baseRevision: 1,
+                mutation: .edit(CaptureEdit(note: NoteEdit("intervening conflict")))))
+        let before = try f.server.baseline()
+        var resolution = editArguments(id: id, revision: observed.revision)
+        resolution["note"] = .string("resolved")
+        resolution["resolve_note_operations"] = .array(
+            observed.noteConflicts.map { .string($0.operationID.uuidString) })
+        XCTAssertEqual(
+            toolbox.call(name: "edit_capture", arguments: resolution, grant: f.grant).object?[
+                "isError"], .bool(true))
+        XCTAssertEqual(try f.server.baseline().cursor, before.cursor)
+        XCTAssertEqual(try f.server.baseline().captures, before.captures)
+        XCTAssertEqual(try f.store.nextSequence(deviceID: f.device), 2)
+    }
+
+    func testExplicitResolutionRejectsMismatchedAndStaleSetsWithoutConsumingIdentity() throws {
+        let f = try MCPTests.Fixture()
+        defer { try? FileManager.default.removeItem(at: f.directory) }
+        let id = UUID()
+        _ = f.call("create_capture", f.create(id: id, note: "original"))
+        for i in 0...1 {
+            _ = try f.server.apply(
+                SyncOperation(
+                    deviceID: UUID(), sequence: 1, captureID: id, baseRevision: 1,
+                    mutation: .edit(CaptureEdit(note: NoteEdit("conflict \(i)")))))
+        }
+        let before = try f.server.baseline()
+        let current = try XCTUnwrap(before.captures.first)
+        let conflicts = current.noteConflicts.map { JSONValue.string($0.operationID.uuidString) }
+        var resolution = editArguments(id: id, revision: current.revision)
+        resolution["note"] = .string("resolved")
+        for submitted in [
+            [], Array(conflicts.prefix(1)), [JSONValue.string(UUID().uuidString)],
+            conflicts + [.string(UUID().uuidString)],
+        ] {
+            resolution["resolve_note_operations"] = .array(submitted)
+            XCTAssertEqual(f.call("edit_capture", resolution)["isError"], .bool(true))
+        }
+        resolution["resolve_note_operations"] = .array(conflicts)
+        resolution["base_revision"] = .number(1)
+        XCTAssertEqual(f.call("edit_capture", resolution)["isError"], .bool(true))
+        XCTAssertEqual(try f.server.baseline().cursor, before.cursor)
+        XCTAssertEqual(try f.server.baseline().captures, before.captures)
+        XCTAssertEqual(try f.store.nextSequence(deviceID: f.device), 2)
+        resolution["base_revision"] = .number(Decimal(current.revision))
+        resolution["resolve_note_operations"] = .array(conflicts.reversed())
+        XCTAssertEqual(f.call("edit_capture", resolution)["isError"], .bool(false))
+        XCTAssertTrue(try XCTUnwrap(try f.server.baseline().captures.first).noteConflicts.isEmpty)
+        XCTAssertEqual(f.call("edit_capture", resolution)["isError"], .bool(false))
+        resolution["sequence"] = .number(3)
+        resolution["resolve_note_operations"] = .array([.string(UUID().uuidString)])
+        XCTAssertEqual(
+            f.call("edit_capture", resolution)["structuredContent"]?.object?["error"],
+            .string("operation_id_reused"))
+        XCTAssertEqual(try f.store.nextSequence(deviceID: f.device), 3)
+    }
+
+    func testFractionalTimestampsKeepMillisecondOrderAndReminderRoundTrip() throws {
+        let f = try MCPTests.Fixture()
+        defer { try? FileManager.default.removeItem(at: f.directory) }
+        let first = UUID()
+        let second = UUID()
+        for (sequence, id, fraction) in [(1, first, "125"), (2, second, "875")] {
+            var create = f.create(id: id, sequence: Int64(sequence), text: "fraction \(fraction)")
+            create["created_at"] = .string("2026-10-04T10:00:00.\(fraction)Z")
+            XCTAssertEqual(f.call("create_capture", create)["isError"], .bool(false))
+        }
+        let recent = f.call("list_recent", [:])["structuredContent"]?.object
+        guard case .array(let captures) = recent?["captures"] else { return XCTFail() }
+        XCTAssertEqual(
+            captures.map { $0.object?["id"] }, [second, first].map { .string($0.uuidString) })
+        XCTAssertEqual(
+            captures.map { $0.object?["created_at"] },
+            ["875", "125"].map { .string("2026-10-04T10:00:00.\($0)Z") })
+        var edit = editArguments(id: first)
+        edit["sequence"] = .number(3)
+        edit["reminder_at"] = .string("2026-10-05T10:00:00.625Z")
+        XCTAssertEqual(f.call("edit_capture", edit)["isError"], .bool(false))
+        let stored = try XCTUnwrap(try f.store.capture(id: first))
+        let full = f.call("get_capture", ["id": .string(first.uuidString)])["structuredContent"]?
+            .object?["capture"]?.object
+        XCTAssertEqual(full?["created_at"], .string("2026-10-04T10:00:00.125Z"))
+        XCTAssertEqual(full?["reminder_at"], edit["reminder_at"])
+        edit = editArguments(id: first, revision: stored.revision)
+        edit["sequence"] = .number(4)
+        edit["reminder_at"] = full?["reminder_at"]
+        XCTAssertEqual(f.call("edit_capture", edit)["isError"], .bool(false))
+        XCTAssertEqual(
+            try f.store.capture(id: first)?.metadata?.reminderAt, stored.metadata?.reminderAt)
+    }
+
+    func testStoredSubmillisecondTimestampsRemainDistinctAndRoundTripExactly() throws {
+        let f = try MCPTests.Fixture()
+        defer { try? FileManager.default.removeItem(at: f.directory) }
+        let dates = [800_000_000.1234567, 800_000_000.1234568, 123.45678901234567]
+            .map { Date(timeIntervalSinceReferenceDate: $0) }
+        var projectedDates: [JSONValue] = []
+        for (index, date) in dates.enumerated() {
+            let capture = SharedCapture(
+                source: CaptureSource(kind: .text, selection: "precision \(index)"),
+                createdAt: date, metadata: CaptureMetadata(reminderAt: date))
+            _ = try f.server.apply(
+                SyncOperation(
+                    deviceID: UUID(), sequence: 1, captureID: capture.id, baseRevision: 0,
+                    mutation: .create(capture)))
+            let stored = try XCTUnwrap(try f.store.capture(id: capture.id))
+            let full = try XCTUnwrap(
+                f.call("get_capture", ["id": .string(capture.id.uuidString)])[
+                    "structuredContent"]?.object?["capture"]?.object)
+            let timestamp = try XCTUnwrap(full["created_at"])
+            projectedDates.append(timestamp)
+            XCTAssertEqual(full["reminder_at"], timestamp)
+            XCTAssertLessThanOrEqual(try XCTUnwrap(timestamp.string).utf8.count, 40)
+            var edit = editArguments(id: capture.id, revision: stored.revision)
+            edit["sequence"] = .number(Decimal(index + 1))
+            edit["reminder_at"] = full["reminder_at"]
+            XCTAssertEqual(f.call("edit_capture", edit)["isError"], .bool(false))
+            XCTAssertEqual(try f.store.capture(id: capture.id)?.metadata?.reminderAt, date)
+        }
+        XCTAssertNotEqual(projectedDates[0], projectedDates[1])
+        let recent = f.call("list_recent", [:])["structuredContent"]?.object
+        guard case .array(let captures) = recent?["captures"] else { return XCTFail() }
+        XCTAssertEqual(
+            captures.map { $0.object?["created_at"] },
+            [projectedDates[1], projectedDates[0], projectedDates[2]])
+        for (index, timestamp) in projectedDates.enumerated() {
+            let id = UUID()
+            var create = f.create(id: id, sequence: Int64(index + 4), text: "round trip \(index)")
+            create["created_at"] = timestamp
+            XCTAssertEqual(f.call("create_capture", create)["isError"], .bool(false))
+            XCTAssertEqual(try f.store.capture(id: id)?.createdAt, dates[index])
+        }
+    }
+
+    func testFractionalDateInputKeepsOffsetsAndValidationLimits() throws {
+        let f = try MCPTests.Fixture()
+        defer { try? FileManager.default.removeItem(at: f.directory) }
+        let first = UUID()
+        var create = f.create(id: first)
+        for value in [
+            "2026-10-04T10:00:00.Z", "2026-10-04T10:00:00.badZ",
+            "2026-10-04T10:00:00.123.invalidZ", "not-a-date",
+            "2026-10-04T10:00:00.12345678901234567+02:00",
+        ] {
+            create["created_at"] = .string(value)
+            XCTAssertEqual(f.call("create_capture", create)["isError"], .bool(true), value)
+        }
+        XCTAssertEqual(try f.store.nextSequence(deviceID: f.device), 1)
+        create["created_at"] = .string("2026-10-04T10:00:00.123456789Z")
+        XCTAssertEqual(f.call("create_capture", create)["isError"], .bool(false))
+        let second = UUID()
+        create = f.create(id: second, sequence: 2, text: "offset")
+        create["created_at"] = .string("2026-10-04T12:00:00.123456789+02:00")
+        XCTAssertEqual(f.call("create_capture", create)["isError"], .bool(false))
+        XCTAssertEqual(
+            try f.store.capture(id: first)?.createdAt, try f.store.capture(id: second)?.createdAt)
+    }
+
+    func testTruncationReturnsExactUTF8Prefixes() throws {
+        let f = try MCPTests.Fixture()
+        defer { try? FileManager.default.removeItem(at: f.directory) }
+        for (full, budget) in [(false, 768), (true, 24576)] {
+            let id = UUID()
+            let prefix = String(repeating: "a", count: budget - 1)
+            let value = prefix + "😀é"
+            let capture = SharedCapture(
+                id: id, source: CaptureSource(kind: .text, selection: full ? value : nil),
+                note: full ? nil : value)
+            _ = try f.server.apply(
+                SyncOperation(
+                    deviceID: UUID(), sequence: 1, captureID: id, baseRevision: 0,
+                    mutation: .create(capture)))
+            let result = f.call(
+                full ? "get_capture" : "list_recent", full ? ["id": .string(id.uuidString)] : [:])[
+                    "structuredContent"]?.object
+            let projected: Object?
+            if full {
+                projected = result?["capture"]?.object
+            } else if case .array(let captures) = result?["captures"] {
+                projected = captures.first { $0.object?["id"] == .string(id.uuidString) }?.object
+            } else {
+                projected = nil
+            }
+            XCTAssertEqual(projected?[full ? "selection" : "note"], .string(prefix))
+            XCTAssertEqual(projected?["truncated"], .bool(true))
+        }
+    }
+
+    func testEmptyTagOnlyEditsDoNotConsumeSequenceOrChangeAuthority() throws {
+        let f = try MCPTests.Fixture()
+        defer { try? FileManager.default.removeItem(at: f.directory) }
+        let id = UUID()
+        _ = f.call("create_capture", f.create(id: id))
+        let before = try f.server.baseline()
+        for keys in [["add_tags"], ["remove_tags"], ["add_tags", "remove_tags"]] {
+            var edit = editArguments(id: id)
+            for key in keys { edit[key] = .array([]) }
+            XCTAssertEqual(f.call("edit_capture", edit)["isError"], .bool(true))
+        }
+        XCTAssertEqual(try f.server.baseline().cursor, before.cursor)
+        XCTAssertEqual(try f.server.baseline().captures, before.captures)
+        XCTAssertEqual(try f.store.nextSequence(deviceID: f.device), 2)
+        var realEdit = editArguments(id: id)
+        realEdit["add_tags"] = .array([])
+        realEdit["rating"] = .number(4)
+        XCTAssertEqual(f.call("edit_capture", realEdit)["isError"], .bool(false))
+    }
+
+    func testOversizedConflictResolutionReportsCapacityWithoutAddingConflict() throws {
+        let f = try MCPTests.Fixture()
+        defer { try? FileManager.default.removeItem(at: f.directory) }
+        let id = UUID()
+        _ = f.call("create_capture", f.create(id: id, note: "original"))
+        for i in 0...20 {
+            _ = try f.server.apply(
+                SyncOperation(
+                    deviceID: UUID(), sequence: 1, captureID: id, baseRevision: 1,
+                    mutation: .edit(CaptureEdit(note: NoteEdit("conflict \(i)")))))
+        }
+        let before = try f.server.baseline()
+        let capture = try XCTUnwrap(before.captures.first)
+        XCTAssertEqual(capture.noteConflicts.count, 21)
+        let projection = f.call("get_capture", ["id": .string(id.uuidString)])[
+            "structuredContent"]?.object?["capture"]?.object
+        XCTAssertEqual(projection?["note_conflict_count"], .number(21))
+        XCTAssertEqual(projection?["note_conflict_resolution_available"], .bool(false))
+        for count in [20, 21] {
+            var edit = editArguments(id: id, revision: capture.revision)
+            edit["note"] = .string("resolved")
+            edit["resolve_note_operations"] = .array(
+                capture.noteConflicts.prefix(count).map { .string($0.operationID.uuidString) })
+            XCTAssertEqual(
+                f.call("edit_capture", edit)["structuredContent"]?.object?["error"],
+                .string("note_conflict_resolution_capacity_exceeded"))
+            if count == 20 {
+                edit["sequence"] = .number(3)
+                XCTAssertEqual(
+                    f.call("edit_capture", edit)["structuredContent"]?.object?["error"],
+                    .string("sequence_conflict_expected_2"))
+            }
+        }
+        XCTAssertEqual(try f.server.baseline().cursor, before.cursor)
+        XCTAssertEqual(try f.server.baseline().captures, before.captures)
+        XCTAssertEqual(try f.store.nextSequence(deviceID: f.device), 2)
+    }
+
+    func testOriginalArgumentsRemainExactAcrossToolboxReopen() throws {
+        for variant in 0...3 {
+            let f = try MCPTests.Fixture()
+            defer { try? FileManager.default.removeItem(at: f.directory) }
+            var original = f.create(id: UUID(), operation: UUID())
+            original["rating"] = .number(3)
+            original["note"] = .null
+            XCTAssertEqual(f.call("create_capture", original)["isError"], .bool(false))
+            var changed = original
+            switch variant {
+            case 0: changed.removeValue(forKey: "rating")
+            case 1: changed.removeValue(forKey: "note")
+            case 2: changed["id"] = .string(original["id"]!.string!.lowercased())
+            default: changed["created_at"] = .string("2026-10-04T10:00:00+00:00")
+            }
+            let reopened = try MCPToolbox(store: f.store, authority: f.server)
+            XCTAssertEqual(
+                reopened.call(name: "create_capture", arguments: original, grant: f.grant).object?[
+                    "isError"], .bool(false))
+            let rejected = reopened.call(name: "create_capture", arguments: changed, grant: f.grant)
+            XCTAssertEqual(
+                rejected.object?["structuredContent"]?.object?["error"],
+                .string("operation_id_reused"))
+            XCTAssertEqual(try f.store.nextSequence(deviceID: f.device), 2)
+            XCTAssertEqual(try f.server.baseline().captures.count, 1)
+        }
+    }
+
+    func testCommittedResolutionReplaysAfterConflictCapacityChanges() throws {
+        let f = try MCPTests.Fixture()
+        defer { try? FileManager.default.removeItem(at: f.directory) }
+        let id = UUID()
+        _ = f.call("create_capture", f.create(id: id, note: "original"))
+        for i in 0...1 {
+            _ = try f.server.apply(
+                SyncOperation(
+                    deviceID: UUID(), sequence: 1, captureID: id, baseRevision: 1,
+                    mutation: .edit(CaptureEdit(note: NoteEdit("initial conflict \(i)")))))
+        }
+        let current = try XCTUnwrap(try f.server.baseline().captures.first)
+        var resolution = editArguments(id: id, revision: current.revision)
+        resolution["note"] = .string("resolved")
+        resolution["resolve_note_operations"] = .array(
+            current.noteConflicts.map { .string($0.operationID.uuidString) })
+        XCTAssertEqual(f.call("edit_capture", resolution)["isError"], .bool(false))
+        let resolved = try XCTUnwrap(try f.server.baseline().captures.first)
+        for i in 0...20 {
+            _ = try f.server.apply(
+                SyncOperation(
+                    deviceID: UUID(), sequence: 1, captureID: id, baseRevision: resolved.revision,
+                    mutation: .edit(CaptureEdit(note: NoteEdit("later conflict \(i)")))))
+        }
+        let before = try f.server.baseline()
+        XCTAssertEqual(before.captures.first?.noteConflicts.count, 21)
+        XCTAssertEqual(f.call("edit_capture", resolution)["isError"], .bool(false))
+        XCTAssertEqual(try f.server.baseline().cursor, before.cursor)
+        XCTAssertEqual(try f.server.baseline().captures, before.captures)
+    }
+
+    func testReceiptRequestIdentityContainsOnlyCanonicalDigest() throws {
+        let f = try MCPTests.Fixture()
+        defer { try? FileManager.default.removeItem(at: f.directory) }
+        let create = f.create(id: UUID(), text: "private text", note: "private note")
+        XCTAssertEqual(f.call("create_capture", create)["isError"], .bool(false))
+        var edit = editArguments(id: UUID(uuidString: create["id"]!.string!)!)
+        edit["note"] = .string("private edit")
+        edit["add_tags"] = .array([.string("private tag")])
+        XCTAssertEqual(f.call("edit_capture", edit)["isError"], .bool(false))
+        var db: OpaquePointer?
+        XCTAssertEqual(
+            sqlite3_open(f.directory.appendingPathComponent("authority.sqlite").path, &db),
+            SQLITE_OK)
+        defer { sqlite3_close(db) }
+        var statement: OpaquePointer?
+        XCTAssertEqual(
+            sqlite3_prepare_v2(
+                db, "SELECT operation FROM sync_receipts ORDER BY rowid", -1, &statement, nil),
+            SQLITE_OK)
+        defer { sqlite3_finalize(statement) }
+        for (name, arguments) in [("create_capture", create), ("edit_capture", edit)] {
+            XCTAssertEqual(sqlite3_step(statement), SQLITE_ROW)
+            let bytes = try XCTUnwrap(sqlite3_column_blob(statement, 0))
+            let data = Data(bytes: bytes, count: Int(sqlite3_column_bytes(statement, 0)))
+            let operation = try JSONDecoder().decode(SyncOperation.self, from: data)
+            let expected = try MCPToolbox.requestIdentity(name: name, arguments: arguments)
+            XCTAssertEqual(operation.requestIdentity, expected)
+            let digest = try XCTUnwrap(operation.requestIdentity?.object?["sha256"]?.string)
+            XCTAssertEqual(digest.count, 64)
+            XCTAssertTrue(digest.allSatisfy { "0123456789abcdef".contains($0) })
+            XCTAssertEqual(operation.requestIdentity?.object?.count, 1)
+            var reordered: Object = [:]
+            for key in arguments.keys.sorted().reversed() { reordered[key] = arguments[key] }
+            XCTAssertEqual(
+                try MCPToolbox.requestIdentity(name: name, arguments: reordered), expected)
+            XCTAssertEqual(f.call(name, reordered)["isError"], .bool(false))
+            var changed = arguments
+            changed["note"] = .string("changed content")
+            XCTAssertEqual(
+                f.call(name, changed)["structuredContent"]?.object?["error"],
+                .string("operation_id_reused"))
+        }
+    }
+
+    private func editArguments(id: UUID, revision: Int64 = 1) -> Object {
+        [
+            "operation_id": .string(UUID().uuidString), "sequence": .number(2),
+            "id": .string(id.uuidString), "base_revision": .number(Decimal(revision)),
+        ]
+    }
+}

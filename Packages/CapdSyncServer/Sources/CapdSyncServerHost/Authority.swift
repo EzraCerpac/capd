@@ -5,16 +5,23 @@ import Foundation
 /// Synchronous SQLite/file work runs on one dedicated queue, never on a NIO event loop.
 public final class Authority: @unchecked Sendable {
     static let maximumCachedLibraries = 16
-    private let queue = DispatchQueue(label: "capd.sync.authority")
+    let queue = DispatchQueue(label: "capd.sync.authority")
     private let dataDirectory: URL
-    private let serviceID: UUID
-    private let authorizer: ConfigurationAuthorizer
+    let serviceID: UUID
+    let authorizer: ConfigurationAuthorizer
     private let lockDescriptor: Int32
     private var servers: [UUID: SyncServer] = [:]
     private var recentlyUsedLibraries: [UUID] = []
+    let mcpConfigurationURL: URL?
+    let mcpQueueLimit = MCPQueueLimit()
 
-    public init(configurationURL: URL, dataDirectory: URL) throws {
+    public init(configurationURL: URL, dataDirectory: URL, mcpConfigurationURL: URL? = nil) throws {
+        self.mcpConfigurationURL = mcpConfigurationURL
         let configuration = try HostConfiguration.read(configurationURL)
+        if let mcpConfigurationURL {
+            try MCPBridgeConfiguration.read(mcpConfigurationURL).validateBinding(
+                serviceID: configuration.serviceID, sync: configuration)
+        }
         serviceID = configuration.serviceID
         authorizer = ConfigurationAuthorizer(
             configurationURL: configurationURL, serviceID: serviceID)
@@ -33,32 +40,7 @@ public final class Authority: @unchecked Sendable {
             queue.async { [self] in
                 let handler = SyncHTTPHandler(serviceID: serviceID, authorizer: authorizer) {
                     [self] id in
-                    if let existing = servers[id] {
-                        recentlyUsedLibraries.removeAll { $0 == id }
-                        recentlyUsedLibraries.append(id)
-                        return existing
-                    }
-                    if servers.count == Self.maximumCachedLibraries {
-                        servers.removeValue(forKey: recentlyUsedLibraries.removeFirst())
-                    }
-                    let root = dataDirectory.appendingPathComponent(
-                        id.uuidString.lowercased(), isDirectory: true)
-                    try Self.validateStoragePath(root, directory: true)
-                    try Self.validateStoragePath(
-                        root.appendingPathComponent("blobs"), directory: true)
-                    for name in [
-                        "authority.sqlite", "authority.sqlite-wal", "authority.sqlite-shm",
-                        "authority.sqlite-journal",
-                    ] {
-                        try Self.validateStoragePath(root.appendingPathComponent(name))
-                    }
-                    let server = try SyncServer(
-                        databaseURL: root.appendingPathComponent("authority.sqlite"),
-                        blobDirectory: root.appendingPathComponent("blobs", isDirectory: true),
-                        libraryID: id, serviceID: serviceID)
-                    servers[id] = server
-                    recentlyUsedLibraries.append(id)
-                    return server
+                    try server(for: id, requireExisting: false)
                 }
                 continuation.resume(returning: handler.handle(request))
             }
@@ -73,10 +55,72 @@ public final class Authority: @unchecked Sendable {
         }
     }
 
-    private static func validateStoragePath(_ path: URL, directory: Bool = false) throws {
+    func libraryRoot(_ id: UUID) -> URL {
+        dataDirectory.appendingPathComponent(id.uuidString.lowercased(), isDirectory: true)
+    }
+
+    // Called only on queue. MCP refuses absent storage instead of creating a new library.
+    func server(for id: UUID, requireExisting: Bool) throws -> SyncServer {
+        let root = libraryRoot(id)
+        let database = root.appendingPathComponent("authority.sqlite")
+        try validateLibraryStorage(id, requireExisting: requireExisting)
+        if let existing = servers[id] {
+            recentlyUsedLibraries.removeAll { $0 == id }
+            recentlyUsedLibraries.append(id)
+            return existing
+        }
+        if servers.count == Self.maximumCachedLibraries {
+            servers.removeValue(forKey: recentlyUsedLibraries.removeFirst())
+        }
+        let server = try SyncServer(
+            databaseURL: database,
+            blobDirectory: root.appendingPathComponent("blobs", isDirectory: true),
+            libraryID: id, serviceID: serviceID)
+        servers[id] = server
+        recentlyUsedLibraries.append(id)
+        return server
+    }
+
+    // Validate without constructing a read-write SyncServer or creating directories.
+    func validateExistingLibrary(_ id: UUID) throws {
+        try validateLibraryStorage(id, requireExisting: true)
+    }
+
+    private func validateLibraryStorage(_ id: UUID, requireExisting: Bool) throws {
+        let root = libraryRoot(id)
+        try Self.validateStoragePath(root, directory: true, mustExist: requireExisting)
+        let blobs = root.appendingPathComponent("blobs")
+        try Self.validateStoragePath(blobs, directory: true, mustExist: requireExisting)
+        if requireExisting {
+            let marker = blobs.appendingPathComponent("library-owner")
+            let fd = open(marker.path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK)
+            guard fd >= 0 else { throw HostError.invalidDataDirectory }
+            let file = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
+            defer { try? file.close() }
+            var status = stat()
+            guard fstat(fd, &status) == 0, status.st_mode & S_IFMT == S_IFREG,
+                (1...1_024).contains(status.st_size),
+                let bytes = try file.read(upToCount: 1_025), bytes.count <= 1_024,
+                try JSONDecoder().decode(SyncLibraryBinding.self, from: bytes)
+                    == SyncLibraryBinding(libraryID: id, serviceID: serviceID)
+            else { throw HostError.invalidDataDirectory }
+        }
+        for name in [
+            "authority.sqlite", "authority.sqlite-wal", "authority.sqlite-shm",
+            "authority.sqlite-journal",
+        ] {
+            try Self.validateStoragePath(
+                root.appendingPathComponent(name),
+                mustExist: requireExisting && name == "authority.sqlite")
+        }
+    }
+
+    private static func validateStoragePath(
+        _ path: URL, directory: Bool = false, mustExist: Bool = false
+    ) throws {
         var status = stat()
         if lstat(path.path, &status) != 0 {
-            guard errno == ENOENT else { throw HostError.invalidDataDirectory }
+            guard errno == ENOENT, !mustExist else { throw HostError.invalidDataDirectory }
             return
         }
         guard status.st_mode & S_IFMT == (directory ? S_IFDIR : S_IFREG),

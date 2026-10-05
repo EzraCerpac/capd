@@ -3,6 +3,7 @@ import GRDB
 
 /// A single-library authority. HTTP access requires an immutable libraryID.
 public final class SyncServer: SyncTransport, Sendable {
+    public enum NoteResolutionError: Error { case capacity, unavailable, stale }
     private let writer: any DatabaseWriter
     private let binding: SyncLibraryBinding?
     public let blobs: BlobStore
@@ -63,11 +64,62 @@ public final class SyncServer: SyncTransport, Sendable {
         try apply(operation, validating: { _, _, _ in })
     }
 
+    /// A dedicated service writer cannot inherit an ordinary device's retained history.
+    public func reserveServiceWriter(deviceID: UUID, principalID: String) throws {
+        let zeroDeviceID = UUID(uuid: (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0))
+        guard !principalID.isEmpty, deviceID != zeroDeviceID else { throw SyncError.wrongDevice }
+        try write { db in
+            try db.execute(
+                sql: """
+                    CREATE TABLE IF NOT EXISTS sync_service_writers (
+                        device TEXT PRIMARY KEY, principal TEXT NOT NULL);
+                    """)
+            guard
+                try Bool.fetchOne(
+                    db,
+                    sql:
+                        "SELECT EXISTS(SELECT 1 FROM sync_service_writers WHERE principal=? AND device<>?)",
+                    arguments: [principalID, deviceID.uuidString]) == false
+            else { throw SyncError.wrongDevice }
+            if let owner = try String.fetchOne(
+                db, sql: "SELECT principal FROM sync_service_writers WHERE device=?",
+                arguments: [deviceID.uuidString])
+            {
+                guard owner == principalID else { throw SyncError.wrongDevice }
+                return
+            }
+            guard
+                try Bool.fetchOne(
+                    db, sql: "SELECT EXISTS(SELECT 1 FROM sync_devices WHERE id=?)",
+                    arguments: [deviceID.uuidString]) == false
+            else { throw SyncError.wrongDevice }
+            try db.execute(
+                sql: "INSERT INTO sync_service_writers (device, principal) VALUES (?, ?)",
+                arguments: [deviceID.uuidString, principalID])
+        }
+    }
+
+    public func apply(
+        _ operation: SyncOperation, servicePrincipalID: String?,
+        requireExactNoteResolution: Bool = false
+    ) throws -> SyncReceipt {
+        try apply(
+            operation, servicePrincipalID: servicePrincipalID,
+            requireExactNoteResolution: requireExactNoteResolution, validating: { _, _, _ in })
+    }
+
     func apply(
-        _ operation: SyncOperation,
+        _ operation: SyncOperation, servicePrincipalID: String? = nil,
+        requireExactNoteResolution: Bool = false,
         validating validate: (Database, SyncReceipt, FeedChange?) throws -> Void
     ) throws -> SyncReceipt {
         try write { db in
+            let owner =
+                try db.tableExists("sync_service_writers")
+                ? String.fetchOne(
+                    db, sql: "SELECT principal FROM sync_service_writers WHERE device=?",
+                    arguments: [operation.deviceID.uuidString]) : nil
+            guard owner == servicePrincipalID else { throw SyncError.wrongDevice }
             if let row = try Row.fetchOne(
                 db, sql: "SELECT operation, receipt FROM sync_receipts WHERE id = ?",
                 arguments: [operation.id.uuidString])
@@ -117,6 +169,15 @@ public final class SyncServer: SyncTransport, Sendable {
             }
             let cursor = try Int64.fetchOne(db, sql: "SELECT cursor FROM sync_meta")! + 1
             var record = try SyncDatabase.record(db, id: id)
+            if requireExactNoteResolution {
+                guard case .edit(let edit) = operation.mutation, let note = edit.note,
+                    let current = record, !current.deleted
+                else { throw NoteResolutionError.unavailable }
+                guard current.noteConflicts.count <= 20 else { throw NoteResolutionError.capacity }
+                guard Set(note.resolving) == Set(current.noteConflicts.map(\.operationID)),
+                    operation.baseRevision >= current.noteRevision
+                else { throw NoteResolutionError.stale }
+            }
             var outcome: SyncReceipt.Outcome = .accepted
             var changed = false
             switch operation.mutation {

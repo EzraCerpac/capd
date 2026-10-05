@@ -7,6 +7,9 @@ let package = Package(
     products: [.executable(name: "capd-sync-server", targets: ["CapdSyncServer"])],
     dependencies: [
         .package(path: "../CapdSync"),
+        .package(path: "../CapdMCP"),
+        .package(
+            url: "https://github.com/swift-server/swift-service-lifecycle.git", exact: "2.12.0"),
         .package(url: "https://github.com/apple/swift-nio.git", exact: "2.103.0"),
         .package(url: "https://github.com/apple/swift-http-types.git", exact: "1.8.0"),
         // Newer Collections Span helpers do not compile with the installed Xcode Swift 6.4 preview.
@@ -18,6 +21,8 @@ let package = Package(
             name: "CapdSyncServerHost",
             dependencies: [
                 .product(name: "CapdSync", package: "CapdSync"),
+                .product(name: "CapdMCP", package: "CapdMCP"),
+                .product(name: "ServiceLifecycle", package: "swift-service-lifecycle"),
                 .product(name: "Hummingbird", package: "hummingbird"),
                 .product(name: "HTTPTypes", package: "swift-http-types"),
                 .product(name: "NIOCore", package: "swift-nio"),

@@ -1,10 +1,112 @@
+import CapdMCP
 import CapdSync
+import Darwin
 import Foundation
 import HTTPTypes
 import Hummingbird
 import NIOCore
+import ServiceLifecycle
 
 public enum HostHTTP {
+    enum MCPBodyError: Error { case expired }
+    struct Admissions {
+        let sync = Admission()
+        let mcp = Admission()
+    }
+
+    static func handleSyncBody(
+        _ body: RequestBody, headers: [String: String], authority: Authority,
+        admission: Admission
+    ) async -> Response {
+        guard await admission.acquire() else { return failure(.unavailable, status: 503) }
+        let reply: Response
+        do {
+            let buffer = try await body.collect(upTo: SyncHTTPHandler.maximumBodyBytes)
+            reply = response(
+                await authority.handle(
+                    SyncHTTPRequest(
+                        method: "POST", path: "/v1/sync", headers: headers,
+                        body: Data(buffer.readableBytesView))))
+        } catch {
+            reply = bodyFailure(error)
+        }
+        await admission.release()
+        return reply
+    }
+
+    static func collectMCPBody(_ body: RequestBody, deadline: DispatchTime) async throws
+        -> ByteBuffer
+    {
+        try await withThrowingTaskGroup(of: ByteBuffer.self) { group in
+            group.addTask { try await body.collect(upTo: 65_536) }
+            group.addTask {
+                let now = DispatchTime.now().uptimeNanoseconds
+                if deadline.uptimeNanoseconds > now {
+                    try await Task.sleep(nanoseconds: deadline.uptimeNanoseconds - now)
+                }
+                throw MCPBodyError.expired
+            }
+            defer { group.cancelAll() }
+            return try await group.next()!
+        }
+    }
+
+    static func handleMCPBody(
+        _ body: RequestBody, headers: [String: String], authority: Authority,
+        admission: Admission, deadline: DispatchTime
+    ) async -> Response {
+        guard await admission.acquire() else { return mcpResponse(MCPWork.failure(503)) }
+        let reply: Response
+        do {
+            let buffer = try await collectMCPBody(body, deadline: deadline)
+            reply = mcpResponse(
+                await authority.handleMCP(
+                    MCPHTTPRequest(
+                        method: "POST", path: "/mcp", headers: headers,
+                        body: Data(buffer.readableBytesView)), deadline: deadline))
+        } catch {
+            let status = error is MCPBodyError ? 504 : (error is NIOTooManyBytesError ? 413 : 503)
+            reply = mcpResponse(MCPWork.failure(status))
+        }
+        await admission.release()
+        return reply
+    }
+
+    static func protectMCPBoundSocket(
+        _ socketURL: URL,
+        protector: @Sendable (URL) throws -> Void = MCPUnixSocket.protectBoundSocket
+    ) -> Bool {
+        do {
+            try protector(socketURL)
+            return true
+        } catch {
+            try? MCPUnixSocket.removeBoundSocket(socketURL)
+            return false
+        }
+    }
+
+    public static func mcpHeaders(_ fields: HTTPFields) -> [String: String]? {
+        var result: [String: String] = [:]
+        var bytes = 0
+        let sensitive: Set<String> = [
+            "authorization", "content-type", "accept", "origin", "mcp-protocol-version",
+            "mcp-method", "mcp-name",
+        ]
+        for field in fields {
+            let name = field.name.rawName.lowercased()
+            bytes += name.utf8.count + field.value.utf8.count
+            guard bytes <= 16_384 else { return nil }
+            if sensitive.contains(name) {
+                guard result[name] == nil else { return nil }
+                result[name] = field.value
+            }
+        }
+        return result
+    }
+
+    public static func mcpResponse(_ reply: MCPHTTPResponse) -> Response {
+        response(SyncHTTPResponse(status: reply.status, headers: reply.headers, body: reply.body))
+    }
     /// Preserve multiplicity until sensitive headers have been checked.
     public static func headers(_ fields: HTTPFields) -> [String: String]? {
         var result: [String: String] = [:]
@@ -41,29 +143,26 @@ public enum HostHTTP {
         return failure(.unavailable, status: 503)
     }
 
-    public static func run(configurationURL: URL, dataDirectory: URL, port: Int) async throws {
+    public static func run(
+        configurationURL: URL, dataDirectory: URL, port: Int,
+        mcpConfigurationURL: URL? = nil, mcpSocketURL: URL? = nil
+    ) async throws {
+        guard (0...65_535).contains(port),
+            (mcpConfigurationURL == nil) == (mcpSocketURL == nil)
+        else { throw HostError.invalidArguments }
+        if let mcpSocketURL { try MCPUnixSocket.validatePath(mcpSocketURL, mustExist: false) }
         let authority = try Authority(
-            configurationURL: configurationURL, dataDirectory: dataDirectory)
-        let admission = Admission()
+            configurationURL: configurationURL, dataDirectory: dataDirectory,
+            mcpConfigurationURL: mcpConfigurationURL)
+        let admissions = Admissions()
         let router = Router()
         router.post("/v1/sync") { request, _ -> Response in
             guard let headers = headers(request.headers) else {
                 return failure(.malformedRequest, status: 400)
             }
-            guard await admission.acquire() else { return failure(.unavailable, status: 503) }
-            let reply: Response
-            do {
-                let buffer = try await request.body.collect(upTo: SyncHTTPHandler.maximumBodyBytes)
-                reply = response(
-                    await authority.handle(
-                        SyncHTTPRequest(
-                            method: "POST", path: "/v1/sync", headers: headers,
-                            body: Data(buffer.readableBytesView))))
-            } catch {
-                reply = bodyFailure(error)
-            }
-            await admission.release()
-            return reply
+            return await handleSyncBody(
+                request.body, headers: headers, authority: authority,
+                admission: admissions.sync)
         }
         let application = Application(
             router: router,
@@ -74,6 +173,43 @@ public enum HostHTTP {
                     fflush(stdout)
                 }
             })
-        try await application.runService()
+        guard mcpConfigurationURL != nil else {
+            try await application.runService()
+            return
+        }
+        // Preserve fail-closed startup for existing paths, but allow graceful restarts.
+        defer {
+            if let mcpSocketURL,
+                (try? MCPUnixSocket.validatePath(mcpSocketURL, mustExist: true)) != nil
+            {
+                _ = unlink(mcpSocketURL.path)
+            }
+        }
+        let mcpRouter = Router()
+        mcpRouter.post("/mcp") { request, _ -> Response in
+            let deadline = DispatchTime.now() + .seconds(5)
+            guard let headers = mcpHeaders(request.headers) else {
+                return mcpResponse(MCPWork.failure(400))
+            }
+            return await handleMCPBody(
+                request.body, headers: headers, authority: authority,
+                admission: admissions.mcp, deadline: deadline)
+        }
+        let mcpApplication = Application(
+            router: mcpRouter,
+            configuration: .init(address: .unixDomainSocket(path: mcpSocketURL!.path)),
+            onServerRunning: { channel in
+                guard protectMCPBoundSocket(mcpSocketURL!) else {
+                    FileHandle.standardError.write(
+                        Data("capd-mcp-bridge: socket protection failed\n".utf8))
+                    exit(1)
+                }
+                print("capd-mcp-bridge ready private socket")
+                fflush(stdout)
+            })
+        try await ServiceGroup(
+            services: [application, mcpApplication],
+            gracefulShutdownSignals: [.sigterm, .sigint], logger: application.logger
+        ).run()
     }
 }

@@ -165,6 +165,108 @@ struct ClientResponseValidationTests {
         #expect(probe.count == 0)
     }
 
+    @Test(arguments: [false, true])
+    func invalidLocalFeedAliasIsRejectedBeforeCaching(asynchronous: Bool) async throws {
+        let binding = SyncLibraryBinding(libraryID: UUID(), serviceID: UUID())
+        let f = try ResponseFixture(binding: binding)
+        defer { f.clean() }
+        let pending = f.capture("pending local work")
+        let operation = try f.client.enqueue(captureID: pending.id, mutation: .create(pending))
+        let before = try f.durableState()
+        let files = try FileManager.default.contentsOfDirectory(
+            atPath: f.client.blobs.directory.path)
+        let probe = DownloadProbe()
+        for _ in 0..<2 {
+            let blob = try f.server.blobs.put(Data(UUID().uuidString.utf8))
+            var capture = SharedCapture(source: CaptureSource(kind: .image, blob: blob))
+            capture.revision = 1
+            var invalid = SharedCapture(source: CaptureSource(kind: .image, blob: blob))
+            invalid.revision = 2
+            let page = FeedPage(
+                cursor: 2,
+                changes: [
+                    FeedChange(
+                        cursor: 1, operationID: UUID(), deviceID: UUID(), sequence: 1,
+                        requestedCaptureID: capture.id, capture: capture),
+                    FeedChange(
+                        cursor: 2, operationID: UUID(), deviceID: f.client.deviceID, sequence: 1,
+                        requestedCaptureID: UUID(), capture: invalid),
+                ])
+            if asynchronous {
+                let transport = LocalFeedWire(
+                    binding: binding, deviceID: f.client.deviceID,
+                    server: f.server, page: page, probe: probe)
+                await #expect(throws: SyncError.invalidOperation) {
+                    try await f.client.pull(from: transport, credential: { "synthetic" })
+                }
+            } else {
+                let transport = BoundResponseTransport(
+                    transport: ResponseTransport(
+                        server: f.server, page: page, onDownload: { probe.record() }),
+                    binding: binding, deviceID: f.client.deviceID)
+                #expect(throws: SyncError.invalidOperation) { try f.client.pull(from: transport) }
+            }
+            #expect(probe.count == 0)
+            #expect(try f.durableState() == before)
+            #expect(try f.client.cursor() == 0)
+            #expect(try f.client.pendingOperations() == [operation])
+            #expect(
+                try FileManager.default.contentsOfDirectory(atPath: f.client.blobs.directory.path)
+                    == files)
+        }
+    }
+
+    @Test func samePageLocalAliasAndDependentEditRemainValid() throws {
+        let f = try ResponseFixture()
+        defer { f.clean() }
+        let download = try f.server.blobs.put(Data("new remote image".utf8))
+        let remote = SharedCapture(source: CaptureSource(kind: .image, blob: download))
+        _ = try f.server.apply(
+            SyncOperation(
+                deviceID: UUID(), sequence: 1,
+                captureID: remote.id, baseRevision: 0, mutation: .create(remote)))
+        let bytes = Data("same-page image alias".utf8)
+        let blob = try f.server.blobs.put(bytes)
+        let original = SharedCapture(
+            source: CaptureSource(kind: .image, contentHash: blob.digest, blob: blob))
+        _ = try f.server.apply(
+            SyncOperation(
+                deviceID: UUID(), sequence: 1,
+                captureID: original.id, baseRevision: 0, mutation: .create(original)))
+        _ = try f.client.blobs.put(bytes)
+        let duplicate = SharedCapture(source: original.source)
+        let create = try f.client.enqueue(captureID: duplicate.id, mutation: .create(duplicate))
+        let edit = try f.client.enqueue(
+            captureID: duplicate.id,
+            mutation: .edit(CaptureEdit(note: NoteEdit("dependent note"))))
+        _ = try f.server.apply(create)
+        _ = try f.server.apply(edit)
+        let client = f.client
+        let writer = f.writer
+        let probe = DownloadProbe()
+        try client.pull(
+            from: ResponseTransport(
+                server: f.server,
+                onDownload: {
+                    probe.record()
+                    #expect((try? client.cursor()) == 0)
+                    #expect((try? client.pendingOperations()) == [create, edit])
+                    for table in ["sync_records", "sync_receipts", "sync_aliases", "sync_observed"]
+                    {
+                        #expect(
+                            (try? writer.read {
+                                try Int.fetchOne($0, sql: "SELECT COUNT(*) FROM \(table)")
+                            }) == 0)
+                    }
+                }))
+        #expect(probe.count == 1)
+        #expect(try f.client.cursor() == 4)
+        #expect(try f.client.captures().first { $0.id == original.id }?.note == "dependent note")
+        #expect(try f.client.pendingOperations() == [create, edit])
+        try f.client.push(to: f.server)
+        #expect(try f.client.pendingOperations().isEmpty)
+    }
+
     @Test func samePageIdentitySubstitutionIsRejectedBeforeCaching() throws {
         let f = try ResponseFixture()
         defer { f.clean() }
@@ -1089,4 +1191,31 @@ private struct BoundResponseTransport: BoundSyncTransport {
         try transport.upload(blob, offset: offset, chunk: chunk, final: final)
     }
     func download(_ blob: BlobReference) throws -> Data { try transport.download(blob) }
+}
+
+private struct LocalFeedWire: AsyncSyncTransport {
+    let binding: SyncLibraryBinding
+    let deviceID: UUID
+    let server: SyncServer
+    let page: FeedPage
+    let probe: DownloadProbe
+    func send(_ request: SyncHTTPRequest) async throws -> SyncHTTPResponse {
+        let envelope = try SyncDatabase.decode(SyncHTTPEnvelope.self, request.body)
+        let result: SyncHTTPResult
+        switch envelope.action {
+        case .changes: result = .page(page)
+        case .download(let blob):
+            probe.record()
+            result = .data(try server.download(blob))
+        default: throw SyncHTTPError.invalidResponse
+        }
+        return SyncHTTPResponse(
+            status: 200, headers: ["Content-Type": "application/json"],
+            body: try SyncDatabase.encode(
+                SyncHTTPReply(
+                    version: 1,
+                    principal: SyncPrincipal(
+                        serviceID: binding.serviceID,
+                        libraryID: binding.libraryID, deviceID: deviceID), result: result)))
+    }
 }

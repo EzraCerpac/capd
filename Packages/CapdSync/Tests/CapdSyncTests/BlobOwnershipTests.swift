@@ -28,6 +28,49 @@ struct BlobOwnershipTests {
         #expect(try reopened.blobs.read(blob) == bytes)
     }
 
+    @Test(arguments: ["missing", "empty", "replacement", "unmarked"])
+    func boundClientReopenRequiresExistingMatchingBlobOwner(state: String) throws {
+        let fixture = BlobOwnershipFixture()
+        defer { fixture.clean() }
+        let binding = SyncLibraryBinding(libraryID: UUID(), serviceID: UUID())
+        let client = try fixture.client("bound", binding: binding)
+        let bytes = Data("pending offline image".utf8)
+        let blob = try client.blobs.put(bytes)
+        let capture = SharedCapture(source: CaptureSource(kind: .image, blob: blob))
+        let operation = try client.enqueue(captureID: capture.id, mutation: .create(capture))
+        let directory =
+            state == "replacement"
+            ? fixture.root.appendingPathComponent("replacement") : client.blobs.directory
+        if state == "unmarked" {
+            try FileManager.default.removeItem(
+                at: directory.appendingPathComponent("library-owner"))
+        } else if state != "replacement" {
+            try FileManager.default.removeItem(at: directory)
+        }
+        if state == "empty" || state == "replacement" {
+            try FileManager.default.createDirectory(
+                at: directory, withIntermediateDirectories: true)
+        }
+        let database = fixture.root.appendingPathComponent("bound.sqlite")
+        let before = try Data(contentsOf: database)
+        let files = try? FileManager.default.contentsOfDirectory(atPath: directory.path)
+        #expect(throws: SyncBindingError.mismatch) {
+            try fixture.client("bound", binding: binding, blobDirectory: directory)
+        }
+        #expect(try Data(contentsOf: database) == before)
+        #expect((try? FileManager.default.contentsOfDirectory(atPath: directory.path)) == files)
+        #expect(try client.pendingOperations() == [operation])
+        #expect(
+            !FileManager.default.fileExists(
+                atPath: directory.appendingPathComponent("library-owner").path))
+        if state == "replacement" {
+            let reopened = try fixture.client("bound", binding: binding)
+            #expect(reopened.deviceID == client.deviceID)
+            #expect(try reopened.pendingOperations() == [operation])
+            #expect(try reopened.blobs.read(blob) == bytes)
+        }
+    }
+
     @Test func emptyDirectoryCannotEnrollTwoLibraries() throws {
         let fixture = BlobOwnershipFixture()
         defer { fixture.clean() }

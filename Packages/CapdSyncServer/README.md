@@ -82,3 +82,13 @@ uv run --no-project --python /usr/bin/python3 \
 ```
 
 It checks authentication and identity gates, duplicate headers, body limits, exact operation retry, baseline/feed, blob transfer, immediate revocation, persistence across restart, service binding and graceful SIGTERM. It never contacts the NAS.
+
+## Optional assistant bridge
+
+Pass both `--mcp-bridge-config PATH` and `--mcp-socket PATH` to enable the separate private Unix-socket bridge. Omitting both preserves the sync-only listener. The socket uses mode `0600` and requires the same service user; its parent directory must be privately owned. An existing socket is refused rather than replaced. The host removes its socket during graceful shutdown.
+
+The strict bridge policy contains `version: 1`, `serviceID`, `libraryID`, an HTTPS `resource` ending in `/mcp`, `principalID`, `credentialSHA256`, `scopes`, `revoked`, and a `writerDeviceID` when `capd:write` is granted. Read access requires `capd:read`; create/edit access requires both scopes. The verifier and writer identity must differ from every ordinary sync enrollment. The authority persistently reserves the writer UUID for its principal and refuses UUIDs with prior sync-device history, including removed enrollments. Reserved UUIDs cannot write through ordinary sync or transfer to another principal. An existing bridge writer with unreserved history requires a fresh writer UUID. Keep the policy owner-only and replace it atomically; each request reloads policy on the authority queue.
+
+The ordinary sync listener and private MCP socket each admit up to eight bodies independently. Incomplete sync bodies cannot consume the private bridge's admission slots.
+
+`capd-mcp-stdio --credential-file PATH --socket PATH` bridges JSON-RPC over stdin/stdout to that socket. Its credential file is separate from device-sync credentials and any external tunnel credential. No new public HTTP route or OAuth issuer is enabled by these flags. See `../CapdMCP/README.md` for tool schemas and limits.
