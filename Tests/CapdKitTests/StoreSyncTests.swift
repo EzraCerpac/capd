@@ -9,6 +9,294 @@ import Testing
 
 @Suite("Opt-in Mac Store sync")
 struct StoreSyncTests {
+    @Test func captureBatchIsolatesWriteFailuresWithoutReorderingResults() throws {
+        try fixture { paths, binding, _ in
+            let store = try Store(paths: paths, syncBinding: binding)
+            let client = try #require(store.syncClient)
+            try store.dbPool.write { db in
+                try db.execute(
+                    sql: """
+                        CREATE TRIGGER reject_bad_capture BEFORE INSERT ON sync_outbox
+                        WHEN instr(CAST(NEW.payload AS TEXT), 'Rejected synthetic row') > 0
+                        BEGIN SELECT RAISE(ABORT,'synthetic per-row refusal'); END
+                        """)
+            }
+            let results = CaptureService(store: store).ingest([
+                CaptureRequest(text: "First good row"),
+                CaptureRequest(text: "Rejected synthetic row"),
+                CaptureRequest(text: "Last good row"), CaptureRequest(),
+                CaptureRequest(text: "First good row"),
+            ])
+            #expect(results.count == 5)
+            let first = try results[0].get()
+            #expect(throws: (any Error).self) { try results[1].get() }
+            let last = try results[2].get()
+            #expect(throws: CaptureError.emptyRequest) { try results[3].get() }
+            let duplicate = try results[4].get()
+            #expect(first.capture.id! < last.capture.id!)
+            #expect(duplicate.capture.id == first.capture.id)
+            #expect(duplicate.capture.seenCount == 2)
+            let operations = try client.pendingOperations()
+            #expect(operations.map(\.sequence) == [1, 2, 3, 4])
+            #expect(try SearchService(store: store).search("Rejected synthetic").isEmpty)
+            #expect(try store.reader.read { try Capture.fetchCount($0) } == 2)
+        }
+    }
+
+    @Test(arguments: [false, true])
+    func captureBatchRepeatsTombstoneSequentialFallback(acceptedDelete: Bool) throws {
+        try fixture { paths, binding, server in
+            let store = try Store(paths: paths, syncBinding: binding)
+            let client = try #require(store.syncClient)
+            let transport = StoreTestTransport(
+                server: server, binding: binding, deviceID: client.deviceID)
+            let service = CaptureService(store: store)
+            let first = try service.ingest(CaptureRequest(text: "Repeated tombstone")).capture
+            let originalID = try #require(try client.pendingOperations().first?.captureID)
+            try client.push(to: transport)
+            _ = try store.deleteCaptures(ids: [first.id!])
+            if acceptedDelete { try client.push(to: transport) }
+            let prior = try client.pendingOperations()
+            let results = try service.ingest([
+                CaptureRequest(text: "Repeated tombstone"),
+                CaptureRequest(text: "Repeated tombstone"),
+            ]).map { try $0.get() }
+            #expect(results[0].capture.id! > first.id!)
+            #expect(results[1].capture.id! > results[0].capture.id!)
+            #expect(results.allSatisfy { $0.capture.seenCount == 1 })
+            let operations = try client.pendingOperations()
+            #expect(Array(operations.prefix(prior.count)) == prior)
+            let creates = Array(operations.dropFirst(prior.count))
+            #expect(creates.count == 2)
+            #expect(creates[0].captureID != originalID)
+            #expect(creates[1].captureID != creates[0].captureID)
+            for operation in creates {
+                guard case .create = operation.mutation else {
+                    Issue.record("Expected a new create")
+                    return
+                }
+            }
+            #expect(creates.map(\.sequence) == [3, 4])
+            #expect(creates.allSatisfy { $0.baseRevision == 0 && $0.predecessorID == nil })
+            #expect(try store.reader.read { try Capture.fetchCount($0) } == 0)
+            #expect(try SearchService(store: store).search("Repeated tombstone").isEmpty)
+            #expect(try client.push(to: transport).suffix(2).allSatisfy { $0.outcome == .deleted })
+            #expect(try client.pendingOperations().isEmpty)
+            #expect(try server.baseline().captures.first?.id == originalID)
+            #expect(try server.baseline().captures.first?.deleted == true)
+        }
+    }
+
+    @Test func unsyncedBatchKeepsSaturatedCountAndInputOrder() throws {
+        try fixture { paths, _, _ in
+            let store = try Store(paths: paths)
+            let service = CaptureService(store: store)
+            let original = try service.ingest(CaptureRequest(text: "Local maximum")).capture
+            try store.dbPool.write { db in
+                try db.execute(
+                    sql: "UPDATE captures SET seen_count=? WHERE id=?",
+                    arguments: [Int.max, original.id])
+            }
+            let results = try service.ingest([
+                CaptureRequest(text: "Local maximum"), CaptureRequest(text: "New local row"),
+                CaptureRequest(text: "Local maximum"),
+            ]).map { try $0.get() }
+            #expect(results[0].capture.id == original.id)
+            #expect(results[2].capture.id == original.id)
+            #expect(results[0].capture.seenCount == Int.max)
+            #expect(results[2].capture.seenCount == Int.max)
+            #expect(try store.reader.read { try Capture.fetchCount($0) } == 2)
+        }
+    }
+
+    @Test func batchDuplicateOutcomesMatchSequentialTaggingInvalidation() throws {
+        try fixture { paths, binding, _ in
+            let store = try Store(paths: paths, syncBinding: binding)
+            let control = try Store(
+                paths: StoragePaths(root: paths.root.appendingPathComponent("control")),
+                syncBinding: binding)
+            let initialTime = Date(timeIntervalSince1970: 1_700_000_000)
+            for candidate in [store, control] {
+                let original = try CaptureService(store: candidate).ingest(
+                    CaptureRequest(text: "Tagging source", capturedAt: initialTime)
+                ).capture
+                #expect(
+                    try candidate.completeTagging(
+                        id: original.id!, tags: [],
+                        taxonomy: Taxonomy(version: 2, tags: [], updatedAt: initialTime),
+                        now: initialTime))
+            }
+            let requests = [
+                CaptureRequest(
+                    text: "Tagging source", title: "New title", note: "Added note",
+                    tags: ["zebra", "apple"], capturedAt: initialTime.addingTimeInterval(1)),
+                CaptureRequest(
+                    text: "Tagging source", title: "Ignored title", tags: ["ignored"],
+                    capturedAt: initialTime.addingTimeInterval(2)),
+            ]
+            let expected = try requests.map { try CaptureService(store: control).ingest($0) }
+            let actual = try CaptureService(store: store).ingest(requests).map { try $0.get() }
+            #expect(actual == expected)
+            #expect(actual[1].capture.tagsVersion == 0)
+            let persisted = try store.reader.read {
+                try Capture.fetchAll($0, sql: "SELECT * FROM captures ORDER BY id")
+            }
+            let reference = try control.reader.read {
+                try Capture.fetchAll($0, sql: "SELECT * FROM captures ORDER BY id")
+            }
+            #expect(persisted == reference)
+        }
+    }
+
+    @Test func atomicCaptureBatchRollsBackAndPreservesAdmission() throws {
+        try fixture { paths, binding, _ in
+            let store = try Store(paths: paths, syncBinding: binding)
+            let client = try #require(store.syncClient)
+            let sentinel = try CaptureService(store: store).ingest(CaptureRequest(text: "Sentinel"))
+            let original = try client.pendingOperations()
+            let before = try store.reader.read {
+                try Capture.fetchAll($0, sql: "SELECT * FROM captures ORDER BY id")
+            }
+            let sequence = try store.reader.read {
+                try Int64.fetchOne($0, sql: "SELECT sequence FROM sync_meta")
+            }
+            try store.dbPool.write { db in
+                try db.execute(sql: "CREATE TABLE bulk_audit (id TEXT)")
+                try db.execute(
+                    sql:
+                        "CREATE TRIGGER audit_bulk AFTER UPDATE ON sync_visible BEGIN INSERT INTO bulk_audit VALUES (NEW.id); END"
+                )
+                try db.execute(
+                    sql:
+                        "CREATE TRIGGER fail_bulk BEFORE INSERT ON sync_outbox WHEN NEW.sequence=3 BEGIN SELECT RAISE(ABORT,'synthetic failed batch'); END"
+                )
+            }
+            let captures = (1...3).map {
+                Capture(
+                    kind: .text, selection: "Batch source \($0)", contentHash: "batch-source-\($0)",
+                    createdAt: Date(timeIntervalSince1970: 1_700_000_000))
+            }
+            #expect(throws: (any Error).self) { try store.upsertCaptures(captures) }
+            #expect(try client.pendingOperations() == original)
+            let after = try store.reader.read {
+                try Capture.fetchAll($0, sql: "SELECT * FROM captures ORDER BY id")
+            }
+            #expect(after == before)
+            #expect(
+                try store.reader.read {
+                    try Int64.fetchOne($0, sql: "SELECT sequence FROM sync_meta")
+                } == sequence)
+            #expect(
+                try store.reader.read {
+                    try Int.fetchOne($0, sql: "SELECT COUNT(*) FROM bulk_audit")
+                } == 0)
+            #expect(try SearchService(store: store).search("Batch source").isEmpty)
+            #expect(try SearchService(store: store).capture(id: sentinel.capture.id!) != nil)
+            try store.dbPool.write { try $0.execute(sql: "DROP TRIGGER fail_bulk") }
+            var invalid = captures[1]
+            invalid.rating = 0
+            #expect(throws: (any Error).self) {
+                try store.upsertCaptures([captures[0], invalid, captures[2]])
+            }
+            #expect(try client.pendingOperations() == original)
+            #expect(try store.reader.read { try Capture.fetchCount($0) } == 1)
+            #expect(throws: SyncError.invalidOperation) {
+                try store.upsertCaptures(
+                    Array(repeating: captures[0], count: Store.captureBatchSize + 1))
+            }
+            _ = try store.upsertCaptures(captures)
+            #expect(try client.pendingOperations().map(\.sequence) == Array(1...4))
+            #expect(
+                try store.reader.read {
+                    try Int.fetchOne($0, sql: "SELECT COUNT(*) FROM bulk_audit")
+                } == 1)
+        }
+    }
+
+    @Test func pinboardBulkCapturesProjectOnceAndKeepDuplicateOrder() throws {
+        try fixture { paths, binding, server in
+            let store = try Store(paths: paths, syncBinding: binding)
+            let service = CaptureService(store: store)
+            _ = try service.ingest(CaptureRequest(text: "Existing sentinel"))
+            let client = try #require(store.syncClient)
+            try store.dbPool.write { db in
+                try db.execute(sql: "CREATE TABLE ingest_projections (id TEXT)")
+                for event in ["INSERT", "UPDATE"] {
+                    try db.execute(
+                        sql:
+                            "CREATE TRIGGER ingest_\(event) AFTER \(event) ON sync_visible BEGIN INSERT INTO ingest_projections VALUES (NEW.id); END"
+                    )
+                }
+            }
+            let data = Data(
+                """
+                [{"href":"https://example.com/a","description":"First title","tags":"manual","time":"2020-01-01T00:00:00Z"},
+                 {"href":"https://example.com/b","time":"2020-01-02T00:00:00Z"},
+                 {"href":"https://example.com/a","extended":"Later note","tags":"ignored","time":"2020-01-03T00:00:00Z"},
+                 {"href":"https://example.com/c","time":"2020-01-04T00:00:00Z"}]
+                """.utf8)
+            let summary = try PinboardImporter(captures: service).run(data: data)
+            #expect(summary.imported == 3 && summary.merged == 1 && summary.failures.isEmpty)
+            let projected = try store.reader.read {
+                try Int.fetchOne($0, sql: "SELECT COUNT(*) FROM ingest_projections")
+            }
+            #expect(projected == 4)
+            let queued = try client.pendingOperations()
+            #expect(queued.map(\.sequence) == Array(1...6))
+            #expect(queued[3].captureID == queued[1].captureID)
+            #expect(queued[3].predecessorID == queued[1].id)
+            #expect(queued[4].predecessorID == queued[3].id)
+            let duplicate = try #require(
+                try store.reader.read {
+                    try Capture.filter(Capture.CodingKeys.url == "https://example.com/a").fetchOne(
+                        $0)
+                })
+            #expect(duplicate.seenCount == 2 && duplicate.note == "Later note")
+            #expect(duplicate.title == "First title" && duplicate.tagList == ["manual"])
+            let id = try #require(duplicate.id)
+            let transport = StoreTestTransport(
+                server: server, binding: binding, deviceID: client.deviceID)
+            try client.push(to: transport)
+            try client.pull(from: transport)
+            #expect(try client.pendingOperations().isEmpty)
+            #expect(try SearchService(store: store).capture(id: id)?.seenCount == 2)
+            #expect(try SearchService(store: store).capture(id: id)?.note == "Later note")
+        }
+    }
+
+    @Test func recaptureSaturatesProtocolMaximumSeenCount() throws {
+        try fixture { paths, binding, server in
+            let store = try Store(paths: paths, syncBinding: binding)
+            let client = try #require(store.syncClient)
+            let url = URL(string: "https://example.com/max-count")!
+            var record = SharedCapture(
+                source: CaptureSource(
+                    kind: .link, contentHash: CaptureIdentity.contentHash(for: url),
+                    url: url.absoluteString),
+                createdAt: Date(timeIntervalSince1970: 1_600_000_000))
+            record.seenCount = Int.max
+            let snapshot = ContentSnapshotImport(
+                snapshotID: UUID(), targetBinding: binding, sourceDeviceID: UUID(),
+                captures: [record])
+            _ = try server.importContentSnapshot(
+                snapshot, preview: server.previewContentSnapshotImport(snapshot))
+            let transport = StoreTestTransport(
+                server: server, binding: binding, deviceID: client.deviceID)
+            try client.pull(from: transport)
+            let saved = try CaptureService(store: store).ingest(
+                CaptureRequest(
+                    url: url.absoluteString,
+                    fetchBody: false, capturedAt: Date(timeIntervalSince1970: 1_700_000_000))
+            ).capture
+            #expect(saved.seenCount == Int.max)
+            try client.push(to: transport)
+            try client.pull(from: transport)
+            #expect(try server.baseline().captures.first?.seenCount == Int.max)
+            let reopened = try Store(paths: paths, syncBinding: binding, deviceID: client.deviceID)
+            #expect(try SearchService(store: reopened).capture(id: saved.id!)?.seenCount == Int.max)
+        }
+    }
+
     @Test(arguments: ["root", "ancestor"])
     func imageCaptureUnderSymlinkedLibrary(kind: String) throws {
         try fixture { originalPaths, binding, server in

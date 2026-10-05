@@ -36,12 +36,46 @@ public struct CaptureService: Sendable {
     }
 
     public func ingest(_ request: CaptureRequest) throws -> CaptureOutcome {
+        try store.upsertCapture(prepare(request))
+    }
+
+    public func ingest(_ requests: [CaptureRequest]) -> [Result<CaptureOutcome, any Error>] {
+        var results: [Result<CaptureOutcome, any Error>] = []
+        for start in stride(from: 0, to: requests.count, by: Store.captureBatchSize) {
+            let chunk = requests[start..<min(start + Store.captureBatchSize, requests.count)]
+            let prepared = chunk.map { request in Result { try prepare(request) } }
+            let valid = prepared.compactMap { try? $0.get() }
+            var outcomes = ingestPrepared(valid[...]).makeIterator()
+            for item in prepared {
+                switch item {
+                case .success: results.append(outcomes.next()!)
+                case .failure(let error): results.append(.failure(error))
+                }
+            }
+        }
+        return results
+    }
+
+    private func ingestPrepared(_ captures: ArraySlice<Capture>)
+        -> [Result<CaptureOutcome, any Error>]
+    {
+        guard !captures.isEmpty else { return [] }
+        do {
+            return try store.upsertCaptures(Array(captures)).map(Result.success)
+        } catch {
+            guard captures.count > 1 else { return [.failure(error)] }
+            let middle = captures.index(captures.startIndex, offsetBy: captures.count / 2)
+            return ingestPrepared(captures[..<middle]) + ingestPrepared(captures[middle...])
+        }
+    }
+
+    private func prepare(_ request: CaptureRequest) throws -> Capture {
         for captureGuard in guards {
             try captureGuard.check(request)
         }
 
         let classification = try Self.classify(request)
-        return try store.upsertCapture(makeCapture(classification, from: request))
+        return try makeCapture(classification, from: request)
     }
 
     /// Sets the user's note on an existing capture; an empty or whitespace note clears it.
