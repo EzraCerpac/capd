@@ -66,9 +66,28 @@ enum CLISyncSessions {
         }
         for session in values {
             guard let runtime = session.runtime else { continue }
-            let status = blocking { await runtime.sync(within: .seconds(5)) }
+            let status = blocking { await flush(runtime, within: .seconds(5)) }
             if let issue = status.issue { printToStderr(issue) }
         }
+    }
+
+    static func flush(_ runtime: MacSyncRuntime, within timeout: Duration) async -> MacSyncStatus {
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: timeout)
+        var status = await runtime.sync(within: timeout)
+        while status.phase == .busy {
+            let remaining = clock.now.duration(to: deadline)
+            guard remaining > .zero else { break }
+            do { try await Task.sleep(for: min(.milliseconds(50), remaining)) } catch { break }
+            let remainingAfterSleep = clock.now.duration(to: deadline)
+            guard remainingAfterSleep > .zero else { break }
+            status = await runtime.sync(within: remainingAfterSleep)
+        }
+        if status.phase == .busy {
+            status.issue =
+                "Another Capd process is synchronizing this library. Saved changes remain queued."
+        }
+        return status
     }
 }
 

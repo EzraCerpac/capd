@@ -1,6 +1,8 @@
 import ArgumentParser
 import CapdKit
+import CapdSync
 import Foundation
+import GRDB
 
 struct Sync: ParsableCommand {
     static let configuration = CommandConfiguration(
@@ -53,7 +55,7 @@ struct Sync: ParsableCommand {
                     return Result<Void, any Error>.success(())
                 } catch { return .failure(error) }
             }
-            try result.get()
+            try Sync.checkActivationResult(result)
             print("Sync activated for the prepared Mac library.")
         }
     }
@@ -68,6 +70,28 @@ struct Sync: ParsableCommand {
         static let configuration = CommandConfiguration(
             abstract: "Resume networking for the existing bound library.")
         func run() throws { try Sync.setEnabled(true) }
+    }
+
+    static func checkActivationResult(_ result: Result<Void, any Error>) throws {
+        do { try result.get() } catch {
+            let underlying = error as NSError
+            let fileError =
+                underlying.domain == NSCocoaErrorDomain
+                && [
+                    NSFileNoSuchFileError, NSFileReadNoSuchFileError, NSFileReadUnknownError,
+                    NSFileReadNoPermissionError, NSFileReadCorruptFileError,
+                    NSFileWriteUnknownError, NSFileWriteNoPermissionError,
+                    NSFileWriteFileExistsError, NSFileWriteOutOfSpaceError,
+                    NSFileWriteVolumeReadOnlyError,
+                ].contains(underlying.code)
+            if error is DatabaseError || error is StoreError || error is SyncBindingError
+                || fileError
+            {
+                throw CLIError(
+                    message: "The capture store is unavailable: \(describe(error))", code: 3)
+            }
+            throw error
+        }
     }
 
     private static func setEnabled(_ enabled: Bool) throws {

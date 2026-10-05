@@ -1,12 +1,133 @@
 import CapdSync
 import Foundation
 import GRDB
+import Synchronization
 import Testing
 
+@testable import CapdCLI
 @testable import CapdKit
 
 @Suite("CLI bound Mac runtime", .timeLimit(.minutes(1)))
 struct CLISyncRuntimeTests {
+    @Test func postCommandFlushRetriesBusyLeaseWithoutRecreatingOperation() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "capd-cli-busy-\(UUID())")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let paths = StoragePaths(root: root.appendingPathComponent("mac"))
+        let binding = SyncLibraryBinding(libraryID: UUID(), serviceID: UUID())
+        let device = UUID()
+        let enrollment = try SyncEnrollment(
+            endpoint: URL(string: "https://sync.example.invalid/v1/sync")!, binding: binding,
+            deviceID: device)
+        _ = try Store(paths: paths, syncBinding: binding, deviceID: device)
+        try MacSyncConfiguration(enrollment: enrollment).install(paths: paths)
+        let server = try SyncServer(
+            databaseURL: root.appendingPathComponent("authority.sqlite"),
+            blobDirectory: root.appendingPathComponent("authority-blobs"),
+            libraryID: binding.libraryID, serviceID: binding.serviceID)
+        let credentials = MemorySyncCredentialStore()
+        try credentials.save("synthetic-cli-credential", for: enrollment)
+        let wire = CLIFlushWire(
+            binding: binding, deviceID: device,
+            handler: SyncHTTPHandler(
+                serviceID: binding.serviceID,
+                authorizer: CLIFlushAuthorizer(
+                    principal: SyncPrincipal(
+                        serviceID: binding.serviceID, libraryID: binding.libraryID, deviceID: device
+                    )),
+                server: { _ in server }))
+        let session = try MacLibrarySession.open(
+            paths: paths, credentials: credentials, transport: wire)
+        _ = try CaptureService(store: session.store).ingest(
+            CaptureRequest(text: "Concurrent CLI capture"))
+        let operation = try #require(try session.store.syncClient?.pendingOperations().first)
+        let lease = Mutex<MacSyncLease?>(try #require(try MacSyncLease.acquire(paths: paths)))
+        let before = try await session.store.reader.read {
+            try Data.fetchAll($0, sql: "SELECT payload FROM sync_outbox ORDER BY sequence")
+        }
+        let clock = ContinuousClock()
+        let started = clock.now
+        let blocked = await CLISyncSessions.flush(
+            try #require(session.runtime), within: .milliseconds(75))
+        #expect(blocked.phase == .busy)
+        #expect(blocked.issue?.contains("remain queued") == true)
+        #expect(started.duration(to: clock.now) < .seconds(2))
+        #expect(
+            try await session.store.reader.read {
+                try Data.fetchAll($0, sql: "SELECT payload FROM sync_outbox ORDER BY sequence")
+            } == before)
+        let release = Task.detached {
+            try? await Task.sleep(for: .milliseconds(150))
+            lease.withLock { $0 = nil }
+        }
+        CLISyncSessions.remember(session)
+        CLISyncSessions.flush()
+        await release.value
+        #expect(try session.store.syncClient?.pendingOperations().isEmpty == true)
+        #expect(try server.baseline().captures.count == 1)
+        #expect(try server.baseline().deviceSequences[device] == 1)
+        #expect(await wire.operations == [operation])
+    }
+
+    @Test(arguments: ["corrupt", "unavailable"])
+    func activationStoreFailuresUseStoreUnavailableExitCode(failure: String) throws {
+        try withScratchRoot { root in
+            let paths = StoragePaths(root: root)
+            try paths.createDirectories()
+            if failure == "corrupt" {
+                try Data("not a database".utf8).write(to: paths.databaseURL)
+            } else {
+                try FileManager.default.createDirectory(
+                    at: paths.databaseURL, withIntermediateDirectories: true)
+            }
+            let enrollment = try SyncEnrollment(
+                endpoint: URL(string: "https://sync.example.invalid/v1/sync")!,
+                binding: SyncLibraryBinding(libraryID: UUID(), serviceID: UUID()), deviceID: UUID())
+            let file = root.appendingPathComponent("enrollment.json")
+            try JSONEncoder().encode(enrollment).write(to: file)
+            let result = try capd(["sync", "activate", "--enrollment", file.path], root: root)
+            #expect(result.status == 3)
+            #expect(result.stderr.contains("store is unavailable"))
+            #expect(result.stdout.isEmpty)
+            #expect(
+                !FileManager.default.fileExists(atPath: MacSyncConfiguration.url(paths: paths).path)
+            )
+        }
+    }
+
+    @Test func activationClassificationPreservesConnectionAndEnrollmentErrors() throws {
+        let errors: [any Error] = [
+            SyncHTTPError.unauthorized, SyncHTTPError.forbidden, SyncHTTPError.unavailable,
+            SyncConnectionError.credentialUnavailable, SyncConnectionError.invalidEndpoint,
+            SyncError.transportDisconnected, MacSyncError.invalidConfiguration,
+            NSError(domain: NSURLErrorDomain, code: NSURLErrorNotConnectedToInternet),
+            DecodingError.dataCorrupted(
+                .init(codingPath: [], debugDescription: "Synthetic invalid enrollment")),
+        ]
+        for original in errors {
+            do {
+                try Sync.checkActivationResult(.failure(original))
+                Issue.record("Activation failure was discarded")
+            } catch {
+                #expect(ObjectIdentifier(type(of: error)) == ObjectIdentifier(type(of: original)))
+                #expect(String(describing: error) == String(describing: original))
+            }
+        }
+        for original: any Error in [
+            StoreError.databaseIsNewerThanApp, SyncBindingError.mismatch,
+            NSError(domain: NSCocoaErrorDomain, code: NSFileReadNoSuchFileError),
+        ] {
+            do {
+                try Sync.checkActivationResult(.failure(original))
+                Issue.record("Activation storage failure was discarded")
+            } catch let error as CLIError {
+                #expect(error.code == 3)
+                #expect(error.message.contains("store is unavailable"))
+            }
+        }
+        try Sync.checkActivationResult(.success(()))
+    }
+
     @Test func unavailableSyncStoreUsesDocumentedExitCode() throws {
         try withScratchRoot { root in
             let paths = StoragePaths(root: root)
@@ -160,5 +281,29 @@ struct CLISyncRuntimeTests {
             }
             #expect(try SearchService(store: local).totalCaptureCount() == 0)
         }
+    }
+}
+
+private struct CLIFlushAuthorizer: SyncAuthorizer {
+    let principal: SyncPrincipal
+    func authorize(bearerCredential: String) throws -> SyncPrincipal? {
+        bearerCredential == "synthetic-cli-credential" ? principal : nil
+    }
+}
+
+private actor CLIFlushWire: AsyncSyncTransport {
+    nonisolated let binding: SyncLibraryBinding
+    nonisolated let deviceID: UUID
+    let handler: SyncHTTPHandler
+    var operations: [SyncOperation] = []
+    init(binding: SyncLibraryBinding, deviceID: UUID, handler: SyncHTTPHandler) {
+        self.binding = binding
+        self.deviceID = deviceID
+        self.handler = handler
+    }
+    func send(_ request: SyncHTTPRequest) async throws -> SyncHTTPResponse {
+        let envelope = try JSONDecoder().decode(SyncHTTPEnvelope.self, from: request.body)
+        if case .apply(let operation) = envelope.action { operations.append(operation) }
+        return handler.handle(request)
     }
 }
