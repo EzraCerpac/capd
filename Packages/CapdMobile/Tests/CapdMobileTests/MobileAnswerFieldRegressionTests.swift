@@ -290,6 +290,42 @@ func localAnswerCenteredMultibyteExcerptsRetainMatchedQuotesWithinByteBudget(que
 }
 
 @Test(arguments: [false, true])
+func localAnswerWhitespaceOnlyTitleMatchesDoNotConsumeHitLimit(literal: Bool) async throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(
+        "capd-answer-whitespace-limit-\(UUID())")
+    defer { try? FileManager.default.removeItem(at: root) }
+    let url = root.appendingPathComponent("mobile.sqlite")
+    let mobile = try MobileStore(url: url)
+    let query = literal ? "温室" : "orchid"
+    let title = literal ? "保存した温室の管理" : "Orchid"
+    let quote = "Saved observations describe a river crossing."
+    let saved = MobileCapture(
+        kind: .text, title: title + " saved observations", selection: quote)
+    try mobile.save(saved)
+    let database = try DatabaseQueue(path: url.path)
+    try await database.write { db in
+        for _ in 0..<12 {
+            var blank = MobileCapture(
+                kind: .link, title: title, selection: " \t\n\r\u{B}\u{C}",
+                note: "\u{85}\u{A0}\u{1680}")
+            blank.body = "\u{2000}\u{200B}\u{2028}\u{2029}"
+            blank.ocrText = "\u{202F}\u{205F}\u{3000}"
+            try blank.insert(db)
+        }
+    }
+    let pending = try mobile.pending()
+    let reader = try MobileAnswerRetrieval(databaseURL: url)
+    let evidence = try await reader.search(query, limit: 12)
+    #expect(evidence.map(\.id) == [saved.id.uuidString])
+    #expect(evidence.first?.excerpt == quote)
+    let answer = try await GroundedAnswerService(
+        retriever: reader, model: LiteralEvidenceQuoteModel(quote: quote)
+    ).answer(query)
+    #expect(answer.sources.map { $0.source.id } == [saved.id.uuidString])
+    #expect(try mobile.pending() == pending)
+}
+
+@Test(arguments: [false, true])
 func localAnswerTitleFallbackSkipsWhitespaceOnlyEarlierFields(literal: Bool) async throws {
     let root = FileManager.default.temporaryDirectory.appendingPathComponent(
         "capd-answer-whitespace-fallback-\(UUID())")
