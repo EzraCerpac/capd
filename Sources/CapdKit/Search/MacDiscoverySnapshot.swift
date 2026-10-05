@@ -61,7 +61,16 @@ public struct MacDiscoverySnapshot: Sendable {
                 let manual =
                     record?.manualTags
                     ?? (capture.tagsVersion == Capture.pinnedTagsVersion ? capture.tagList : [])
-                let title = record == nil ? capture.title : record?.source.title
+                var title = record == nil ? capture.title : record?.source.title
+                let selection = record == nil ? capture.selection : record?.source.selection
+                let isText = record == nil ? capture.kind == .text : record?.source.kind == .text
+                if isText, let selection,
+                    title
+                        == String(
+                            selection.trimmingCharacters(in: .whitespacesAndNewlines).prefix(80))
+                {
+                    title = "Saved text"
+                }
                 let host = record == nil ? capture.host : record?.source.host
                 let url = record == nil ? capture.url : record?.source.url
                 let entry = MacDiscoveryCapture(

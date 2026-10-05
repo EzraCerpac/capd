@@ -93,7 +93,7 @@ final class PhoneSystemSearch {
                 }
                 self.error = nil
             } catch {
-                bridge.invalidate()
+                bridge.invalidate(preservingDeferredRoute: self.enabled && !self.paused)
                 self.coordinator = nil
                 self.error = "System search could not update. " + error.localizedDescription
             }

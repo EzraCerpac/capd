@@ -13,13 +13,13 @@ struct LibraryView: View {
     @Bindable var model: LibraryModel
     @State private var capturing = false
     @State private var showingSyncSettings = false
-    @State private var openedCapture: UUID?
+    @State private var navigationPath: [UUID] = []
     @State private var stagedText = ""
     @State private var draftID = UUID()
     @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
-        NavigationStack {
+        NavigationStack(path: $navigationPath) {
             List {
                 if model.syncState.phase == .attention || model.syncState.conflictCount > 0
                     || model.syncState.rejectedChanges > 0
@@ -48,9 +48,7 @@ struct LibraryView: View {
                                     : "Search saved titles, links, source text, and notes."))
                     }
                     ForEach(model.captures) { capture in
-                        NavigationLink {
-                            CaptureDetailView(captureID: capture.id, model: model)
-                        } label: {
+                        NavigationLink(value: capture.id) {
                             CapdSourceRow(
                                 title: capture.title,
                                 metadata: sourceMetadata(capture),
@@ -85,7 +83,7 @@ struct LibraryView: View {
             .onChange(of: systemBridge.routingError, initial: true) { _, _ in
                 if let message = systemBridge.consumeRoutingError() { model.error = message }
             }
-            .navigationDestination(item: $openedCapture) { id in
+            .navigationDestination(for: UUID.self) { id in
                 CaptureDetailView(captureID: id, model: model)
             }
             .toolbar {
@@ -126,13 +124,13 @@ struct LibraryView: View {
         guard let action = systemBridge.consumeAction() else { return }
         switch action {
         case .find(let query):
-            openedCapture = nil
+            navigationPath = []
             model.query = query
             model.reload()
         case .open(let reference):
             model.reload()
             guard model.capture(id: reference.captureID) != nil else { return }
-            openedCapture = reference.captureID
+            navigationPath = [reference.captureID]
         case .stageText(let text):
             stagedText = text
             draftID = UUID()

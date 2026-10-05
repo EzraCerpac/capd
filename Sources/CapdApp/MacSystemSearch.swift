@@ -17,6 +17,7 @@ final class MacSystemSearch: CaptureActionHost {
     private var tail: Task<Void, Never>?
     private let cleanupKey: String
     var reportIssue: (String?) -> Void = { _ in }
+    var reportRoutingError: (any Error) -> Void = { _ in }
 
     init(
         paths: StoragePaths, enabled: Bool, defaults: UserDefaults = .standard,
@@ -100,7 +101,7 @@ final class MacSystemSearch: CaptureActionHost {
             case .find(let query): try CaptureIntentRuntime.shared.perform(.find(query))
             case .open(let reference): try CaptureIntentRuntime.shared.perform(.open(reference))
             }
-        } catch { reportIssue(error.localizedDescription) }
+        } catch { reportRoutingError(error) }
     }
 
     func refresh() {

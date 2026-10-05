@@ -59,6 +59,49 @@ struct MacSystemSearchTests {
         await host.settle()
     }
 
+    @Test func failedRoutesReportImmediatelyWithoutChangingMaintenanceStatus() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let suite = "capd-discovery-route-\(UUID())"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer {
+            defaults.removePersistentDomain(forName: suite)
+            try? FileManager.default.removeItem(at: root)
+        }
+        let paths = StoragePaths(root: root)
+        let store = try MacLibrarySession.open(paths: paths).store
+        let capture = try CaptureService(store: store).ingest(
+            CaptureRequest(text: "Synthetic source", title: "Saved source"))
+        var actions = 0
+        var messages: [String] = []
+        var maintenance: [String?] = []
+        let host = MacSystemSearch(
+            paths: paths, enabled: true, defaults: defaults, backend: DiscoveryMemoryIndex()
+        ) { _, _ in actions += 1 }
+        host.reportIssue = { maintenance.append($0) }
+        host.reportRoutingError = { messages.append($0.localizedDescription) }
+        let runtime = CaptureIntentRuntime.shared
+        let previous = runtime.host
+        defer { runtime.host = previous }
+        host.install()
+        let entry = try #require(try host.search("").first)
+        host.receive(.open(entry.reference))
+        #expect(actions == 1)
+        #expect(messages.isEmpty)
+        _ = try store.deleteCaptures(ids: [try #require(capture.capture.id)])
+        for _ in 0..<2 { host.receive(.open(entry.reference)) }
+        #expect(
+            messages
+                == Array(
+                    repeating:
+                        SystemIntegrationError.missingCapture.localizedDescription, count: 2))
+        host.setEnabled(false)
+        host.receive(.find("saved"))
+        #expect(messages.last == SystemIntegrationError.privacyDisabled.localizedDescription)
+        #expect(actions == 1)
+        #expect(maintenance.isEmpty)
+        await host.settle()
+    }
+
     @Test func unchangedPollsSkipSnapshotsAndOtherWritersInvalidateTheIndex() async throws {
         let root = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent(
             "capd-discovery-refresh-\(UUID())")
@@ -271,7 +314,7 @@ struct MacSystemSearchTests {
         do {
             let store = try MacLibrarySession.open(paths: replacement).store
             _ = try CaptureService(store: store).ingest(
-                CaptureRequest(text: "New target", title: "New target"))
+                CaptureRequest(text: "New target source", title: "New target"))
             try store.dbPool.close()
         }
         for suffix in ["", "-wal", "-shm"] {

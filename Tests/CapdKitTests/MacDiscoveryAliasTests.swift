@@ -114,6 +114,52 @@ struct MacDiscoveryAliasTests {
         }
     }
 
+    @Test func syncedDerivedTextTitlesDoNotExposeSourceSelection() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let paths = StoragePaths(root: root)
+        let binding = SyncLibraryBinding(libraryID: UUID(), serviceID: UUID())
+        let deviceID = UUID()
+        let store = try Store(paths: paths, syncBinding: binding, deviceID: deviceID)
+        let enrollment = try SyncEnrollment(
+            endpoint: URL(string: "https://sync.example.invalid/v1/sync")!,
+            binding: binding, deviceID: deviceID)
+        try MacSyncConfiguration(enrollment: enrollment).install(paths: paths)
+        let selection = "  Private source token " + String(repeating: "secret ", count: 20) + "  "
+        let derived = String(selection.trimmingCharacters(in: .whitespacesAndNewlines).prefix(80))
+        let sources = [
+            CaptureSource(kind: .text, title: derived, selection: selection),
+            CaptureSource(kind: .text, title: "Explicit saved title", selection: selection),
+            CaptureSource(kind: .link, title: derived, selection: selection),
+        ]
+        try store.dbPool.write { db in
+            for source in sources {
+                var record = SharedCapture(source: source)
+                record.manualTags = ["manual"]
+                record.revision = 9
+                try db.execute(
+                    sql: "INSERT INTO sync_visible (id, payload) VALUES (?, ?)",
+                    arguments: [record.id.uuidString, try JSONEncoder().encode(record)])
+                var capture = Capture(kind: .text, title: "Stale local title", createdAt: Date())
+                try capture.insert(db)
+                try db.execute(
+                    sql: "INSERT INTO sync_capture_ids (local_id, global_id) VALUES (?, ?)",
+                    arguments: [capture.id, record.id.uuidString])
+            }
+        }
+        let before = try store.dbPool.read {
+            try Data.fetchAll($0, sql: "SELECT payload FROM sync_visible ORDER BY id")
+        }
+        let snapshot = try MacDiscoverySnapshot.load(paths: paths, localLibraryID: UUID())
+        #expect(snapshot.captures.map(\.title) == ["Saved text", "Explicit saved title", derived])
+        #expect(snapshot.captures.allSatisfy { $0.manualTags == ["manual"] && $0.revision == 9 })
+        #expect(try store.syncClient!.pendingOperations().isEmpty)
+        #expect(
+            try store.dbPool.read {
+                try Data.fetchAll($0, sql: "SELECT payload FROM sync_visible ORDER BY id")
+            } == before)
+    }
+
     @Test(arguments: [true, false])
     func untitledLinksIndexOnlyTheHost(hasHost: Bool) throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)

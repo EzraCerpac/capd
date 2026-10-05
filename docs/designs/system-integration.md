@@ -31,13 +31,16 @@ Library replacement drains search work under the generation/search leases before
 activation. Failed domain deletion retains its repair scope. Opt-out invalidates
 routing immediately and serializes scoped deletion. Oversized libraries fail
 closed. Find changes the local filter; Open re-resolves the current capture;
-Draft Text opens the ordinary composer and requires Save.
+Draft Text opens the ordinary composer and requires Save. Failed reconciliation
+retains a cold-launch route for retry while search consent remains active. Find
+returns the shared navigation stack to the library root before applying its filter.
 
 ## Mac wiring
 
 `MacSystemSearch` installs the action host. `AppState` routes recognized search
 URLs before share handoffs and receives Spotlight activities through the app
 delegate. Settings starts system search off and surfaces maintenance failures.
+Route failures appear immediately through the existing HUD.
 
 `MacDiscoverySnapshot` reads a complete bounded projection through
 `MacLibrarySession.readOnlyStore(paths:)`. Bound libraries use persisted canonical
@@ -45,6 +48,11 @@ IDs; unbound libraries use a persisted local library identity without backfillin
 store mappings. Query/detail paths reopen the read-only store per request.
 Mutations retain the actual runtime session. Search/entity/open actions do not
 start a sync client, access Keychain, or contact a service.
+
+Both projections replace text titles matching the first 80 characters of the
+trimmed source selection with “Saved text.” Title origin is not stored, so an
+explicit title matching that prefix is conservatively redacted too. Source text
+and stored titles remain unchanged.
 
 Identifier batches resolve from one validated Mac snapshot. The unbound local
 library UUID follows the database file's filesystem device, inode, and creation

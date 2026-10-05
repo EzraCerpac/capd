@@ -390,6 +390,7 @@ final class AppState {
             }
         }
         discovery.reportIssue = { [weak settings] issue in settings?.systemSearchIssue = issue }
+        discovery.reportRoutingError = { error in hud.show(.failure(error, detail: nil)) }
         systemSearch = discovery
         discovery.install()
         settings.systemSearchChanged = { [weak discovery] in discovery?.setEnabled($0) }
