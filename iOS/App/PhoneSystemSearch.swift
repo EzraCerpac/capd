@@ -113,7 +113,14 @@ final class PhoneSystemSearch {
             do {
                 if let session, self.enabled {
                     try await session.withSystemSearchLease { @MainActor in
-                        try await self.reconcile(session: session, bridge: bridge)
+                        do {
+                            try await self.reconcile(session: session, bridge: bridge)
+                        } catch {
+                            self.invalidate(
+                                bridge, preservingDeferredRoute: self.enabled && !self.paused)
+                            _ = try await self.cleanup(keeping: nil, bridge: bridge)
+                            throw error
+                        }
                     }
                 } else {
                     try await MobileSystemSearchJournal.withLease(root: MobileEnvironment.root()) {
