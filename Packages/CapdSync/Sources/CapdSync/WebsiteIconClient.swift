@@ -349,6 +349,15 @@ extension SyncClient {
 
     func validateWebsiteIconBaseline(_ baseline: WebsiteIconBaseline, in db: Database) throws {
         try Self.validateCompleteWebsiteIconBaseline(baseline)
+        if try WebsiteIconDatabase.exists(db) {
+            guard
+                baseline.cursor
+                    >= (try Int64.fetchOne(db, sql: "SELECT cursor FROM sync_website_icon_meta")!),
+                (baseline.deviceSequences[deviceID] ?? 0)
+                    >= (try Int64.fetchOne(
+                        db, sql: "SELECT observed_sequence FROM sync_website_icon_meta")!)
+            else { throw SyncError.invalidCursor }
+        }
         let incoming = Dictionary(uniqueKeysWithValues: baseline.records.map { ($0.id, $0) })
         for local in try WebsiteIconDatabase.records(db) {
             if local.revision <= baseline.cursor {
@@ -393,7 +402,7 @@ extension SyncClient {
         try checkWebsiteIconTransport(transport)
         try transport.checkWebsiteIconCapability()
         do {
-            while true {
+            do {
                 let cursor = try websiteIconCursor()
                 let page = try transport.websiteIconChanges(after: cursor, limit: pageSize)
                 try validateWebsiteIconPage(page, cursor: cursor)
@@ -401,7 +410,7 @@ extension SyncClient {
                     try cacheWebsiteIcon(change.record, fetch: transport.downloadWebsiteIcon)
                 }
                 try commitWebsiteIconPage(page, cursor: cursor)
-                if page.changes.isEmpty { return }
+
             }
         } catch SyncError.cursorExpired {
             let baseline = try transport.websiteIconBaseline()

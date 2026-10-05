@@ -58,6 +58,25 @@ public struct ContentSnapshotImportPreview: Codable, Equatable, Sendable {
     public let items: [ContentSnapshotItemPreview]
     public let websiteIcons: [WebsiteIconRecord]?
     public let websiteIconCursor: Int64?
+    public init(
+        snapshotID: UUID, digest: String, targetBinding: SyncLibraryBinding, sourceDeviceID: UUID,
+        authorityCursor: Int64, authorityFloor: Int64, feedRowsToExpire: Int,
+        countPolicy: ContentSnapshotCountPolicy, items: [ContentSnapshotItemPreview],
+        websiteIcons: [WebsiteIconRecord]? = nil, websiteIconCursor: Int64? = nil
+    ) {
+        self.snapshotID = snapshotID
+        self.digest = digest
+        self.targetBinding = targetBinding
+        self.sourceDeviceID = sourceDeviceID
+        self.authorityCursor = authorityCursor
+        self.authorityFloor = authorityFloor
+        self.feedRowsToExpire = feedRowsToExpire
+        self.countPolicy = countPolicy
+        self.items = items
+        self.websiteIcons = websiteIcons
+        self.websiteIconCursor = websiteIconCursor
+    }
+
 }
 
 public struct ContentSnapshotImportedNote: Codable, Equatable, Sendable {
@@ -85,6 +104,24 @@ public struct ContentSnapshotImportReceipt: Codable, Equatable, Sendable {
     public let items: [ContentSnapshotItemReceipt]
     public let websiteIcons: [WebsiteIconRecord]?
     public let websiteIconCursor: Int64?
+    public init(
+        id: UUID, snapshotID: UUID, digest: String, targetBinding: SyncLibraryBinding,
+        sourceDeviceID: UUID, authorityCursor: Int64, countPolicy: ContentSnapshotCountPolicy,
+        items: [ContentSnapshotItemReceipt], websiteIcons: [WebsiteIconRecord]? = nil,
+        websiteIconCursor: Int64? = nil
+    ) {
+        self.id = id
+        self.snapshotID = snapshotID
+        self.digest = digest
+        self.targetBinding = targetBinding
+        self.sourceDeviceID = sourceDeviceID
+        self.authorityCursor = authorityCursor
+        self.countPolicy = countPolicy
+        self.items = items
+        self.websiteIcons = websiteIcons
+        self.websiteIconCursor = websiteIconCursor
+    }
+
 }
 
 public struct RetainedContentSnapshotImport: Codable, Equatable, Sendable {

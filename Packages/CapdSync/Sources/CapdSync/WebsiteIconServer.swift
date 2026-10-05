@@ -24,6 +24,23 @@ extension SyncServer {
                 return receipt
             }
             try operation.validate()
+            if try db.tableExists("sync_service_writers"),
+                try String.fetchOne(
+                    db, sql: "SELECT principal FROM sync_service_writers WHERE device=?",
+                    arguments: [operation.deviceID.uuidString]) != nil
+            {
+                throw SyncError.wrongDevice
+            }
+            let deviceCount = try Int.fetchOne(
+                db, sql: "SELECT COUNT(*) FROM sync_website_icon_devices")!
+            let knownDevice = try Bool.fetchOne(
+                db, sql: "SELECT EXISTS(SELECT 1 FROM sync_website_icon_devices WHERE id=?)",
+                arguments: [operation.deviceID.uuidString])!
+            guard deviceCount < 4096 || knownDevice else { throw SyncHTTPError.resourceLimit }
+            guard
+                try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM sync_website_icon_records")! < 4096
+                    || WebsiteIconDatabase.record(db, id: operation.origin.id) != nil
+            else { throw SyncHTTPError.resourceLimit }
             let previous =
                 try Int64.fetchOne(
                     db, sql: "SELECT sequence FROM sync_website_icon_devices WHERE id=?",

@@ -65,7 +65,7 @@ extension SyncClient {
             .websiteIconBaselinePage(
                 after: nil, limit: 0, expectedCursor: nil, expectedCaptureCursor: nil))
         do {
-            while true {
+            do {
                 let cursor = try websiteIconCursor()
                 guard
                     case .websiteIconPage(let page) = try await actions.request(
@@ -78,7 +78,7 @@ extension SyncClient {
                 }
                 try Task.checkCancellation()
                 try commitWebsiteIconPage(page, cursor: cursor)
-                if page.changes.isEmpty { return }
+
             }
         } catch SyncError.cursorExpired {
             let baseline = try await actions.websiteIconBaseline()

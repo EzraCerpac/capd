@@ -16,7 +16,10 @@ public struct WebsiteIconOrigin: Codable, Equatable, Hashable, Sendable {
             "localhost", "local", "internal", "home", "lan", "test", "invalid", "example",
             "onion", "arpa", "alt",
         ]
-        guard labels.count >= 2, let last = labels.last,
+        let numeric = labels.allSatisfy {
+            $0.range(of: "^(0x[0-9a-f]+|[0-9]+)$", options: .regularExpression) != nil
+        }
+        guard labels.count >= 2, !numeric, let last = labels.last,
             !reserved.contains(String(last)),
             last.utf8.contains(where: { (97...122).contains($0) }),
             labels.allSatisfy({ label in
