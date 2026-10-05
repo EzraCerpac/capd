@@ -156,9 +156,26 @@ public final class SyncClient: Sendable {
         try enqueue(in: db, mutations: deletions.map { ($0, .delete) })
     }
 
-    private func enqueue(in db: Database, mutations: [(UUID, CaptureMutation)]) throws
-        -> [SyncOperation]
-    {
+    /// Enqueues at most 100 creates, recaptures, or edits and rebuilds once in the caller's transaction.
+    /// Propagate errors so the caller rolls back all staged source rows and operations.
+    @discardableResult
+    public func enqueueCaptures(
+        in db: Database, mutations: [(captureID: UUID, mutation: CaptureMutation)]
+    ) throws -> [SyncOperation] {
+        guard mutations.count <= 100,
+            mutations.allSatisfy({
+                switch $0.mutation {
+                case .create, .recapture, .edit: true
+                case .delete, .restore: false
+                }
+            })
+        else { throw SyncError.invalidOperation }
+        return try enqueue(in: db, mutations: mutations)
+    }
+
+    private func enqueue(
+        in db: Database, mutations: [(captureID: UUID, mutation: CaptureMutation)]
+    ) throws -> [SyncOperation] {
         guard ObjectIdentifier(db) == writerIdentity else { throw SyncTransactionError.wrongWriter }
         guard db.isInsideTransaction else { throw SyncTransactionError.requiresTransaction }
         try projectionGate.check()
@@ -170,14 +187,29 @@ public final class SyncClient: Sendable {
         }
         var sequence = try Int64.fetchOne(db, sql: "SELECT sequence FROM sync_meta")!
         var appended: [SyncOperation] = []
+        var created: Set<UUID> = []
+        var sources: [UUID: CaptureSource] = [:]
+        if mutations.contains(where: { if case .create = $0.mutation { true } else { false } }) {
+            sources = Dictionary(
+                uniqueKeysWithValues: try SyncDatabase.records(db, table: "sync_visible")
+                    .map { ($0.id, $0.source) })
+        }
         for (captureID, mutation) in mutations {
             let id = try SyncDatabase.canonical(db, captureID)
+            if case .create(let record) = mutation {
+                if let blob = record.source.blob { _ = try blobs.read(blob) }
+                guard !created.contains(id),
+                    try SyncDatabase.record(db, id: id, table: "sync_visible") == nil
+                else { throw SyncError.invalidOperation }
+                created.insert(id)
+            }
+            let base = try SyncDatabase.record(db, id: id)?.revision ?? 0
             guard sequence < Int64.max else { throw SyncError.invalidOperation }
             sequence += 1
             let operation = SyncOperation(
                 deviceID: deviceID, sequence: sequence,
                 captureID: captureID,
-                baseRevision: try SyncDatabase.record(db, id: id)?.revision ?? 0,
+                baseRevision: base,
                 predecessorID: predecessors[id], mutation: mutation)
             try SyncDatabase.validate(operation)
             try validateRequest(operation)
@@ -185,6 +217,18 @@ public final class SyncClient: Sendable {
                 sql: "INSERT INTO sync_outbox (sequence, id, payload) VALUES (?, ?, ?)",
                 arguments: [sequence, operation.id.uuidString, try SyncDatabase.encode(operation)])
             predecessors[id] = operation.id
+            if case .create(let incoming) = mutation {
+                if sources[id] == nil,
+                    let duplicate = sources.filter({
+                        CaptureFingerprint.matches($0.value, incoming.source)
+                    }).keys.min(by: { $0.uuidString < $1.uuidString })
+                {
+                    try SyncDatabase.alias(db, incoming.id, to: duplicate)
+                    predecessors[duplicate] = operation.id
+                } else {
+                    sources[id] = incoming.source
+                }
+            }
             appended.append(operation)
         }
         try db.execute(sql: "UPDATE sync_meta SET sequence = ?", arguments: [sequence])

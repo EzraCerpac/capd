@@ -67,9 +67,10 @@ public struct PinboardImporter: Sendable {
         let posts = try Self.posts(from: data)
         var summary = PinboardImportSummary()
 
-        for post in posts {
+        let outcomes = captures.ingest(posts.map { Self.request(for: $0, now: now) })
+        for (post, outcome) in zip(posts, outcomes) {
             do {
-                switch try captures.ingest(Self.request(for: post, now: now)) {
+                switch try outcome.get() {
                 case .captured:
                     summary.imported += 1
                 case .alreadyCaptured:

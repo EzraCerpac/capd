@@ -43,6 +43,7 @@ enum EnrichmentError: Error, Equatable {
 /// The menu-bar app, `capd-agent`, and the `capd` CLI are three unsandboxed processes on one
 /// file, so this opens in WAL mode with a busy timeout rather than assuming sole ownership.
 public final class Store: Sendable {
+    static let captureBatchSize = 50
     public let paths: StoragePaths
 
     let dbPool: DatabasePool
@@ -134,43 +135,135 @@ public final class Store: Sendable {
     /// so the choice between inserting and merging is atomic across the three processes.
     func upsertCapture(_ capture: Capture) throws -> CaptureOutcome {
         try write { db in
-            if let hash = capture.contentHash,
-                var existing = try Capture.filter(Capture.CodingKeys.contentHash == hash)
-                    .fetchOne(db)
+            try upsertCapture(capture, in: db) { before, after in
+                if let before {
+                    try enqueueChanges(from: before, to: after, in: db, recapture: true)
+                } else {
+                    try enqueueCreated(after, in: db)
+                }
+            }
+        }
+    }
+
+    func upsertCaptures(_ captures: [Capture]) throws -> [CaptureOutcome] {
+        guard captures.count <= Self.captureBatchSize else { throw SyncError.invalidOperation }
+        return try write { db in
+            if try requiresSequentialCapture(captures, in: db) {
+                return try captures.map { capture in
+                    try upsertCapture(capture, in: db) { before, after in
+                        if let before {
+                            try enqueueChanges(from: before, to: after, in: db, recapture: true)
+                        } else {
+                            try enqueueCreated(after, in: db)
+                        }
+                    }
+                }
+            }
+            var mutations: [(captureID: UUID, mutation: CaptureMutation)] = []
+            var prospective: [UUID: SharedCapture] = [:]
+            let outcomes = try captures.map { capture in
+                try upsertCapture(capture, in: db) { before, after in
+                    guard syncClient != nil else { return }
+                    if let before {
+                        let id = try StoreSync.identity(db, capture: before)
+                        let current = try prospective[id] ?? StoreSync.visible(db, id: id)
+                        let changes = try captureMutations(
+                            from: before, to: after, in: db, recapture: true, current: current)
+                        mutations.append(contentsOf: changes)
+                        if var current {
+                            for (_, mutation) in changes {
+                                switch mutation {
+                                case .recapture:
+                                    if current.seenCount < Int.max { current.seenCount += 1 }
+                                case .edit(let edit):
+                                    var updated = StoreSync.snapshot(
+                                        after, id: id, blob: current.source.blob)
+                                    updated.seenCount = current.seenCount
+                                    updated.revision = current.revision
+                                    updated.generated = current.generated
+                                    updated.noteConflicts = current.noteConflicts
+                                    updated.manualTags = Array(
+                                        Set(current.manualTags).union(edit.addTags)
+                                            .subtracting(edit.removeTags)
+                                    ).sorted()
+                                    current = updated
+                                default: break
+                                }
+                                try StoreSync.project(db, record: current, paths: paths)
+                            }
+                            prospective[id] = current
+                        }
+                    } else if let created = try createdMutation(after, in: db) {
+                        mutations.append(created)
+                        if case .create(let record) = created.mutation {
+                            prospective[created.captureID] = record
+                        }
+                    }
+                }
+            }
+            try syncClient?.enqueueCaptures(in: db, mutations: mutations)
+            return outcomes
+        }
+    }
+
+    private func requiresSequentialCapture(_ captures: [Capture], in db: Database) throws -> Bool {
+        guard syncClient != nil, !captures.isEmpty else { return false }
+        let rows = try Data.fetchCursor(db, sql: "SELECT payload FROM sync_visible")
+        while let payload = try rows.next() {
+            let record = try JSONDecoder().decode(SharedCapture.self, from: payload)
+            guard record.deleted, let hash = record.source.contentHash else { continue }
+            for capture in captures
+            where capture.contentHash == hash
+                && capture.kind.rawValue == record.source.kind.rawValue
             {
-                let before = existing
-                let previousSeenAt = existing.lastSeenAt
-                existing.seenCount += 1
-                existing.lastSeenAt = capture.createdAt
-                existing.updatedAt = capture.createdAt
-                existing.title = existing.title ?? capture.title
-                existing.note = existing.note ?? capture.note
-                existing.selection = existing.selection ?? capture.selection
-                if existing.tags == nil, let tags = capture.tags {
-                    existing.tags = tags
-                    existing.tagsVersion = capture.tagsVersion
-                }
+                if capture.kind != .image { return true }
+                let blob = try StoreSync.reference(for: capture, paths: paths)
+                if record.source.blob == blob { return true }
+            }
+        }
+        return false
+    }
 
-                // An incoming `.pending` means this request wants enrichment; a broken row is
-                // repaired by re-queueing it, but a healthy one is left alone.
-                if capture.enrichmentState == .pending,
-                    existing.enrichmentState == .failed || existing.enrichmentState == .thin
-                {
-                    existing.enrichmentState = .pending
-                    existing.attemptCount = 0
-                    existing.lastAttemptAt = nil
-                }
-
-                try existing.update(db)
-                try enqueueChanges(from: before, to: existing, in: db, recapture: true)
-                return .alreadyCaptured(existing, previousSeenAt: previousSeenAt)
+    private func upsertCapture(
+        _ capture: Capture, in db: Database,
+        synchronize: (Capture?, Capture) throws -> Void
+    ) throws -> CaptureOutcome {
+        if let hash = capture.contentHash,
+            var existing = try Capture.filter(Capture.CodingKeys.contentHash == hash)
+                .fetchOne(db)
+        {
+            let before = existing
+            let previousSeenAt = existing.lastSeenAt
+            if existing.seenCount < Int.max { existing.seenCount += 1 }
+            existing.lastSeenAt = capture.createdAt
+            existing.updatedAt = capture.createdAt
+            existing.title = existing.title ?? capture.title
+            existing.note = existing.note ?? capture.note
+            existing.selection = existing.selection ?? capture.selection
+            if existing.tags == nil, let tags = capture.tags {
+                existing.tags = tags
+                existing.tagsVersion = capture.tagsVersion
             }
 
-            var inserted = capture
-            try inserted.insert(db)
-            try enqueueCreated(inserted, in: db)
-            return .captured(inserted)
+            // An incoming `.pending` means this request wants enrichment; a broken row is
+            // repaired by re-queueing it, but a healthy one is left alone.
+            if capture.enrichmentState == .pending,
+                existing.enrichmentState == .failed || existing.enrichmentState == .thin
+            {
+                existing.enrichmentState = .pending
+                existing.attemptCount = 0
+                existing.lastAttemptAt = nil
+            }
+
+            try existing.update(db)
+            try synchronize(before, existing)
+            return .alreadyCaptured(existing, previousSeenAt: previousSeenAt)
         }
+
+        var inserted = capture
+        try inserted.insert(db)
+        try synchronize(nil, inserted)
+        return .captured(inserted)
     }
 
     func updateNote(id: Int64, note: String?, now: Date = Date()) throws -> Capture {

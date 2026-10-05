@@ -48,9 +48,10 @@ struct Add: ParsableCommand {
         var results: [(capture: Capture, previousSeenAt: Date?)] = []
         var failed = false
 
-        for request in requests {
+        let outcomes = captures.ingest(requests)
+        for outcome in outcomes {
             do {
-                switch try captures.ingest(request) {
+                switch try outcome.get() {
                 case .captured(let capture):
                     results.append((capture, nil))
                 case .alreadyCaptured(let capture, let previousSeenAt):

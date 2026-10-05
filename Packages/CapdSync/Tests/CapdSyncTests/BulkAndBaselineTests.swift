@@ -5,6 +5,225 @@ import Testing
 @testable import CapdSync
 
 struct BulkAndBaselineTests {
+    @Test func captureBatchLimitsKindsAndWriterGuardsAreAtomic() throws {
+        let f = try BoundedFixture()
+        defer { f.clean() }
+        let writer = try DatabaseQueue(path: f.root.appendingPathComponent("guards.sqlite").path)
+        let client = try SyncClient(
+            writer: writer,
+            blobs: BlobStore(directory: f.root.appendingPathComponent("guards-blobs")))
+        let first = SharedCapture(source: CaptureSource(kind: .text, contentHash: "guard"))
+        let create: (captureID: UUID, mutation: CaptureMutation) = (first.id, .create(first))
+        for unsupported: CaptureMutation in [.delete, .restore] {
+            #expect(throws: SyncError.invalidOperation) {
+                try writer.write {
+                    try client.enqueueCaptures(
+                        in: $0, mutations: [create, (first.id, unsupported)])
+                }
+            }
+        }
+        #expect(throws: SyncError.invalidOperation) {
+            try writer.write {
+                try client.enqueueCaptures(in: $0, mutations: Array(repeating: create, count: 101))
+            }
+        }
+        #expect(throws: SyncTransactionError.requiresTransaction) {
+            try writer.writeWithoutTransaction {
+                try client.enqueueCaptures(in: $0, mutations: [create])
+            }
+        }
+        let other = try DatabaseQueue(path: writer.path)
+        #expect(throws: SyncTransactionError.wrongWriter) {
+            try other.write { try client.enqueueCaptures(in: $0, mutations: [create]) }
+        }
+        let absentImage = SharedCapture(
+            source: CaptureSource(kind: .image, blob: BlobReference(data: Data("absent".utf8))))
+        #expect(throws: SyncError.blobMissing) {
+            try writer.write {
+                try client.enqueueCaptures(
+                    in: $0, mutations: [create, (absentImage.id, .create(absentImage))])
+            }
+        }
+        #expect(throws: SyncError.invalidOperation) {
+            try writer.write { try client.enqueueCaptures(in: $0, mutations: [create, create]) }
+        }
+        #expect(try client.captures().isEmpty)
+        #expect(try client.pendingOperations().isEmpty)
+        #expect(
+            try writer.read { try Int64.fetchOne($0, sql: "SELECT sequence FROM sync_meta") } == 0)
+        let captures = (0..<100).map {
+            SharedCapture(source: CaptureSource(kind: .text, contentHash: "limit-\($0)"))
+        }
+        let batch = try writer.write { db in
+            try client.enqueueCaptures(in: db, mutations: captures.map { ($0.id, .create($0)) })
+        }
+        #expect(batch.map(\.sequence) == (1...100).map(Int64.init))
+        #expect(try client.captures().count == 100)
+        let before = try client.pendingOperations()
+        #expect(throws: SyncError.invalidOperation) {
+            try writer.write {
+                try client.enqueueCaptures(
+                    in: $0, mutations: [(captures[0].id, .create(captures[0]))])
+            }
+        }
+        #expect(try client.pendingOperations() == before)
+        // Existing bulk deletion and single restoration retain their separate contracts.
+        #expect(
+            try writer.write { try client.enqueue(in: $0, deletions: captures.map(\.id)) }.count
+                == 100)
+        #expect(try client.enqueue(captureID: captures[0].id, mutation: .restore).sequence == 201)
+    }
+
+    @Test(arguments: [false, true])
+    func captureBatchLateFailureRollsBackAliasesAndProjection(projectionFailure: Bool) throws {
+        let f = try BoundedFixture()
+        defer { f.clean() }
+        let writer = try DatabaseQueue(path: f.root.appendingPathComponent("rollback.sqlite").path)
+        try writer.write {
+            try $0.execute(
+                sql: "CREATE TABLE batch_source (id TEXT); CREATE TABLE batch_projection (id TEXT)")
+        }
+        let client = try SyncClient(
+            writer: writer,
+            blobs: BlobStore(directory: f.root.appendingPathComponent("rollback-blobs")),
+            project: { db, record in
+                try db.execute(
+                    sql: "INSERT INTO batch_projection VALUES (?)",
+                    arguments: [record.id.uuidString])
+                throw CaptureBatchFailure.projection
+            })
+        let first = SharedCapture(
+            source: CaptureSource(kind: .text, contentHash: "rollback-source"))
+        let duplicate = SharedCapture(source: first.source)
+        var mutations: [(captureID: UUID, mutation: CaptureMutation)] = [
+            (first.id, .create(first)), (duplicate.id, .create(duplicate)),
+        ]
+        if !projectionFailure { mutations.append((first.id, .edit(CaptureEdit(rating: 6)))) }
+        #expect(throws: (any Error).self) {
+            try writer.write { db in
+                try db.execute(
+                    sql: "INSERT INTO batch_source VALUES (?)", arguments: [first.id.uuidString])
+                try client.enqueueCaptures(in: db, mutations: mutations)
+            }
+        }
+        #expect(try client.pendingOperations().isEmpty)
+        #expect(try client.captures().isEmpty)
+        for table in [
+            "batch_source", "batch_projection", "sync_aliases", "sync_visible", "sync_outbox",
+        ] {
+            #expect(
+                try writer.read { try Int.fetchOne($0, sql: "SELECT COUNT(*) FROM \(table)") } == 0)
+        }
+        #expect(
+            try writer.read { try Int64.fetchOne($0, sql: "SELECT sequence FROM sync_meta") } == 0)
+        let good = try SyncClient(writer: writer, blobs: client.blobs)
+        #expect(try good.enqueue(captureID: first.id, mutation: .create(first)).sequence == 1)
+    }
+
+    @Test(arguments: [false, true])
+    func captureBatchPreservesIntermediateReplyAndExactRequestAdmission(requestTooLarge: Bool)
+        throws
+    {
+        let f = try BoundedFixture()
+        defer { f.clean() }
+        let writer = try DatabaseQueue(path: f.root.appendingPathComponent("admission.sqlite").path)
+        let client = try SyncClient(
+            writer: writer,
+            blobs: BlobStore(
+                directory: f.root.appendingPathComponent("admission-blobs"), binding: f.wire.binding
+            ),
+            deviceID: f.wire.deviceID, binding: f.wire.binding)
+        var capture = SharedCapture(source: CaptureSource(kind: .text, contentHash: "admission"))
+        capture.generated.body = String(repeating: "b", count: 9_000_000)
+        try client.enqueue(captureID: capture.id, mutation: .create(capture))
+        let transport = SyncHTTPTransport(
+            binding: f.wire.binding, deviceID: f.wire.deviceID, credential: { f.token },
+            execute: { f.handler.handle($0) })
+        try client.push(to: transport)
+        let before = try client.captures()
+        let authority = try f.server.baseline()
+        let edit =
+            requestTooLarge
+            ? CaptureEdit(
+                note: NoteEdit(String(repeating: "n", count: SyncHTTPHandler.maximumBodyBytes)))
+            : CaptureEdit(
+                generatedPatch: GeneratedContentPatch(
+                    ocrText: .set(String(repeating: "o", count: 9_000_000))))
+        let shrink = CaptureEdit(
+            generatedPatch: GeneratedContentPatch(body: .clear, ocrText: .clear))
+        #expect(
+            throws: requestTooLarge ? SyncHTTPError.requestTooLarge : SyncHTTPError.resourceLimit
+        ) {
+            try writer.write {
+                try client.enqueueCaptures(
+                    in: $0, mutations: [(capture.id, .edit(edit)), (capture.id, .edit(shrink))])
+            }
+        }
+        #expect(try client.captures() == before)
+        #expect(try client.pendingOperations().isEmpty)
+        #expect(try f.server.baseline() == authority)
+        #expect(
+            try writer.read { try Int64.fetchOne($0, sql: "SELECT sequence FROM sync_meta") } == 1)
+        let safe = try writer.write {
+            try client.enqueueCaptures(
+                in: $0, mutations: [(capture.id, .edit(CaptureEdit(rating: 4)))])
+        }
+        #expect(safe.first?.sequence == 2)
+        #expect(try client.push(to: transport).first?.outcome == .accepted)
+    }
+
+    @Test func captureBatchAliasesKeepSequentialHTTPNoteCausality() throws {
+        for batched in [false, true] {
+            let f = try BoundedFixture()
+            defer { f.clean() }
+            let writer = try DatabaseQueue(path: f.root.appendingPathComponent("alias.sqlite").path)
+            let client = try SyncClient(
+                writer: writer,
+                blobs: BlobStore(
+                    directory: f.root.appendingPathComponent("alias-blobs"), binding: f.wire.binding
+                ),
+                deviceID: f.wire.deviceID, binding: f.wire.binding)
+            let first = SharedCapture(
+                id: UUID(uuidString: "00000000-0000-0000-0000-000000000001")!,
+                source: CaptureSource(
+                    kind: .text, contentHash: "same-source", selection: "Same source"))
+            var duplicate = SharedCapture(
+                id: UUID(uuidString: "00000000-0000-0000-0000-000000000002")!, source: first.source)
+            duplicate.note = "B"
+            let mutations: [(captureID: UUID, mutation: CaptureMutation)] = [
+                (first.id, .create(first)), (duplicate.id, .create(duplicate)),
+                (first.id, .edit(CaptureEdit(note: NoteEdit("C")))),
+            ]
+            let operations: [SyncOperation]
+            if batched {
+                operations = try writer.write {
+                    try client.enqueueCaptures(in: $0, mutations: mutations)
+                }
+            } else {
+                operations = try mutations.map {
+                    try client.enqueue(captureID: $0.captureID, mutation: $0.mutation)
+                }
+            }
+            #expect(operations.map(\.sequence) == [1, 2, 3])
+            #expect(operations[1].captureID == duplicate.id)
+            #expect(operations[1].baseRevision == 0)
+            #expect(operations[2].predecessorID == operations[1].id)
+            let transport = SyncHTTPTransport(
+                binding: f.wire.binding, deviceID: f.wire.deviceID, credential: { f.token },
+                execute: { f.handler.handle($0) })
+            #expect(
+                try client.push(to: transport).map(\.outcome) == [.accepted, .accepted, .accepted])
+            try client.pull(from: transport)
+            let accepted = try #require(try f.server.baseline().captures.first)
+            #expect(accepted.id == first.id)
+            #expect(accepted.note == "C")
+            #expect(accepted.noteConflicts.isEmpty)
+            #expect(accepted.seenCount == 2)
+            #expect(try client.pendingOperations().isEmpty)
+            #expect(try client.captures() == [accepted])
+        }
+    }
+
     @Test func largeBaselinesAndFeedsStayInsideTheReplyBoundary() async throws {
         let f = try BoundedFixture()
         defer { f.clean() }
@@ -143,6 +362,8 @@ struct BulkAndBaselineTests {
         #expect(try server.baseline().captures.first { $0.id == captures[0].id }?.note == "Latest")
     }
 }
+
+private enum CaptureBatchFailure: Error { case projection }
 
 private struct BoundedFixture: Sendable {
     let root: URL

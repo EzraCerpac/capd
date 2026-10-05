@@ -276,20 +276,40 @@ extension Store {
     }
 
     func enqueueCreated(_ capture: Capture, in db: Database) throws {
-        guard let client = syncClient else { return }
+        guard let created = try createdMutation(capture, in: db) else { return }
+        try syncClient?.enqueue(in: db, captureID: created.captureID, mutation: created.mutation)
+    }
+
+    func createdMutation(_ capture: Capture, in db: Database) throws -> (
+        captureID: UUID, mutation: CaptureMutation
+    )? {
+        guard let client = syncClient else { return nil }
         let id = try StoreSync.identity(db, capture: capture)
         let blob = try StoreSync.blob(for: capture, paths: paths, store: client.blobs)
         let record = StoreSync.snapshot(capture, id: id, blob: blob)
-        try client.enqueue(in: db, captureID: id, mutation: .create(record))
+        return (id, .create(record))
     }
 
     func enqueueChanges(
         from before: Capture, to after: Capture, in db: Database, recapture: Bool = false,
         generatedTags: [String]? = nil, taggingProcessing: TaggingProcessingUpdate? = nil
     ) throws {
-        guard let client = syncClient else { return }
+        let mutations = try captureMutations(
+            from: before, to: after, in: db, recapture: recapture,
+            generatedTags: generatedTags, taggingProcessing: taggingProcessing)
+        for (id, mutation) in mutations {
+            try syncClient?.enqueue(in: db, captureID: id, mutation: mutation)
+        }
+    }
+
+    func captureMutations(
+        from before: Capture, to after: Capture, in db: Database, recapture: Bool = false,
+        generatedTags: [String]? = nil, taggingProcessing: TaggingProcessingUpdate? = nil,
+        current supplied: SharedCapture? = nil
+    ) throws -> [(captureID: UUID, mutation: CaptureMutation)] {
+        guard syncClient != nil else { return [] }
         let id = try StoreSync.identity(db, capture: before)
-        let current = try StoreSync.visible(db, id: id)
+        let current = try supplied ?? StoreSync.visible(db, id: id)
         guard current != nil else { throw SyncError.invalidOperation }
         var edit = CaptureEdit()
         if before.note != after.note { edit.note = NoteEdit(after.note) }
@@ -344,10 +364,12 @@ extension Store {
                 reminder: changedReminder
                     ? (after.reminderAt.map(ReminderUpdate.set) ?? .clear) : nil)
         }
-        if recapture { try client.enqueue(in: db, captureID: id, mutation: .recapture) }
+        var mutations: [(captureID: UUID, mutation: CaptureMutation)] = []
+        if recapture { mutations.append((id, .recapture)) }
         if edit != CaptureEdit() {
-            try client.enqueue(in: db, captureID: id, mutation: .edit(edit))
+            mutations.append((id, .edit(edit)))
         }
+        return mutations
     }
 
     func enqueueDeleted(_ captures: [Capture], in db: Database) throws {
