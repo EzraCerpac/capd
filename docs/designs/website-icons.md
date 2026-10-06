@@ -86,6 +86,12 @@ cursor. Unbound Mac icons live in a separate `assets/website-icons` namespace;
 the handoff copies verified reachable assets into a fresh bound namespace with
 rollback. A populated unbound sync blob namespace is never silently rebound.
 
+Enrollment against an older server queues preserved icons as durable pending
+upserts in the same transaction as the capture baseline. They retain their
+verified bytes and retry after the server gains icon support, without changing
+the generation setting or fetching the origin again. A newer icon already on
+the server wins through the normal revision check.
+
 Legacy pending enrollment fingerprints remain valid only when the known icon
 namespace is wholly empty, including its history and counters. Real icon state
 is included in preparation fingerprints. Host display, generation and sync
