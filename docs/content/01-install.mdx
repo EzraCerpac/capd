@@ -1,84 +1,164 @@
 ---
-title: Install Capd
-description: Download Capd, complete first-run setup, update it, or remove it.
+title: Install this fork
+description: Build the fork, install the Mac bundle, complete first-run setup, and understand update and iOS requirements.
 ---
 
-Capd requires **macOS 26 or later**. Releases are universal, so the same
-download works on Apple silicon and Intel Macs.
+This guide installs the source in
+[EzraCerpac/capd](https://github.com/EzraCerpac/capd). The Mac app requires
+**macOS 26 or later** and the packaging script builds for Apple silicon and
+Intel. The iPhone/iPad app is a separate Xcode project.
 
-## Direct download
+## Choose the right distribution
 
-1. Download the notarized `.dmg` from the
-   [latest GitHub release](https://github.com/jamiedavenport/capd/releases/latest).
-2. Open the disk image and drag `capd.app` to Applications.
-3. Launch Capd from Applications.
+The [upstream GitHub releases](https://github.com/jamiedavenport/capd/releases/latest)
+and `brew install jamiedavenport/tap/capd` install Jamie Davenport's upstream
+distribution. This fork currently publishes no release downloads; build the
+source below to install its added features.
 
-The bundled CLI is available at `/Applications/capd.app/Contents/MacOS/capd`.
-Add that path to your shell configuration if you want to use it directly.
+The fork retains the same `capd.app` name, `dev.jxd.capd` app identifier,
+`dev.jxd.capd.agent` helper, and default library location as upstream. Choose one
+installation for a library and keep its app, CLI, and helper together. Take a
+coherent backup before replacing an app that already has captures; see
+[backups and upgrades](/sync#backups-and-upgrades).
 
-## Homebrew
+## Build from source
+
+Install full Xcode and use Xcode 26.4.1, matching current build CI. Swift tools
+6.2 or later are required. From a new checkout:
 
 ```sh
-brew install jamiedavenport/tap/capd
+git clone https://github.com/EzraCerpac/capd.git
+cd capd
+./Scripts/bootstrap.sh
+Scripts/package-app.sh
 ```
 
-Homebrew installs `capd.app` into `/Applications` and makes the bundled `capd`
-CLI available on your `PATH`.
+`bootstrap.sh` resolves Swift dependencies and enables this clone's Git hooks.
+The packaging script builds a universal app, replaces `dist/`, and writes:
+
+- `dist/capd.app`, including the CLI, background agent, and Mac share extension
+- `dist/capd-<version>.dmg`, using the version declared in the source
+
+Local builds use an ad hoc signature by default. Setting `CODESIGN_IDENTITY`
+selects a signing identity; packaging does not perform notarization. This is
+different from the upstream notarized release workflow.
+
+If Capd is already installed, quit it and stop CLI/share work. Remove its helper
+using the existing bundle before taking the coherent backup and replacing it:
+
+```sh
+/Applications/capd.app/Contents/MacOS/capd doctor --uninstall-agent
+```
+
+Ensure all library/asset writers, including any processing children, have stopped.
+Open the newly built disk image and copy `capd.app` to `/Applications`, then
+launch it from there. The new app reinstalls its matching helper. Keep the whole
+bundle intact; the app finds its helper beside its own executable.
+
+The app normally opens `~/Library/Application Support/capd/`. `CAPD_DIR` changes
+the root only for processes receiving that environment variable. A source
+checkout or an alternate app path does not create an isolated library, and a
+shell override does not automatically configure a Finder-launched app or its
+launchd helper.
+
+## Use the matching CLI
+
+The bundled executable is:
+
+```sh
+/Applications/capd.app/Contents/MacOS/capd --help
+```
+
+To make this bundle's CLI available in a shell, add its directory to `PATH`:
+
+```sh
+export PATH="/Applications/capd.app/Contents/MacOS:$PATH"
+```
+
+Put that line in the appropriate shell configuration if you want it to persist.
+Use `command -v capd` to check which executable your shell selects, especially
+after an upstream Homebrew installation.
 
 ## First run
 
-Capd guides you through four short steps:
+The Mac introduction walks through **Meet Capd**, **Choose your shortcuts**,
+**Connect your Mac**, and **Make it yours**. Defaults are `⌃⌥C` to capture,
+`⌃⌥N` to note the last capture, and `⌥⇧Space` to search.
 
-1. **Choose hotkeys.** Keep the defaults or record combinations that fit your
-   workflow: ⌃⌥C to capture, ⌃⌥N to note the last capture, and ⌥⇧Space to
-   search.
-2. **Grant Accessibility access.** This lets Capd read selected text, detect
-   secure fields, and read the current tab in Firefox-based browsers. It is
-   optional; without it, hotkey capture uses the clipboard fallback.
-3. **Allow browser access.** Safari, Chrome, and Arc use per-browser macOS
-   Automation permission to share the current tab's address and title.
-4. **Try the loop.** Make one capture, open search, and find it again.
+The optional connections have different purposes:
 
-Capd also installs its background helper on first launch. The helper enriches
-captured pages and images even while the menu-bar app is closed.
+- **Accessibility** reads selected text, detects secure input, and reads tabs in
+  Firefox-based browsers. Without it, hotkey capture falls back to the clipboard.
+- **Browser Automation** grants Safari, Chrome, and Arc access individually for
+  their current tab and rendered page.
+- **Share Sheet** enables the bundled extension in apps that share links.
+- **Apple Intelligence** supports automatic tags and local answers when the
+  device, language, and downloaded model are eligible. Capture and search work
+  without it.
 
-{/*
-MEDIA: onboarding.png
-Show the “Try it” onboarding step after a successful first capture. Include the
-two default shortcuts and the green background-helper confirmation so users
-know the setup is short and guided.
-*/}
+The app installs or repairs `capd-agent` on launch. The helper fetches captured
+pages and performs image processing while the menu-bar app is closed. Complete
+the capture/search loop, or reopen the introduction from **Continue Setup…** or
+**Replay Introduction…** in the menu.
+
+A fresh unconfigured library remains local. Mac onboarding does not create a
+server, device credential, or shared-library enrollment. Follow the separate
+[library connection guide](/sync) to connect an already prepared service.
+
+## iPhone and iPad
+
+The source app targets iOS 17 or later on iPhone and iPad. Ask Cap separately
+requires iOS 26 or later and an available Apple on-device model. No App Store,
+TestFlight, development team, or physical-device provisioning is supplied by
+the source instructions.
+
+With XcodeGen installed, run from the repository root:
+
+```sh
+xcodegen generate --spec iOS/project.yml
+```
+
+Open `iOS/CapdPhone.xcodeproj` and choose the `CapdPhone` scheme. Physical-device
+installation requires your own signing/team/profile setup for both the app and
+share extension, including their matching App Group. The repository's default
+signing is ad hoc for simulator work. See the
+[iOS guide](https://github.com/EzraCerpac/capd/blob/main/iOS/README.md) and
+[contributor guide](https://github.com/EzraCerpac/capd/blob/main/CONTRIBUTING.md)
+for compile and fixture instructions.
+
+The mobile app keeps a local library until verified connection. Its DEBUG
+simulator reference transport is a synthetic test mechanism, not a NAS pairing
+method. Physical-device installation and reachability need separate validation.
 
 ## Update
 
-Capd checks GitHub Releases for a newer version at most once a week. You can
-disable this in Settings. When an update is available, the menu-bar app offers
-to copy this command:
+For this fork, obtain the reviewed source revision and rebuild/install the full
+bundle using the same steps above. Preserve the library and its matching sync
+configuration. For connected libraries, upgrade the authority's required
+capabilities before enabling new client writes; follow
+[backups and upgrades](/sync#backups-and-upgrades).
 
-```sh
-brew upgrade jamiedavenport/tap/capd
-```
-
-For a direct installation, download the newest `.dmg` and replace the existing
-app in Applications.
+The app's inherited weekly update check contacts **upstream** GitHub releases
+and offers `brew upgrade jamiedavenport/tap/capd`. That command updates upstream,
+not this source build. Disable **Check weekly for a new version** in Settings
+if you do not want upstream update notices. Do not replace a bound fork library's
+writers with upstream or pre-sync binaries as an upgrade or rollback shortcut.
 
 ## Uninstall
 
-With Homebrew:
+Quit the app so it cannot reinstall its helper, then remove the helper using
+the installed bundle's CLI:
 
 ```sh
-brew uninstall capd
+/Applications/capd.app/Contents/MacOS/capd doctor --uninstall-agent
 ```
 
-To remove the app and its stored captures:
+Delete `/Applications/capd.app`. This command removes the helper and its plist;
+it does not delete the library. The default library remains in
+`~/Library/Application Support/capd/`, or in the effective alternate root you
+configured. Keep backups, sync history, and mobile connection archives until
+their preservation is verified. Removing an app does not revoke a server grant.
 
-```sh
-brew uninstall --zap capd
-```
-
-For a direct installation, run `capd doctor --uninstall-agent`, quit the app,
-and delete `/Applications/capd.app`. Your library remains in
-`~/Library/Application Support/capd/` until you remove that folder.
-
-Want to build from source? See the repository's
-[contributor guide](https://github.com/jamiedavenport/capd/blob/main/CONTRIBUTING.md).
+For an upstream Homebrew installation, `brew uninstall capd` removes the cask.
+`brew uninstall --zap capd` also deletes the default library and helper plist;
+use it only when you intend to discard that data.

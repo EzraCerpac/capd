@@ -1,0 +1,292 @@
+---
+title: Connect a library
+description: Prepare your own service, connect Mac and mobile libraries, and preserve data during upgrades.
+---
+
+Capd keeps captures in a local database and assets folder on each device. An
+enrolled library sends changes and verified assets to your configured service.
+There is no built-in hosted account or automatic NAS discovery.
+
+The repository implements authenticated sync, Mac activation commands, mobile
+backup/connection settings, and offline content administration. Source support
+and synthetic tests do not establish that a particular NAS, proxy, physical
+device, or live-library migration is deployed and verified.
+
+## Prepare the service
+
+Before connecting a device, the service operator supplies:
+
+- A compatible host running `capd-sync-server`. The supplied host targets macOS
+  15 or later; the Mac client separately requires macOS 26.
+- An HTTPS endpoint whose path is exactly `/v1/sync`, with TLS trusted by each
+  device, working routing, and an HTTPS reverse proxy to the loopback listener.
+- Stable service and library UUIDs, plus a distinct authorized device UUID and
+  credential for each enrolled device.
+- A fresh or correctly bound authority directory and a coherent backup plan.
+- Compatible authority/client versions and the required authenticated
+  capabilities for metadata, generated processing and extraction quality.
+  Website-icon capability is additionally required for icon delivery; an older
+  compatible authority can still sync captures without icons.
+
+The listener binds only `127.0.0.1`. The executable does not install a service,
+configure TLS/VPN/DNS, issue credentials, or enroll clients. A successful local
+build does not supply a generic Linux NAS deployment. Keep each client's local
+library separate from the authority's storage.
+
+Host startup binds the service data root. An authenticated sync request creates
+the enrolled library's authority within that root. Offline import administration
+requires that bound authority to exist already.
+
+Build the host separately, from the repository root:
+
+```sh
+swift build --build-system native --package-path Packages/CapdSyncServer \
+  --product capd-sync-server
+```
+
+The explicit host command is:
+
+```sh
+capd-sync-server --config /owned/path/enrollment.json \
+  --data-dir /owned/path/sync-data --port 8080
+```
+
+Here and below, bare executable names assume the operator has placed the built
+executable on `PATH`; source builds do not install them automatically.
+`--config` and `--data-dir` are required. Port 8080 is the default; port 0 selects
+an ephemeral port. A running host exclusively locks its data root.
+
+For an Intel macOS host, the repository also supplies
+`Packages/CapdSyncServer/Scripts/build_intel.sh`. It packages the executable and
+any required compatibility shim together under
+`.build/artifacts/capd-sync-server-macos-intel`. Keep the bundle together and
+review its toolchain assumptions. This packaging path does not verify execution
+on your NAS. See the
+[server build and configuration reference](https://github.com/EzraCerpac/capd/blob/main/Packages/CapdSyncServer/README.md).
+
+## Device authorization and identity
+
+Host verifier configuration contains a `serviceID` and an `enrollments` array.
+Each enrollment has `libraryID`, `deviceID`, `credentialSHA256`, and `revoked`.
+The host refuses invalid identities, duplicate devices/digests, empty lists,
+unknown fields, and malformed digests. It rereads configuration per request;
+revocation applies to subsequent requests. Keep service/library identities stable
+when replacing a binary or changing a network address.
+
+The host expects a credential consisting of 64 lowercase hexadecimal characters
+generated from 32 random bytes. Store only the SHA-256 digest of the credential's
+UTF-8 text in host configuration. Keep the credential itself out of source,
+configuration JSON, command arguments, and logs. Treat verifier files as sensitive
+and restrict their permissions. Device credentials are separate from optional
+assistant-bridge credentials.
+
+A service operator must provision the corresponding verifier grant. Entering
+an endpoint or generating a credential in the phone UI does not create that
+grant. Client activation verifies the authenticated service/library/device
+principal; reachability alone cannot establish its identity.
+
+## Connect a prepared Mac library
+
+Use matching fork app, CLI, and agent binaries with the same library root.
+Before activation, stop every writer: the app, helper, CLI processes, and share
+relay. Preserve a verified database/WAL/assets backup and prior configuration.
+
+An empty fresh Mac library can enroll with a fresh device identity. A populated
+Mac requires the verified initial-import preparation and its exact authority
+baseline. Ordinary activation does not migrate arbitrary existing captures.
+The initial populated-Mac handoff requires the authority at its initial import
+checkpoint before other imports or edits advance it. See
+[Mac import preparation](https://github.com/EzraCerpac/capd/blob/main/docs/designs/library-migration.md)
+and [Mac activation requirements](https://github.com/EzraCerpac/capd/blob/main/docs/designs/mac-sync-runtime.md#activation-requirements).
+
+Prepare public enrollment JSON using the operator's actual approved identities:
+
+```json
+{
+  "endpoint": "https://sync.example.com/v1/sync",
+  "binding": {
+    "serviceID": "11111111-1111-4111-8111-111111111111",
+    "libraryID": "22222222-2222-4222-8222-222222222222"
+  },
+  "deviceID": "33333333-3333-4333-8333-333333333333"
+}
+```
+
+These are illustrative identities, not a configured service. This file contains
+no credential. The matching device credential must already be provisioned in
+the Mac Keychain as a nonsynchronizable generic-password item with service
+`dev.jxd.capd.sync` and account `SERVICE_UUID/LIBRARY_UUID/DEVICE_UUID`. Use each
+UUID's uppercase Foundation `UUID.uuidString` form. See the
+[credential-store contract](https://github.com/EzraCerpac/capd/blob/main/Packages/CapdSync/Sources/CapdSync/SyncCredentials.swift)
+when preparing the item. The activation command does not create or save it;
+the repository has no Mac credential-provisioning CLI.
+
+With all writers stopped and the prepared root selected:
+
+```sh
+CAPD_DIR=/explicit/prepared-library \
+  /Applications/capd.app/Contents/MacOS/capd sync activate \
+  --enrollment /explicit/public-enrollment.json
+```
+
+Activation checks the authenticated baseline and required capabilities, validates
+the prepared library, and publishes `sync-configuration.json`. Restart matching
+writers against that same root, then inspect/run sync:
+
+```sh
+CAPD_DIR=/explicit/prepared-library capd sync status
+CAPD_DIR=/explicit/prepared-library capd sync run
+```
+
+`status` reports local sync state without networking. `run` performs a bounded
+attempt and reports offline, attention, or busy states with exit code 3. Normal
+Mac captures queue changes durably; an offline attempt does not undo a saved
+capture. Ordinary CLI commands also attempt a short sync flush after local work.
+The agent needs to remain available for page/OCR/tag/icon processing. An empty
+outbox does not prove every other device has received the current library.
+
+Optional `loopbackSOCKSPort` in Mac enrollment can route HTTPS through an already
+configured local SOCKS bridge. It does not start a proxy, change system network
+settings, or configure the phone. See the Mac runtime reference for that path.
+
+## Connect an iPhone or iPad
+
+Install the app and share extension with their matching App Group first. Confirm
+the exact HTTPS endpoint, service/library IDs, and device routing with the service
+operator. The mobile app does not inherit the Mac's proxy or VPN connection.
+
+1. Open **Device sync**, then **Prepare device connection**.
+2. Enter **HTTPS sync address**, **Service ID**, and **Library ID**. **Check
+   private connection** makes a bounded credential-free HTTPS request from this
+   device. An expected 401 demonstrates an authentication boundary is reachable;
+   it does not verify the service/library identity.
+3. Choose **Save backup and prepare connection**. The app retains the original
+   library and exact pending history, and displays a fresh **New device ID**.
+4. If the original library has captures, choose either the reviewed import flow
+   below or explicitly enable **Keep old sources archived; use server library**.
+   Archive-only retains original content/history locally while the new library
+   pulls the authority. An empty original needs no content import.
+5. Choose **Generate device credential**, or enter the separately supplied fresh
+   device credential. Ask the operator to authorize the displayed fresh device
+   ID with its **Credential verifier (SHA-256)** for the same service/library.
+   Keep the screen open: the generated credential is held in memory until
+   activation. If you leave, revoke an unused grant before generating another.
+6. Enable **Authorize this device to connect to the verified library**, then
+   choose **Verify and connect**. The app authenticates and validates the bound
+   library before saving its credential to Keychain and switching app/share
+   storage together.
+
+Preparation is retained across relaunch. New captures or edits after preparation
+require another backup; the import path also requires another review. Original
+pending operations are not replayed or acknowledged by content import. Keep the
+original backup until the connected library is verified on your devices.
+
+After connection, the app delivers changes while active and retries after
+connectivity returns. The share extension saves into the same bound local
+library/outbox while the app is closed; it does not access Keychain or perform
+network sync. iOS may delay delivery while the main app is closed.
+
+### Import copied mobile content
+
+For a populated original, **Export copied sources for review** exports the
+`Transfer` folder: copied content and referenced attachments, excluding original
+pending-operation history. The service operator uses the separate offline
+`capd-sync-admin` workflow against an existing bound authority.
+
+```sh
+swift build --package-path Packages/CapdSyncAdmin -c release
+capd-sync-admin preview \
+  --data-dir /owned/path/authority \
+  --service-id SERVICE_UUID --library-id LIBRARY_UUID \
+  --snapshot /owned/path/transfer/snapshot.json \
+  --assets /owned/path/transfer/assets \
+  --review /owned/path/new-review.json
+```
+
+Stop the host before preview or import. Both commands require its exclusive lock
+and refuse nonempty WAL/rollback journals; recover/checkpoint using the operator's
+normal trusted SQLite workflow first. Preview creates a private review file and
+prints its exact hash. Review competing values, tombstones, conflicts,
+maximum-known count lower bounds, and feed expiration before import.
+
+```sh
+umask 077
+capd-sync-admin import \
+  --data-dir /owned/path/authority \
+  --service-id SERVICE_UUID --library-id LIBRARY_UUID \
+  --snapshot /owned/path/transfer/snapshot.json \
+  --assets /owned/path/transfer/assets \
+  --review /owned/path/new-review.json \
+  --reviewed-sha256 EXPLICITLY_REVIEWED_HASH > /owned/path/new-receipt.json
+```
+
+Use a fresh receipt output path. The operator supplies the review and committed
+receipt files and their exact SHA-256 pins through the coordinated host result.
+On the phone, choose **Choose host review**, review the displayed differences,
+then **Choose committed import receipt** and enter the separately supplied hashes.
+A hash inside an imported file cannot establish that file's origin. Restart the
+host before **Verify and connect**, which checks the imports against its
+authenticated baseline.
+
+Admin creates no authority or grant and activates no device. A committed host
+import is not undone by a later phone activation failure. Repeat of the identical
+reviewed import can recover its receipt; changed artifacts or authority state
+require another review. See the
+[offline administration reference](https://github.com/EzraCerpac/capd/blob/main/Packages/CapdSyncAdmin/README.md)
+and [mobile activation design](https://github.com/EzraCerpac/capd/blob/main/docs/designs/mobile-library-activation.md).
+
+## Backups and upgrades
+
+Preserve coherent state before replacing writers, importing, activating, or
+restoring a library:
+
+- On Mac, the effective root's SQLite database and committed WAL/journal state,
+  complete assets, identity/history/outbox, and matching sync configuration.
+- On the host, the complete authority data directory, SQLite state, blobs and
+  ownership markers, plus stable service/library verifier configuration.
+- On mobile, the retained original database/WAL, assets, receipts, device identity,
+  exact outbox, and connection preparation archives. The exported `Transfer`
+  folder is content only.
+
+Stop all database and asset writers for an offline copy, or use a coordinated
+SQLite-safe backup. A bare `capd.sqlite` copy while the helper is running can
+omit committed WAL data and changing assets. `capd export` is useful content
+export; it is not a complete sync-history or image backup. Preserve credentials
+through a separate secure process; library JSON does not contain them.
+
+Upgrade the authority before enabling clients that send new capability-dependent
+writes. Keep app, agent, CLI, and mobile versions compatible and verify sync state,
+counts, tags, notes/conflicts, search, and referenced assets afterward. Unsupported
+capabilities retain queued work rather than granting permission to reset it.
+
+For a networking pause on the Mac:
+
+```sh
+capd sync deactivate
+capd sync resume
+```
+
+Deactivate retains binding, device identity, history, and queued changes. Local
+writers continue queuing; it does not quiesce them or unenroll the library.
+Never delete configuration to obtain local-only writes from a bound database.
+
+A pre-sync binary cannot safely write bound storage. Restore only a verified
+complete snapshot with all writers stopped and coordinate with the authority's
+accepted device history. Restoring an older local sequence against a newer
+authority is not a safe independent rollback. A failed phone switch preserves
+the original library; it does not undo a committed host import. See the runtime
+and mobile activation references for recovery boundaries.
+
+## Synthetic tools and deployment limits
+
+`capd-sync-reference` and DEBUG simulator flags are loopback fixture tools without
+production authentication. They are not a remote pairing method.
+`synthetic_library_migration.py` accepts marked synthetic libraries only; never
+add its marker to a real Mac or phone library.
+
+The Mac snapshot helper has a separate quiesced-copy acquisition API, and its CLI
+exports copied content. Snapshot/dry-run/import preparation does not deploy to a
+NAS, create grants, or activate live writers. Existing populated libraries need
+their preservation and coordinated import path reviewed independently. The
+[migration design](https://github.com/EzraCerpac/capd/blob/main/docs/designs/library-migration.md)
+describes those limits.

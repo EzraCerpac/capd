@@ -1,10 +1,10 @@
 # Self-hosted sync preparation
 
-Custom sync is the accepted engine direction. `CapdSync` now contains a versioned,
-authenticated HTTP boundary and durable service/library enrollment checks. This is
-preparation for a self-hosted service, such as DriehuisNAS. No service is deployed,
-no real credentials are provisioned, and the Mac/iPhone default adapters remain
-unconfigured. The existing reference socket remains a separate synthetic fixture.
+`CapdSync` implements a versioned, authenticated HTTP boundary and durable
+service/library enrollment checks for a self-hosted library. Mac and iPhone
+clients start unconfigured and activate only after verified enrollment. Hosting,
+HTTPS routing, device grants and backups require separate operator setup. The
+reference socket remains a separate synthetic fixture.
 
 ## Prepared boundary
 
@@ -16,7 +16,7 @@ token database, network listener, TLS configuration or static production secrets
 The separate `CapdSyncServer` package supplies a loopback HTTP host and a digest-only
 enrollment-file authorizer; see its [README](../../Packages/CapdSyncServer/README.md).
 
-The version-1 JSON envelope carries an action and expected service/library/device
+The JSON envelope carries a version, an action and expected service/library/device
 UUIDs. Those UUIDs assert the client's enrollment; they never select server storage.
 The handler compares them to its configured service identity and authenticated
 principal before looking up a library. An apply operation must also name that
@@ -25,7 +25,7 @@ library UUID, and the handler verifies its persisted service/library binding.
 
 ```mermaid
 flowchart LR
-    C[Bound client and durable outbox] --> E[Version 1 HTTP envelope]
+    C[Bound client and durable outbox] --> E[Versioned HTTP envelope]
     E --> A[Authorize bearer credential]
     A --> S[Verify service, library and device assertions]
     S --> L[Authenticated library authority]
@@ -34,8 +34,12 @@ flowchart LR
     R --> C
 ```
 
-The actions are apply, changes, baseline, baselinePage, upload and download. Fixture controls
-and administrative actions are absent. Domain DTOs use their existing Codable
+The handler accepts envelope versions 1 through 5 and rejects actions requiring a
+newer version than the request advertises. Capture actions are apply, changes,
+baseline, baselinePage, upload and download. Website-icon actions are
+applyWebsiteIcon, websiteIconChanges, websiteIconBaselinePage, uploadWebsiteIcon
+and downloadWebsiteIcon. Fixture controls and administrative actions are absent.
+Domain DTOs use their existing Codable
 representation inside the separate versioned envelope; dates use JSONEncoder's
 reference-date numeric representation and binary data uses base64. Version changes
 need an explicit compatibility decision before clients are activated.
@@ -82,8 +86,8 @@ reader and blob entry points perform the same check.
 First enrollment refuses a previously used unbound sync database, including nonzero
 sequence/cursor/history, accepted or rejected work and aliases, even after its outbox
 drains. Unbound blob bytes also block enrollment. This API does not migrate a populated
-legacy Mac or mobile library. Application enrollment must choose fresh scoped storage
-or implement and validate an explicit migration before enabling sync.
+legacy Mac or mobile library. Application activation uses fresh scoped storage or the
+separate reviewed [content import and handoff](library-migration.md) flows.
 
 A server authority also persists the full service/library binding. Its blob directory
 has an exclusively created ownership marker for that same binding, so two library
@@ -98,14 +102,13 @@ The host caches at most 16 authority/BlobStore instances, evicting the least rec
 used library before opening another. Evicted libraries reopen their durable state on
 the next authorized request. It must not reuse existing unbound handles during enrollment.
 
-## Integration still required
+## Host and deployment requirements
 
-The intended host is self-hosted. Ezra identified DriehuisNAS as Intel macOS 15.8,
-with 16 GB RAM and roughly 33 GB free storage; these are planning inputs, not capacity
-or runtime verification. The standalone Intel executable is built on the local Mac,
-targets macOS 15.0 and runs in the local Rosetta process checks. Its bundle includes
-the required compiler compatibility libraries, so the NAS does not need a compiler
-installation. Execution on the NAS's macOS 15.8 runtime remains unverified.
+The standalone host targets macOS 15 or later. The Intel packaging script builds
+the executable on a development Mac and includes required compiler compatibility
+libraries. Keep that bundle intact when moving it to a compatible host. Local
+Rosetta process checks establish synthetic host behavior; they do not verify a
+particular NAS runtime, capacity or deployment.
 
 The host binds only `127.0.0.1`, requires explicit configuration and a fresh or matching
 owned data root, and reloads digest-only device enrollment for each request. Revocation
@@ -119,16 +122,20 @@ Deployment still needs an explicit owned storage location, process supervision,
 HTTPS proxy configuration and a tested backup/restore policy covering SQLite state
 and the complete asset directory, including ownership markers, together.
 
-Application activation still needs pairing and secure credential issuance/rotation,
-Keychain storage and an asynchronous HTTPS adapter. URLSession supplies
-asynchronous networking; redirect handling must reject credential forwarding to a
-new destination rather than relying on the default behavior. Host identity verification,
-timeouts/cancellation, body limits and error-to-scheduler behavior need focused network
-checks before activation. See Apple's [URLSession documentation](https://developer.apple.com/documentation/foundation/urlsession)
-and [redirect callback](https://developer.apple.com/documentation/foundation/urlsessiontaskdelegate/urlsession(_:task:willperformhttpredirection:newrequest:completionhandler:)).
+Application clients implement scoped Keychain credential storage and the asynchronous
+`URLSessionSyncTransport`. The transport requires a fixed HTTPS endpoint, uses system
+TLS verification, refuses all redirects, bounds request/response bodies and deadlines,
+and checks cancellation. The client validates the enrolled service/library/device
+principal and required capabilities before accepting successful replies. Synthetic
+loopback tests cover redirects, cancellation, response bounds, authentication failures
+and exact retry; they do not verify a deployed proxy or NAS connection. See
+[production client behavior](production-sync-client.md). Service-operator authorization,
+secure credential delivery/rotation and deployment-specific connectivity remain
+operator responsibilities; there is no automatic pairing or credential issuer.
 
-Total storage/history quotas, partial-upload cleanup, receipt/tombstone retention,
-rate limits and streaming baseline delivery remain host/design work.
+Capture and website-icon baselines use bounded, cursor-pinned JSON pages.
+Aggregate storage/history quotas, partial-upload
+cleanup, automatic receipt/tombstone pruning and request-rate limits are not implemented.
 Current in-process blob locking does not support multiple authority
 processes staging the same root. The current tests establish synthetic protocol and
 isolation behavior; they do not establish production performance, power-loss recovery

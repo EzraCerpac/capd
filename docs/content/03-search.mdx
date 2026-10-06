@@ -1,17 +1,17 @@
 ---
 title: Search
-description: Find captures by what you remember, then narrow results by site, tag, or date.
+description: Search saved content on Mac and iPhone, ask local questions, and opt into system discovery.
 ---
 
-Press **⌥⇧Space** to open Capd's keyboard-first search window. Search starts as
-you type; press the shortcut again or Escape to close it.
+On Mac, press **⌥⇧Space** to open Capd's keyboard-first search window. Search
+starts as you type; press the shortcut again or Escape to close it.
 
 Capd searches titles, websites, notes, selections, readable page content, and
 text recognized inside images. Title and website matches rank highest, with your
-1–5 ratings prioritising the captures you like. The last word is treated as a
-prefix, so `concur` can find *concurrency*.
+1–5 ratings prioritising the captures you like. Each search term is treated as
+a prefix, so `concur` can find *concurrency*.
 
-![Search saved content in Capd](/search-window.gif)
+![Current Mac search view with synthetic saved content](/fork/mac-search.png)
 
 ## Ask Cap
 
@@ -24,16 +24,27 @@ matches from your library. You can also start a query with `?` and press Return:
 ? Compare what I saved about local-first software
 ```
 
-The answer replaces the result list while it is being assembled. Every claim
-has a numbered citation; click a citation or a source below the answer to open
-the original capture. Press Escape to return to the search results, or
-Command-Return to copy the answer with its citations.
+The answer replaces the result list while it is being assembled. Its statements
+have numbered citations to saved captures. Click a citation or source to open
+its current URL or image, or copy its saved text. Press Escape to return to the
+search results, or Command-Return to copy the answer with its citations. Review
+the sources when accuracy matters; a citation does not guarantee a correct claim.
 
 Retrieval and answer generation happen locally. Ask Cap uses Apple's on-device
 Foundation Model and works without a network connection once Apple Intelligence
 is ready. On an unsupported Mac the Ask Cap row is hidden. Starting a query
 with `?` explains why the feature is unavailable and, when appropriate, links
 to Apple Intelligence settings.
+
+On iPhone, tap **Ask Cap**, enter a question, and tap **Ask Cap** in the sheet. It
+shows citations and supporting quotes; selecting a source opens its current
+saved detail. Ask Cap requires iOS 26 or later, eligible hardware, enabled and
+ready Apple Intelligence, and a supported locale. The rest of the phone app
+supports iOS 17 or later. **Check again** refreshes model availability.
+
+Phone questions and answers are not persisted, and there is no remote fallback.
+Both apps can report insufficient evidence, changed sources, or model failure.
+Being available does not guarantee that the local model can finish an answer.
 
 ## Keyboard shortcuts
 
@@ -45,16 +56,21 @@ to Apple Intelligence settings.
 | ↩ | Open a link or image; copy a text capture |
 | ⌘↩ | Copy the URL or captured text |
 | ⌘⇧⌫ | Delete the selected capture |
+| ⌘R | Choose a future reminder time for the selected capture |
 | Esc | Return from an answer, or close search |
 
 You can also click a tag to filter, click a result to open it, or click one of
 the five rating dots to set that capture's rating. Plain Left and Right Arrow
 remain available for moving the cursor through your search.
 
+Scheduled reminders appear in the Mac HUD while Capd is running. Use **⌃⌥O**
+to open a reminder's link when the HUD offers **Open**. The phone can display a
+synchronized reminder date, but has no reminder scheduling control.
+
 ## Tags
 
-When on-device tagging is available, Capd gives each capture one to three broad
-topic tags from a small vocabulary that adapts as your library grows. Tags
+When on-device tagging is available, Capd can assign up to three broad topic
+tags from a small vocabulary that adapts as your library grows. Tags
 appear below the search field and beside each result.
 
 Press Tab and Shift-Tab to move through tag filters, click a tag, or include a
@@ -78,6 +94,45 @@ swift concurrency site:swift.org tag:development after:2026-01-01
 
 Dates use `YYYY-MM-DD`. Text that does not form a valid filter is treated as an
 ordinary search term.
+
+## Search on iPhone
+
+Use **Search saved sources** above the library list. It searches saved titles,
+source text, notes, manual/generated tags, page text, and recognized image text;
+URL substrings also match. Prefix matches and literal matches are combined,
+with the newest captures first. The Mac and CLI filter syntax above does not
+apply to this field.
+
+Open a result to review its saved text and notes. **Edit** changes your note and
+manual tags; separate new tags with spaces and choose **Save changes**. Generated
+tags remain separate. The share button shares the URL or saved text of a
+non-image source. **Delete source** asks for confirmation.
+
+If a source has **Notes to resolve**, review its versions in **Edit**. Enable
+**Use this note to resolve all variants** and save the note you want to keep.
+This resolves the versions the editor opened; a newer unseen version can still
+require review. See [sync and note conflicts](/sync).
+
+## System search and Shortcuts
+
+System discovery starts off. On Mac, enable **Find titles and manual tags in
+system search** in Settings. On iPhone, open **Device sync** and enable **Find
+captures in Spotlight and Shortcuts**. Discovery shares saved titles and manual
+tags with the device's local system index; it excludes source text, page bodies,
+OCR, notes, and generated tags.
+
+The named actions are **Find Captures**, **Open Capture**, and **Draft Text**.
+Find and Open require discovery consent. Draft Text opens an editable composer
+and requires an explicit Save; it is independent of that consent. These actions
+do not provide arbitrary Siri questions about your library.
+
+System indexing is asynchronous. Entries have a 30-day expiration and renew
+while the app is active. On iPhone, a closed-app share appears in system search
+after Capd next opens. Libraries over 1,000 live captures or invalid metadata
+disable discovery and report an issue; in-app search remains available. Turning
+discovery off requests scoped removal, and settings exposes removal failures for
+retry. OS discovery depends on the installed signed app and system behavior;
+compiling the repository alone does not verify it. See [troubleshooting](/troubleshooting).
 
 ## Search from the terminal
 

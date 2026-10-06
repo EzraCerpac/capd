@@ -1,44 +1,63 @@
 ---
-title: Menu bar and settings
-description: Understand Capd's menu, preferences, local storage, permissions, and diagnostics.
+title: Mac menu bar and settings
+description: Use the Mac menu, capture preferences, website icons, system search, and local storage.
 ---
 
-Capd lives in the menu bar. It has no Dock icon or always-open library window;
-capture happens in the current app and search appears only when requested.
+The Mac app lives in the menu bar. It has no Dock icon or always-open library
+window; capture happens in the current app and search appears only when requested.
 
 ## Menu-bar app
 
-The menu provides quick access to search, settings, update notices, failed page
-extractions, and quit. The normal bookmark icon becomes slashed when Capd needs
-attention, such as after lost Accessibility access or a startup problem.
+The menu provides **Search Captures…**, **Import from Pinboard…**, **Settings…**,
+and **Replay Introduction…** (or **Continue Setup…** before setup is complete).
+It also shows update notices, failed page extractions, and sync issues. The
+normal bookmark icon becomes slashed when Capd needs attention, such as after
+lost Accessibility access or a startup problem.
+
+In an enrolled library, **Review conflicting notes…** opens the saved note
+versions and a **Merged note** editor. **Save Merged Note** queues an explicit
+resolution. A newer version can require another review; a local save does not
+mean the server has accepted that resolution. See [library sync](/sync).
 
 The menu-bar icon is also a drop target for links, text, images, and files. On a
 MacBook with a display notch, the capture HUD offers a larger notch-shaped drop
 target as you drag toward it.
 
-{/*
-MEDIA: menu-and-settings.png
-Use a two-panel image: the menu on the left and the compact Settings window on
-the right. Keep the current version visible and show all three settings groups
-so users can see the app has a deliberately small configuration surface.
-*/}
+![Current Mac settings view with website icon generation disabled](/fork/mac-settings.png)
+
+This is an offscreen render of the actual settings view with temporary defaults.
+It does not show a personal library or change the machine's settings.
 
 ## Settings
 
-- **Hotkeys** changes capture (⌃⌥C), note (⌃⌥N), and search (⌥⇧Space).
+- **Hotkeys** changes capture (⌃⌥C), note last capture (⌃⌥N), search
+  (⌥⇧Space), and open HUD reminder (⌃⌥O).
+- **Load website icons** lets this Mac's background agent generate icons for
+  eligible saved HTTPS links, including links received from connected devices.
+  Generation starts off. Existing local and synced icons remain visible when
+  generation is off; failed or unavailable icons use built-in symbols.
 - **Fetch page content for link captures** disables Capd's own article fetches.
   Content read directly from an open browser tab is unaffected.
-- **Check weekly for a new version** disables the GitHub Releases check.
+- **Check weekly for a new version** controls the upstream GitHub Releases
+  check. The current update notice copies an upstream Homebrew command; use
+  the [fork installation guide](/install) to keep the fork's binaries installed.
 - **Contextual reminders** watches the visible page in supported browsers and
   reminds you when its normalized URL is already saved. It is off until you
   explicitly enable it.
-- **Auto-tag captures on device** disables automatic topic tagging. Capd
+- **Find titles and manual tags in system search** opts into local Spotlight
+  and the Find/Open actions. It starts off and excludes source text and notes. See
+  [system search and Shortcuts](/search#system-search-and-shortcuts).
+- **Auto-tag captures on device** controls automatic topic tagging. Capd
   explains when Apple Intelligence is unavailable. **Retag All** clears only
   automatically assigned tags and asks the background helper to regenerate them;
   tags supplied by an import are preserved.
 
-There is no configuration file. `CAPD_DIR` is the only environment variable; it
-changes the shared storage root for the app, helper, and CLI.
+Ordinary preferences are stored by the app or shared capture database.
+`CAPD_DIR` changes the Mac storage root for the app, helper, and CLI; all three
+must use the same root. Optional library enrollment creates
+`sync-configuration.json` there. That file contains public connection identity,
+not the credential, which is stored in Keychain. Prepare enrollment through the
+[sync guide](/sync); deleting its configuration does not unenroll a library.
 
 ## Contextual reminders
 
@@ -59,12 +78,18 @@ The default storage root is `~/Library/Application Support/capd/`.
 | Path | Contents |
 |---|---|
 | `capd.sqlite` | Captures, notes, tags, metadata, and the full-text index |
-| `assets/` | Captured images, stored by content hash |
-| `favicons/` | Cached website icons and short-lived missing-icon records |
+| `assets/` | Captured images and managed asset directories |
+| `assets/website-icons/` | Verified website icons for a local-only library |
+| `assets/sync/` | Verified blobs, including icons, for an enrolled library |
 | `agent.lock` | The background helper's live-process lock |
+| `sync-configuration.json` | Optional public library connection configuration |
+| `sync-runtime.lock` | Coordinates sync ownership across Mac processes |
 
-Copying the complete folder creates a full backup. `capd export` creates a
-portable data export, but captured image files remain in `assets/`.
+Retain a consistent database backup and the complete assets and configuration
+while writers are stopped. A changing SQLite folder copy is not a verified
+backup. `capd export` exports capture fields, but image/icon bytes, sync history,
+and Keychain credentials are not included. See [backup and enrollment](/sync)
+before moving or restoring a connected library.
 
 ## Permissions
 
@@ -87,6 +112,10 @@ correct System Settings pane.
 background-helper state. `capd doctor` checks database integrity, rebuilds the
 search index, removes orphaned image files, repairs the helper, and reports
 Accessibility status.
+
+`capd sync status` reports local connection state without a network request.
+Use [troubleshooting](/troubleshooting) to distinguish enrichment, sync, icon,
+and system-search problems before applying repairs.
 
 For a live log stream:
 

@@ -24,15 +24,15 @@ xcrun vtool -show-build Packages/CapdSyncServer/.build/x86_64-apple-macosx/relea
 otool -L Packages/CapdSyncServer/.build/x86_64-apple-macosx/release/capd-sync-server
 ```
 
-SwiftPM links package libraries into the executable. macOS system frameworks and runtime libraries remain dynamic; this is not a fully static binary. The current Xcode build also needs its back-deployment shim `libswiftCompatibilitySpan.dylib`. Prepare the transferable bundle with:
+SwiftPM links package libraries into the executable. macOS system frameworks and runtime libraries remain dynamic; this is not a fully static binary. Some Xcode toolchains also link the back-deployment shim `libswiftCompatibilitySpan.dylib`. Prepare the transferable bundle with:
 
 ```sh
 Packages/CapdSyncServer/Scripts/build_intel.sh
 ```
 
-This copies the executable and Intel shim into `.build/artifacts/capd-sync-server-macos-intel`, removes the build Mac's Xcode runtime search path, and signs both files ad hoc. Keep both files together; the executable loads its bundled shim explicitly. A `.tar.gz` bundle with both files and a short run note is also produced in `.build/artifacts`. The script targets the inspected installed Xcode shim location; a different toolchain may require updating that packaging step. The SDK redirects `libswift_errno`, `libswift_stdio` and `libswift_signal` to `libswiftDarwin` for targets below macOS 15.0. The `$ld$previous` end-exclusive range follows [Apple's linker implementation](https://github.com/apple-oss-distributions/ld64/blob/main/src/ld/parsers/generic_dylib_file.cpp#L265-L321); an Intel 14.0 versus 15.0 linker probe confirmed that transition. These remain OS dependencies. This verifies the SDK target contract, while actual NAS availability and execution remain unverified.
+This copies the executable into `.build/artifacts/capd-sync-server-macos-intel` and, when linked, includes the Intel shim and rewrites its load path. It removes the build Mac's Xcode runtime search path and signs the packaged files ad hoc. Keep the bundle intact; a `.tar.gz` with a short run note is also produced in `.build/artifacts`. A toolchain that links the shim must supply it at the script's expected Xcode location. The SDK redirects `libswift_errno`, `libswift_stdio` and `libswift_signal` to `libswiftDarwin` for targets below macOS 15.0. The `$ld$previous` end-exclusive range follows [Apple's linker implementation](https://github.com/apple-oss-distributions/ld64/blob/main/src/ld/parsers/generic_dylib_file.cpp#L265-L321); an Intel 14.0 versus 15.0 linker probe confirmed that transition. These remain OS dependencies. This verifies the SDK target contract, while actual NAS availability and execution remain unverified.
 
-Local Intel execution under existing Rosetta checks the Intel executable on the build Mac, not the NAS's macOS 15.8 runtime.
+Local Intel execution under existing Rosetta checks the executable on the build Mac; it does not verify a NAS runtime.
 
 ## Configuration and storage
 
@@ -65,13 +65,13 @@ Configuration is reread and fully validated on every request. Setting an enrollm
 
 The data directory must be fresh and empty, or already contain this service's matching `service.json`. An empty abandoned `.server.lock` file is also accepted. Unrelated nonempty directories are refused before adding files. One running host holds an exclusive lock. Library directories, SQLite databases and blob paths are derived from enrolled UUIDs, with persisted core ownership bindings; existing direct symlink aliases are refused. Use only storage owned by the service account.
 
-Backups and restores must preserve the complete data directory, SQLite databases and asset folders including their ownership markers, along with the stable service/library configuration identities. Shut down cleanly for an offline copy, or use a coordinated SQLite-safe backup strategy. There is no import of existing unbound client libraries; initial enrollment requires fresh clients.
+Backups and restores must preserve the complete data directory, SQLite databases and asset folders including their ownership markers, along with the stable service/library configuration identities. Shut down cleanly for an offline copy, or use a coordinated SQLite-safe backup strategy. The listener does not import unbound client libraries. Populated libraries use the separate reviewed [content import and application handoff](../../docs/designs/library-migration.md) flows.
 
 ## Limits and checks
 
 Body collection is bounded at 16 MiB before converting to Foundation Data. Blob upload chunks are bounded at 64 KiB. Eight requests may collect or wait for work at once; further requests receive 503. SQLite, configuration and file work run on a dedicated serial queue, outside NIO event loops. Duplicate Authorization or Content-Type headers are rejected before flattening. Error responses omit underlying storage errors and credentials. Unknown paths and non-POST methods use Hummingbird's default routing responses.
 
-The existing full baseline is a single bounded JSON response. Libraries exceeding the response limit receive 503 `resourceLimit`; paginated baselines, storage/history quotas, request-rate policy and receipt retention remain work before production activation. The listener also needs deployment-specific proxy timeouts and access controls. SIGTERM/SIGINT use Hummingbird's graceful service shutdown.
+The full baseline remains a single bounded JSON response; libraries exceeding its response limit receive 503 `resourceLimit`. Capture and website-icon baselines also support bounded, cursor-pinned pages with total counts that clients verify before accepting a complete baseline. Website-icon requests require envelope version 5 and authenticated icon capability version 1; older servers continue capture sync without icon delivery. Aggregate storage/history quotas, request-rate policy and automatic receipt pruning are not implemented. The listener also needs deployment-specific proxy timeouts and access controls. SIGTERM/SIGINT use Hummingbird's graceful service shutdown.
 
 The process check generates disposable credentials and synthetic data, binds only loopback, restarts the host, and removes its own resources:
 

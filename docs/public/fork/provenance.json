@@ -1,0 +1,85 @@
+{
+  "sourceCommit": "d19d5de2ff17f6e9760fdb1291147b3f0f8258bd",
+  "sourceTree": "755bd2684a72d3d81132fcbe56777a453a7751e0",
+  "captured": "2026-10-06",
+  "images": [
+    {
+      "file": "mac-search.png",
+      "sha256": "0df4e23e194d0f68a8be60524a927018b2a1bda535232905eb5bed31c8c4bbb0",
+      "kind": "actual SwiftUI view rendered offscreen",
+      "fixture": "synthetic saved captures and local assets",
+      "answerGeneratedByFixture": false
+    },
+    {
+      "file": "mac-settings.png",
+      "sha256": "15bb8f537cbf82834d6c596183a68f6cb0c35cfe4b087caf4df9425f326bbed8",
+      "kind": "actual SwiftUI view rendered offscreen",
+      "fixture": "synthetic saved captures and local assets",
+      "answerGeneratedByFixture": false
+    },
+    {
+      "file": "iphone-library-light.png",
+      "sha256": "d10820552ceff02e2caec292cb9865fb12dfb4174560e898e30baa67551b7b63",
+      "kind": "actual app in an isolated iOS simulator",
+      "fixture": "synthetic saved captures and local assets",
+      "answerGeneratedByFixture": false
+    },
+    {
+      "file": "iphone-detail-light.png",
+      "sha256": "6d50ccdc8cd37806dc5a639fd6fa4ef597fd576fcdc227e14fc5a6436035d465",
+      "kind": "actual app in an isolated iOS simulator",
+      "fixture": "synthetic saved captures and local assets",
+      "answerGeneratedByFixture": false
+    },
+    {
+      "file": "iphone-share-light.png",
+      "sha256": "85631e4001aeb81dbf5f6cecae29471a10f3d17ee894e71e1b0c6a881bf1b027",
+      "kind": "actual app in an isolated iOS simulator",
+      "fixture": "synthetic saved captures and local assets",
+      "answerGeneratedByFixture": false
+    },
+    {
+      "file": "iphone-ask-citation-light.png",
+      "sha256": "93f0b8446954fdc70463910d058f121db4e13f32ab15707e601bf9ca3a4e8a86",
+      "kind": "actual app in an isolated iOS simulator",
+      "fixture": "synthetic saved captures and local assets",
+      "answerGeneratedByFixture": true
+    },
+    {
+      "file": "iphone-settings-icons-light.png",
+      "sha256": "7ad98e93dded6bd5d752e11591e11faabf3d0608fa10ac4416967f5f622b055a",
+      "kind": "actual app in an isolated iOS simulator",
+      "fixture": "synthetic saved captures and local assets",
+      "answerGeneratedByFixture": false
+    },
+    {
+      "file": "iphone-settings-connection-light.png",
+      "sha256": "1e64cd9676277d06be41acdae372acd23249eed3f3ba47e370d2632ee6d16241",
+      "kind": "actual app in an isolated iOS simulator",
+      "fixture": "synthetic saved captures and local assets",
+      "answerGeneratedByFixture": false
+    }
+  ],
+  "boundaries": [
+    "Mac view/model source and phone view source unchanged",
+    "No personal library, live server, website icon fetch or Apple model generation",
+    "Ask screenshot retains its synthetic citation disclaimer",
+    "Raw PNGs; no cropping, resizing, retouching or generated pixels"
+  ],
+  "macMethod": "Windowless NSHostingView.cacheDisplay(in:to:), native 1x bitmap",
+  "macPixelFidelity": "Windowless hosting renders at native 1x. One bitmap pixel per view point; no enlargement or postprocessing.",
+  "macDefaultIconGeneration": false,
+  "phoneDevice": {
+    "name": "capd fork docs synthetic 20261006",
+    "type": "iPhone 17 Pro",
+    "uuid": "37F6E47C-3A3D-4F7D-8225-A41159A09F7F",
+    "runtime": "iOS 26.4",
+    "runtimeBuild": "23E244",
+    "appearance": "light",
+    "statusBar": "09:41, charged battery 100%",
+    "lifecycle": "created for this task; shut down and deleted after exports; no pre-existing device touched"
+  },
+  "phoneTools": {
+    "xcode": "27.0 (27A5209h)"
+  }
+}

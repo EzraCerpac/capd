@@ -1,0 +1,246 @@
+---
+title: Troubleshooting
+description: Check installation, permissions, processing, and library connections without losing saved data.
+---
+
+Start with the installed binary, effective library root, and displayed error.
+Keep saved content, connection backups, and pending operations intact while
+checking a problem. The [installation guide](/install) covers source builds;
+the [connection guide](/sync) covers service prerequisites and backups.
+
+## The CLI is missing or shows the wrong commands
+
+Run the CLI directly from the installed fork bundle:
+
+```sh
+/Applications/capd.app/Contents/MacOS/capd --help
+command -v capd
+```
+
+The fork includes `sync` in its command list. If your shell selects an older
+Homebrew executable, invoke the bundle path or put
+`/Applications/capd.app/Contents/MacOS` first on `PATH`. Keep its matching agent
+and app together. `swift build` alone does not create a complete app bundle;
+use `Scripts/package-app.sh`.
+
+The inherited weekly update check and `brew upgrade jamiedavenport/tap/capd`
+refer to upstream. Rebuild the fork from the reviewed source revision to retain
+its changes. Disable **Check weekly for a new version** if upstream notices are
+confusing for your installation.
+
+## A source build fails
+
+Check the selected tools without launching Capd:
+
+```sh
+xcodebuild -version
+swift --version
+xcrun --sdk macosx --show-sdk-version
+```
+
+Use full Xcode 26.4.1 for current build/package checks. CI uses Xcode 26.3 for
+Swift formatting, so a different formatter can disagree with lint even when a
+build compiles. Regenerate the iOS project with
+`xcodegen generate --spec iOS/project.yml` when its source definition changes.
+
+Local packaging is ad hoc signed and not notarized. A signing identity alone
+does not perform notarization. Fork source instructions do not establish a
+signed/notarized fork download; upstream release artifacts are a separate
+distribution.
+
+## The Mac shortcut or selection capture does not work
+
+- Open Settings and choose a different shortcut if macOS or another app owns it.
+- Check System Settings → Privacy & Security → Accessibility for the installed
+  app. After a signature change, remove the stale entry and add the current app
+  again. Without Accessibility, capture uses the clipboard fallback.
+- For Safari, Chrome, and Arc, check the per-browser Automation permission.
+  Firefox-based browsers use Accessibility for their current tab.
+- Leave a secure/password field before capturing. Secure input deliberately
+  blocks capture.
+
+You can replay the setup from **Continue Setup…** or **Replay Introduction…** in
+the menu. CLI capture and search do not require the app's Accessibility grant.
+The CLI's own permission report may differ because grants are process/signature
+specific.
+
+## Captures remain pending
+
+Use the matching CLI against the intended root:
+
+```sh
+capd status
+```
+
+This reports queue depth and whether an enrichment agent is running against
+that store; exit code 4 means no such agent is running. Like ordinary CLI
+commands, it may attempt a short post-command sync flush on an enrolled library.
+Use `capd sync status` for local sync state without networking. Launching the
+installed app attempts to install/repair its sibling `capd-agent`. Verify that
+the complete bundle remains at its intended path and that macOS permits the
+helper to run.
+
+If you use `CAPD_DIR`, all writers must receive the same root. A variable set in
+your terminal does not reconfigure an already running app or launchd helper.
+An empty queue or a healthy helper for one root does not prove another library
+has finished processing. Processing is less concurrent on battery power.
+
+`capd doctor` is a **repair command**: it checks integrity, rebuilds search,
+removes orphaned assets, and may reinstall the helper. Preserve a coherent backup
+before using it on a library you need to recover. `--skip-agent` still repairs
+the store. `--uninstall-agent` only removes the helper and its plist.
+
+## Page content, automatic tags, or answers are missing
+
+A page fetch may fail, exceed its limit, or reach a login/paywall. The URL,
+selection, title, and note remain saved. Check **Fetch page content for link
+captures**; `capd refetch` explicitly retries eligible link processing and can
+make website requests.
+
+The mobile UI captures links/text but does not fetch webpages, capture images,
+or run OCR. It can display saved body text, OCR, and generated tags received
+through sync. A connected Mac's agent performs that enrichment.
+
+Automatic tagging and Ask Cap depend on eligible Apple hardware, enabled Apple
+Intelligence, a ready downloaded model, and supported language. Mobile Ask Cap
+requires iOS 26 or later even though the app installs on iOS 17. Ask Cap has no
+remote model fallback. Search and manual notes/tags remain available.
+
+## Website icons show a built-in symbol
+
+On a connected Mac, enable **Load website icons** and keep its helper available.
+On the phone, enable **Show synced website icons** for display. The phone does
+not fetch saved websites for icons.
+
+Generation requests only the original host's HTTPS `/favicon.ico`. Private/local
+destinations, redirects, unsupported images, and sites requiring proxy routing
+or unsupported TLS behavior can use the built-in symbol instead. Row appearance
+does not trigger a fetch. Disabling generation preserves existing verified icons;
+confirmed misses retry after seven days. Check any icon issue shown in settings.
+See [privacy](/privacy) for the network boundary.
+
+## Sync is local-only, paused, offline, or busy
+
+```sh
+capd sync status
+```
+
+This reads local sync state without networking. Local-only means this root has
+no configured enrollment; a built server or installed VPN does not enroll it.
+For an intended connection, follow [the preparation workflow](/sync).
+
+Paused networking retains the bound library and queues local edits. Resume the
+existing configuration with `capd sync resume`. For a configured library, an
+explicit attempt is:
+
+```sh
+capd sync run
+```
+
+It waits up to 35 seconds; SQLite waits may add time. Exit code 3 includes offline,
+attention, timeout, or another process owning sync. Busy does not mean saved
+changes were discarded. Let the current owner finish, then retry. Mac app,
+helper, and CLI share one runtime lock per root.
+
+Mobile updates run while the app is active and after connectivity returns.
+Open the main app after sharing while it was closed. The share extension saves
+locally but does not deliver changes to the server itself. **Retry connection**
+appears for a persistent attention state; it does not repair a missing grant or
+wrong service configuration.
+
+## The HTTPS address cannot be verified
+
+Use the phone's **Check private connection** from its connection screen. An
+expected 401 shows that device reaches an authentication boundary. It does not
+authenticate the service/library. A Mac-side success does not prove phone
+routing, and an installed VPN alone does not prove it is carrying this traffic.
+
+Check the exact HTTPS `/v1/sync` address, device DNS/routing, TLS trust, proxy
+forwarding to the host's loopback port, and proxy timeouts. Public client
+transport refuses HTTP, embedded URL credentials, queries/fragments, and
+redirects. The Mac's optional loopback SOCKS route neither starts a proxy nor
+configures a phone.
+
+The host only listens on `127.0.0.1`; remote devices need the separately
+configured HTTPS proxy. The source executable does not configure your NAS or
+network service.
+
+## Authentication or capability checks fail
+
+Have the service operator compare the intended service/library/device IDs,
+revocation state, and verifier grant with the device preparation. A credential
+for one device or library does not authorize another. Mac activation requires
+the matching Keychain entry to exist already; its enrollment JSON contains only
+public metadata. Do not put plaintext credentials in command arguments or logs.
+
+Missing or unsupported authority capabilities retain queued work. Upgrade the
+authority before enabling new metadata, processing or quality writes. Website
+icons have a separate capability: an older compatible authority can continue
+capture sync while icons wait for an update.
+Changing device IDs, removing configuration, or resetting sequence counters is
+not a capability repair.
+
+Host 503 can mean invalid/unreadable verifier configuration, a storage/resource
+limit, or exhausted request capacity. The host intentionally omits private
+details from responses. Its operator should inspect configuration, binding,
+storage health, and load without publishing secrets or capture contents.
+
+## The library is bound but configuration is missing or mismatched
+
+Stop every writer and recover the exact matching `sync-configuration.json` from
+the verified backup. A bound database deliberately refuses unbound writes;
+deleting configuration does not return it to local-only use. Keep its original
+service/library/device IDs and sequence/history intact.
+
+An interrupted activation can leave configuration and database state requiring
+coordinated recovery. Use the retained preparation and runtime recovery contract;
+do not restore an older local device counter against newer authority history.
+See [backups and upgrades](/sync#backups-and-upgrades).
+
+## Mobile preparation or reviewed import is refused
+
+If captures or edits changed after preparation, save another backup and, for an
+import, obtain a new review. Check that the host review and receipt refer to the
+exact snapshot, service/library, and original source device, with complete item
+mappings. Enter SHA-256 pins supplied separately by the coordinated host
+operation; hashing an arbitrary file yourself does not establish its origin.
+
+For host administration, stop the server so the admin tool can acquire its lock.
+Preview/import require an existing bound authority and reject nonempty WAL or
+rollback journals. The operator must perform normal trusted recovery/checkpoint
+first. Altered transfer assets, review bytes, or authority state need fresh review.
+
+Keep the original database, outbox, and retained archives. A failed phone
+activation does not undo a committed host import; repeating the identical
+reviewed import can recover its receipt. If credential recovery is pending,
+finish that existing recovery before replacing its preparation. The archive-only
+choice is explicit and retains original history locally; it does not send old
+pending operations.
+
+## Notes conflict or changes are rejected
+
+Open the capture's note variants and review the competing saved values. Saving
+a resolution acts on the displayed variant IDs; a newer unseen variant can
+require another review. A successful local save does not prove remote acceptance.
+
+Rejected operations remain retained. The mobile UI reports them but does not
+supply a general recovery tool. Preserve the library and report the displayed
+error with versions and aggregate status. Do not clear the outbox, resequence an
+operation, or reset the library to make the warning disappear.
+
+## The iOS shared library is unavailable
+
+Check both app and share extension signing, provisioning, and their matching
+App Group. The source project supplies no development team. An unsigned simulator
+compilation does not exercise installed App Group access. Use the iOS guide's
+disposable simulator fixtures for development; never erase a populated device
+library to bypass an old-schema or binding refusal.
+
+## Report a problem
+
+Include the fork revision, installed app/CLI versions, OS and selected Xcode
+version for build issues, effective root configuration, and the exact displayed
+error. State whether the reproduction uses disposable fixtures or an enrolled
+library. Redact credentials, verifier configuration, private paths, endpoint
+details, capture contents, and review/backup files before sharing diagnostics.
+No real NAS/device verification is implied by a synthetic reproduction.
