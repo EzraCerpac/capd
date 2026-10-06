@@ -11,6 +11,80 @@ import UniformTypeIdentifiers
 
 @Suite("Website icon queue")
 struct StoreWebsiteIconTests {
+    @Test(arguments: [false, true], [false, true])
+    func orphanSweepPreservesManagedIcons(unreferenced: Bool, throughAlias: Bool) async throws {
+        try await withIconPathsAsync { paths in
+            let store = try Store(paths: paths)
+            let capture = try CaptureService(store: store).ingest(
+                CaptureRequest(url: "https://example.org/sweep", fetchBody: false)
+            ).capture
+            try store.setWebsiteIconsEnabled(true)
+            let bytes = try iconPNG()
+            #expect(
+                try await WebsiteIconService(store: store, fetch: { _ in .normalizedPNG(bytes) })
+                    .processNext())
+            let record = try #require(try store.websiteIcon(for: "https://example.org"))
+            let blob = try #require(record.content?.blob)
+            let icon = paths.assetsDirectory.appendingPathComponent("website-icons/" + blob.digest)
+            let now = Date(timeIntervalSince1970: 1_800_000_000)
+            let old = now.addingTimeInterval(-7_200)
+            let manager = FileManager.default
+            try manager.setAttributes([.modificationDate: old], ofItemAtPath: icon.path)
+            if throughAlias {
+                try manager.createSymbolicLink(
+                    at: paths.assetsDirectory.appendingPathComponent("icon-alias.png"),
+                    withDestinationURL: icon)
+            }
+            for path in ["capture-orphan.png", "website-icons-extra/orphan.png", "fresh.png"] {
+                let url = paths.assetURL(forRelativePath: path)
+                try manager.createDirectory(
+                    at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+                try Data("synthetic capture asset".utf8).write(to: url)
+                try manager.setAttributes(
+                    [.modificationDate: path == "fresh.png" ? now : old], ofItemAtPath: url.path)
+            }
+            if unreferenced { _ = try store.deleteCaptures(ids: [try #require(capture.id)]) }
+            let before = try await store.reader.read {
+                try Data.fetchOne(
+                    $0, sql: "SELECT content FROM website_icon_jobs WHERE id=?",
+                    arguments: [record.id])
+            }
+
+            let sweep = try store.sweepOrphanAssets(now: now)
+
+            #expect(sweep.removedPaths == ["capture-orphan.png", "website-icons-extra/orphan.png"])
+            #expect(sweep.missingCaptureIDs.isEmpty)
+            #expect(try store.verifiedWebsiteIconData(record) == bytes)
+            #expect(try store.websiteIconsEnabled())
+            #expect(try store.claimNextWebsiteIcon() == nil)
+            #expect(
+                try await store.reader.read {
+                    try Data.fetchOne(
+                        $0, sql: "SELECT content FROM website_icon_jobs WHERE id=?",
+                        arguments: [record.id])
+                } == before)
+            #expect(
+                try await store.reader.read {
+                    try String.fetchOne(
+                        $0, sql: "SELECT state FROM website_icon_jobs WHERE id=?",
+                        arguments: [record.id])
+                } == "succeeded")
+            #expect(manager.fileExists(atPath: paths.assetURL(forRelativePath: "fresh.png").path))
+            if throughAlias {
+                #expect(
+                    manager.fileExists(
+                        atPath: paths.assetsDirectory.appendingPathComponent(
+                            "icon-alias.png"
+                        ).path))
+            }
+            if unreferenced {
+                _ = try CaptureService(store: store).ingest(
+                    CaptureRequest(url: "https://example.org/restored", fetchBody: false))
+            }
+            #expect(try store.websiteIcon(for: "https://example.org") == record)
+        }
+    }
+
     @Test func policyAndOrigins() throws {
         try withIconPaths { paths in
             let store = try Store(paths: paths)
