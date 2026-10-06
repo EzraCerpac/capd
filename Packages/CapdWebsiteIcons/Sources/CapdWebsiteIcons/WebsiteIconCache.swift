@@ -15,6 +15,7 @@ public actor WebsiteIconCache {
         var deadline: Task<Void, Never>?
     }
     private let load: Loader?
+    private let waitForDeadline: @Sendable () async throws -> Void
     private var memory: [WebsiteIconIdentity: Entry] = [:]
     private var jobs: [WebsiteIconIdentity: Job] = [:]
     private var queue: [WebsiteIconIdentity] = []
@@ -22,7 +23,18 @@ public actor WebsiteIconCache {
     private var waiterCount = 0
     private var tick: UInt64 = 0
 
-    public init(load: Loader? = nil) { self.load = load }
+    public init(load: Loader? = nil) {
+        self.load = load
+        waitForDeadline = { try await Task.sleep(for: .seconds(5)) }
+    }
+
+    init(load: Loader?, waitForDeadline: @escaping @Sendable () async throws -> Void) {
+        self.load = load
+        self.waitForDeadline = waitForDeadline
+    }
+
+    var pendingWaiters: Int { waiterCount }
+    var activeLoads: Int { active }
 
     public func image(for identity: WebsiteIconIdentity, load: Loader? = nil) async
         -> WebsiteIconImage?
@@ -32,14 +44,14 @@ public actor WebsiteIconCache {
             remember(entry.image, for: identity)
             return entry.image
         }
-        guard jobs.count < 16 || jobs[identity] != nil, let loader = load ?? self.load else {
-            return nil
-        }
-        guard (jobs[identity]?.waiters.count ?? 0) < 64, waiterCount < 512 else { return nil }
         let waiter = UUID()
         return await withTaskCancellationHandler {
             await withCheckedContinuation { continuation in
-                guard !Task.isCancelled else {
+                guard !Task.isCancelled,
+                    jobs.count < 16 || jobs[identity] != nil,
+                    let loader = load ?? self.load,
+                    (jobs[identity]?.waiters.count ?? 0) < 64, waiterCount < 512
+                else {
                     continuation.resume(returning: nil)
                     return
                 }
@@ -50,8 +62,9 @@ public actor WebsiteIconCache {
                     let id = UUID()
                     jobs[identity] = Job(id: id, load: loader, waiters: [waiter: continuation])
                     queue.append(identity)
+                    let waitForDeadline = waitForDeadline
                     jobs[identity]?.deadline = Task {
-                        do { try await Task.sleep(for: .seconds(5)) } catch { return }
+                        do { try await waitForDeadline() } catch { return }
                         discard(identity, id: id)
                     }
                 }

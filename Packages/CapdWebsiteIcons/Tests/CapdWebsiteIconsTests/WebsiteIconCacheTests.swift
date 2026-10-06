@@ -8,14 +8,27 @@ import UniformTypeIdentifiers
 @testable import CapdWebsiteIcons
 
 struct WebsiteIconCacheTests {
-    @Test func sameOriginWaitersHaveAAdmissionLimit() async throws {
+    @Test(arguments: [Duration.zero, .seconds(6)])
+    func sameOriginWaitersHaveAAdmissionLimit(resumeDelay: Duration) async throws {
         let bytes = try png()
         let identity = key(bytes)
         let gate = Gate()
-        let cache = WebsiteIconCache { _ in await gate.read() }
-        let requests = (0..<100).map { _ in Task { await cache.image(for: identity) } }
+        let deadline = Deadline()
+        let refusals = Refusals()
+        let cache = WebsiteIconCache(
+            load: { _ in await gate.read() }, waitForDeadline: { try await deadline.wait() })
+        let requests = (0..<100).map { _ in
+            Task {
+                let image = await cache.image(for: identity)
+                if image == nil { await refusals.record() }
+                return image
+            }
+        }
         await gate.waitForReads(1)
-        for _ in 0..<1000 { await Task.yield() }
+        await waitForAdmissions(100, cache: cache, refusals: refusals)
+        try await Task.sleep(for: resumeDelay)
+        #expect(await cache.pendingWaiters == 64)
+        #expect(await refusals.count == 36)
         await gate.finish(bytes)
         var images = 0
         for request in requests { if await request.value != nil { images += 1 } }
@@ -23,11 +36,14 @@ struct WebsiteIconCacheTests {
         #expect(await gate.readCount == 1)
     }
 
-    @Test func allOriginsShareAnAggregateWaiterLimit() async throws {
+    @Test(arguments: [Duration.zero, .seconds(6)])
+    func allOriginsShareAnAggregateWaiterLimit(resumeDelay: Duration) async throws {
         let bytes = try png()
         let gate = Gate()
         let refusals = Refusals()
-        let cache = WebsiteIconCache { _ in await gate.read() }
+        let deadline = Deadline()
+        let cache = WebsiteIconCache(
+            load: { _ in await gate.read() }, waitForDeadline: { try await deadline.wait() })
         let requests = (0..<1024).map { index in
             let identity = key(bytes, revision: Int64(index % 16 + 1))
             return Task {
@@ -37,7 +53,9 @@ struct WebsiteIconCacheTests {
             }
         }
         await gate.waitForReads(2)
-        for _ in 0..<2000 { await Task.yield() }
+        await waitForAdmissions(1024, cache: cache, refusals: refusals)
+        try await Task.sleep(for: resumeDelay)
+        #expect(await cache.pendingWaiters == 512)
         #expect(await refusals.count == 512)
         await cache.reset()
         for request in requests { #expect(await request.value == nil) }
@@ -75,15 +93,19 @@ struct WebsiteIconCacheTests {
         #expect(await loads.identities.count == 5)
     }
 
-    @Test func cancellingOneRowPreservesTheOtherWaiter() async throws {
+    @Test(arguments: [Duration.zero, .seconds(6)])
+    func cancellingOneRowPreservesTheOtherWaiter(resumeDelay: Duration) async throws {
         let bytes = try png()
         let identity = key(bytes)
         let gate = Gate()
-        let cache = WebsiteIconCache { _ in await gate.read() }
+        let deadline = Deadline()
+        let cache = WebsiteIconCache(
+            load: { _ in await gate.read() }, waitForDeadline: { try await deadline.wait() })
         let first = Task { await cache.image(for: identity) }
         await gate.waitForReads(1)
         let second = Task { await cache.image(for: identity) }
-        for _ in 0..<100 { await Task.yield() }
+        while await cache.pendingWaiters < 2 { await Task.yield() }
+        try await Task.sleep(for: resumeDelay)
         first.cancel()
         #expect(await first.value == nil)
         await gate.finish(bytes)
@@ -94,24 +116,105 @@ struct WebsiteIconCacheTests {
     @Test func resetRejectsLateLoadsAndKeepsLocalWorkBounded() async throws {
         let bytes = try png()
         let gate = Gate()
-        let cache = WebsiteIconCache { _ in await gate.read() }
+        let deadline = Deadline()
+        let refusals = Refusals()
+        let cache = WebsiteIconCache(
+            load: { _ in await gate.read() }, waitForDeadline: { try await deadline.wait() })
         let attempts = (0..<20).map { index in
             let identity = key(bytes, revision: Int64(index + 1))
-            return Task { await cache.image(for: identity) }
+            return Task {
+                let image = await cache.image(for: identity)
+                if image == nil { await refusals.record() }
+                return image
+            }
         }
         await gate.waitForReads(2)
-        for _ in 0..<100 { await Task.yield() }
+        await waitForAdmissions(20, cache: cache, refusals: refusals)
+        #expect(await cache.pendingWaiters == 16)
         #expect(await gate.readCount == 2)
         await cache.reset()
         for attempt in attempts { #expect(await attempt.value == nil) }
         let fresh = key(bytes, generation: UUID())
         let next = Task { await cache.image(for: fresh) }
-        for _ in 0..<100 { await Task.yield() }
+        while await cache.pendingWaiters < 1 { await Task.yield() }
+        #expect(await cache.activeLoads == 2)
         #expect(await gate.readCount == 2)
         await gate.finish(bytes)
         await gate.waitForReads(3)
         await gate.finish(bytes)
         #expect(await next.value != nil)
+    }
+
+    @Test func realFiveSecondDeadlineReleasesWaitersAndRetainsHungWorkers() async throws {
+        let bytes = try png()
+        let gate = Gate()
+        let cache = WebsiteIconCache { _ in await gate.read() }
+        let start = ContinuousClock.now
+        let requests = (1...3).map { revision in
+            Task { await cache.image(for: key(bytes, revision: Int64(revision))) }
+        }
+        await gate.waitForReads(2)
+        for request in requests { #expect(await request.value == nil) }
+        #expect(start.duration(to: .now) >= .seconds(5))
+        #expect(await cache.pendingWaiters == 0)
+        #expect(await cache.activeLoads == 2)
+        let next = Task { await cache.image(for: key(bytes, revision: 1)) }
+        while await cache.pendingWaiters < 1 { await Task.yield() }
+        #expect(await cache.activeLoads == 2)
+        #expect(await gate.readCount == 2)
+        await gate.open(bytes)
+        #expect(await next.value != nil)
+        #expect(await gate.readCount == 3)
+    }
+
+    @Test func controlledDeadlineReleasesExactlyItsPendingJob() async throws {
+        let bytes = try png()
+        let gate = Gate()
+        let deadline = Deadline()
+        let cache = WebsiteIconCache(
+            load: { _ in await gate.read() }, waitForDeadline: { try await deadline.wait() })
+        let request = Task { await cache.image(for: key(bytes)) }
+        await gate.waitForReads(1)
+        await deadline.waitUntilStarted()
+        await deadline.fire()
+        #expect(await request.value == nil)
+        #expect(await cache.pendingWaiters == 0)
+        #expect(await cache.activeLoads == 1)
+        await gate.open(bytes)
+        #expect(await cache.image(for: key(bytes)) != nil)
+        #expect(await gate.readCount == 2)
+    }
+}
+
+private func waitForAdmissions(_ count: Int, cache: WebsiteIconCache, refusals: Refusals) async {
+    while await cache.pendingWaiters + refusals.count < count { await Task.yield() }
+}
+
+private actor Deadline {
+    private var waiters: [UUID: CheckedContinuation<Void, any Error>] = [:]
+    func wait() async throws {
+        let id = UUID()
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation {
+                (continuation: CheckedContinuation<Void, any Error>) in
+                guard !Task.isCancelled else {
+                    continuation.resume(throwing: CancellationError())
+                    return
+                }
+                waiters[id] = continuation
+            }
+        } onCancel: {
+            Task { await self.cancel(id) }
+        }
+    }
+    private func cancel(_ id: UUID) {
+        waiters.removeValue(forKey: id)?.resume(throwing: CancellationError())
+    }
+    func waitUntilStarted() async { while waiters.isEmpty { await Task.yield() } }
+    func fire() {
+        let pending = waiters.values
+        waiters = [:]
+        for waiter in pending { waiter.resume() }
     }
 }
 
@@ -132,9 +235,11 @@ private actor Loads {
 
 private actor Gate {
     var readCount = 0
+    private var opened: Data?
     private var readers: [CheckedContinuation<Data?, Never>] = []
     func read() async -> Data? {
         readCount += 1
+        if let opened { return opened }
         return await withCheckedContinuation { readers.append($0) }
     }
     func waitForReads(_ count: Int) async {
@@ -144,6 +249,10 @@ private actor Gate {
         let pending = readers
         readers = []
         for reader in pending { reader.resume(returning: bytes) }
+    }
+    func open(_ bytes: Data) {
+        opened = bytes
+        finish(bytes)
     }
 }
 
