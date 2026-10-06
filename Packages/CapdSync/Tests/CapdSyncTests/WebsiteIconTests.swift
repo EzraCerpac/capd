@@ -6,6 +6,59 @@ import Testing
 
 @Suite("Independent website icon sync")
 struct WebsiteIconTests {
+    @Test(arguments: [false, true], [false, true])
+    func snapshotIconLifecycleUsesTheFinalCaptureSet(explicitIcons: Bool, replacement: Bool) throws
+    {
+        let f = try IconFixture()
+        defer { f.clean() }
+        let client = try f.client("a", device: f.a)
+        let first = f.capture()
+        try client.enqueue(captureID: first.id, mutation: .create(first))
+        try client.push(to: f.transport(f.a))
+        let blob = try client.blobs.put(iconPNG)
+        try client.enqueueWebsiteIcon(
+            origin: f.origin, mutation: .upsert(WebsiteIconContent(blob: blob)))
+        try client.pushWebsiteIcons(to: f.transport(f.a))
+        let before = try f.server.websiteIconBaseline()
+        let pending = try client.pendingOperations()
+        var removed = try #require(f.server.baseline().captures.first)
+        removed.deleted = true
+        let added = f.capture(path: "/replacement")
+        let snapshot = ContentSnapshotImport(
+            snapshotID: UUID(), targetBinding: f.binding, sourceDeviceID: UUID(),
+            captures: replacement ? [removed, added] : [removed],
+            websiteIcons: explicitIcons ? [] : nil)
+        let preview = try f.server.previewContentSnapshotImport(snapshot)
+        let captureBefore = try f.server.baseline()
+        try f.server.writer.write { db in
+            try db.execute(
+                sql:
+                    "CREATE TRIGGER refuse_snapshot_capture BEFORE UPDATE ON sync_records BEGIN SELECT RAISE(ABORT,'synthetic snapshot refusal'); END"
+            )
+        }
+        #expect(throws: (any Error).self) {
+            try f.server.importContentSnapshot(snapshot, preview: preview)
+        }
+        #expect(try f.server.baseline() == captureBefore)
+        #expect(try f.server.websiteIconBaseline() == before)
+        try f.server.writer.write { try $0.execute(sql: "DROP TRIGGER refuse_snapshot_capture") }
+        let receipt = try f.server.importContentSnapshot(snapshot, preview: preview)
+        let after = try f.server.websiteIconBaseline()
+        let icon = try #require(after.records.first)
+        #expect(icon.deleted == !replacement)
+        #expect(icon.content == before.records.first?.content)
+        #expect(after.cursor == before.cursor + (replacement ? 0 : 1))
+        #expect(after.deviceSequences == before.deviceSequences)
+        #expect(try client.pendingOperations() == pending)
+        #expect(try f.server.importContentSnapshot(snapshot, preview: preview) == receipt)
+        #expect(try f.server.websiteIconBaseline() == after)
+        if replacement {
+            #expect(after.records == before.records)
+            #expect(try f.server.websiteIconChanges(after: before.cursor).changes.isEmpty)
+        }
+        #expect(receipt.websiteIcons == (explicitIcons ? after.records : nil))
+    }
+
     @Test(arguments: ["absent", "live", "deleted"])
     func capableEnrollmentDefersOnlyMissingIcons(target: String) throws {
         let f = try IconFixture()

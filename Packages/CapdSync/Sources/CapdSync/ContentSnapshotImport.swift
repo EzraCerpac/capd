@@ -270,8 +270,7 @@ enum SnapshotImport {
                     operationID: id, value: variant.value, unknownFields: variant.unknownFields)
             }
             if current != prepared {
-                try SyncDatabase.save(
-                    db, prepared, updateWebsiteIcons: snapshot.websiteIcons == nil)
+                try SyncDatabase.save(db, prepared, updateWebsiteIcons: false)
             }
             if incoming.id != item.canonicalCaptureID {
                 try SyncDatabase.alias(db, incoming.id, to: item.canonicalCaptureID)

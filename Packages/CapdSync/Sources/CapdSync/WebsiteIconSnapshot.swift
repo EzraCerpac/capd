@@ -67,7 +67,21 @@ enum WebsiteIconSnapshot {
     static func apply(
         _ db: Database, records: [WebsiteIconRecord]?, cursor: Int64?, captureIDs: [UUID]
     ) throws {
-        guard let records, let cursor else { return }
+        guard let records, let cursor else {
+            guard
+                try Bool.fetchOne(
+                    db,
+                    sql:
+                        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='sync_website_icon_origins')"
+                ) == true
+            else { return }
+            let captures = try Set(captureIDs).sorted { $0.uuidString < $1.uuidString }.compactMap {
+                try SyncDatabase.record(db, id: $0)
+            }
+            for capture in captures { try WebsiteIconDatabase.index(db, capture) }
+            for capture in captures { try WebsiteIconDatabase.captureSaved(db, capture) }
+            return
+        }
         try WebsiteIconDatabase.prepare(db)
         for id in Set(captureIDs) {
             if let capture = try SyncDatabase.record(db, id: id) {
