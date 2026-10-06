@@ -12,8 +12,9 @@ library binding, device identity and the claim token.
 
 `WebsiteIconOrigin` accepts HTTPS DNS hosts on port 443. It rejects credentials,
 IP literals and local or reserved names, retains `www`, and removes the path,
-query and fragment. Its canonical origin has one SHA-256 identity shared by
-all devices. The captured URL stays intact; capture deduplication does not
+query and fragment. Unicode and punycode host spellings share a canonical ASCII
+origin and SHA-256 identity. Previously accepted escaped ASCII host spellings
+retain that identity. The captured URL stays intact; capture deduplication does not
 rewrite it for icon discovery.
 
 `PinnedWebsiteIconTransport` resolves through the system resolver, checks every
@@ -74,6 +75,13 @@ version and digest. Late completions cannot populate a different library or
 replacement record. Reads enforce the encoded byte limit before allocating
 file data; decoding checks the actual PNG. Missing or corrupt assets use native
 symbols.
+
+The Mac consumer checks the existing database change monitor once per second
+while it is retained, then reloads records when the revision changes. This
+detects commits from the separate Agent database connection. Original database
+file identity and library binding fence each reload; a failed check clears
+artwork and forces a fresh snapshot after recovery. The refresh loop cancels
+when its consumer is released.
 
 The cache holds at most 128 images, 16 distinct requests, two active readers,
 64 waiters per request and 512 total waiters. Cancellation, reset and the
