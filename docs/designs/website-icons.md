@@ -22,6 +22,9 @@ returned binary address, then connects to a validated numeric address. TLS
 uses the original hostname and default system anchors. The fixed favicon GET
 follows successful trust evaluation. There are no cookies, client certificates,
 redirects, proxy fallback or ancillary trust-network requests.
+Connection failures try another validated address within the original deadline
+and a shared incoming encrypted-byte budget. Trust, framing, status, size,
+deadline and cancellation failures remain terminal.
 The HTTP parser validates and discards unrelated response fields, including
 repeated fields. Content-Length, Transfer-Encoding and Content-Encoding remain
 strictly checked, including duplicate refusal.
@@ -67,6 +70,12 @@ references preserves the icon. Stale or unreferenced uploads cannot resurrect
 it. Restored links create fresh demand; retained bytes support recovery, but
 neither deletion nor policy disable physically erases historical blob files.
 
+The authority retains at most 4,096 icon records, including tombstones. A new
+record at capacity receives an explicit durable rejection that advances the
+device's icon sequence without adding a record or feed event. Later updates
+and deletions of existing records can proceed. Repeated rejected operations
+return the same receipt; verified uploaded bytes can remain cached.
+
 ## Local display and library handoff
 
 Mac and iPhone views load verified local assets through `CapdWebsiteIcons`.
@@ -97,6 +106,13 @@ Enrollment stages icon assets on disk and pins the icon baseline to its capture
 cursor. Unbound Mac icons live in a separate `assets/website-icons` namespace;
 the handoff copies verified reachable assets into a fresh bound namespace with
 rollback. A populated unbound sync blob namespace is never silently rebound.
+The capture orphan sweep excludes the managed `website-icons` directory,
+including retained bytes for currently unreferenced origins.
+
+The standalone Python exporter uses public Foundation host parsing on macOS
+for the same IDN and escaped ASCII origin identities. It has no third-party
+Python dependency. Other platforms retain ASCII export and explicitly refuse
+IDN input that requires Foundation.
 
 Enrollment installs the verified target baseline and queues local icons missing
 from it as durable pending upserts in the same transaction as the capture
