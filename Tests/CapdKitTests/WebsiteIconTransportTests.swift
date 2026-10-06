@@ -65,8 +65,72 @@ struct WebsiteIconTransportTests {
 
     }
 
+    @Test(arguments: [false, true])
+    func repeatedUnrelatedHeadersAreIgnored(chunked: Bool) throws {
+        let headers = [
+            "Set-Cookie", "X-Trace-2", "9-Trace", "X.!#$%&'*+^_`|~", "Content-Language",
+            "Content-Type", "Content-Range",
+            "Content-Disposition", "Connection", "Trailer", "Upgrade", "Location",
+            "WWW-Authenticate", "Proxy-Authenticate", "Authentication-Info",
+            "Proxy-Authentication-Info", "Authorization", "Proxy-Authorization",
+            "Strict-Transport-Security",
+        ].map { "\($0): first\r\n\($0.lowercased()): second\r\n" }.joined()
+        let framing = chunked ? "Transfer-Encoding: chunked" : "Content-Length: 5"
+        let body = chunked ? "5\r\nhello\r\n0\r\n\r\n" : "hello"
+        let message = "HTTP/1.1 200 OK\r\n\(headers)\(framing)\r\n\r\n\(body)"
+        var parser = WebsiteIconHTTPParser()
+        for byte in message.utf8 { try parser.append(Data([byte])) }
+        #expect(try parser.end() == WebsiteIconHTTPResponse(status: 200, body: Data("hello".utf8)))
+    }
+
+    @Test(arguments: ["X-Trace-2", "9-Trace", "X.!#$%&'*+^_`|~"])
+    func validIgnoredFieldNamesAreAccepted(_ name: String) throws {
+        var parser = WebsiteIconHTTPParser()
+        try parser.append(
+            Data("HTTP/1.1 200 OK\r\n\(name): ignored\r\nContent-Length: 1\r\n\r\nx".utf8))
+        #expect(try parser.end().body == Data("x".utf8))
+    }
+
+    @Test(arguments: ["Content-Length", "Transfer-Encoding", "Content-Encoding"])
+    func consumedDuplicateHeadersStillRefused(_ name: String) throws {
+        let chunked = name == "Transfer-Encoding"
+        let value = name == "Content-Length" ? "1" : chunked ? "chunked" : "identity"
+        let framing = name == "Content-Length" || chunked ? "" : "Content-Length: 1\r\n"
+        let body = chunked ? "1\r\nx\r\n0\r\n\r\n" : "x"
+        let header = "HTTP/1.1 200 OK\r\n\(name): \(value)\r\n"
+        var accepted = WebsiteIconHTTPParser()
+        try accepted.append(Data("\(header)\(framing)\r\n\(body)".utf8))
+        #expect(try accepted.end().body == Data("x".utf8))
+        #expect(throws: WebsiteIconTransportError.invalidHTTP) {
+            var parser = WebsiteIconHTTPParser()
+            try parser.append(
+                Data("\(header)\(name.lowercased()): \(value)\r\n\(framing)\r\n\(body)".utf8))
+        }
+    }
+
+    @Test func ignoredHeadersStillObeyGrammarAndBudgets() {
+        for headers in [
+            "Set-Cookie: first=ok\r\nSet-Cookie: bad\u{1}", "X-Trace: first\r\n X-Trace: second",
+            "X-Trace: first\r\n\tX-Trace: second", "Bad Name: ignored", "Bad\tName: ignored",
+            "(Bad): ignored", "Bad\u{1}Name: ignored", ": ignored",
+        ] {
+            #expect(throws: WebsiteIconTransportError.invalidHTTP) {
+                var parser = WebsiteIconHTTPParser()
+                try parser.append(
+                    Data("HTTP/1.1 200 OK\r\n\(headers)\r\nContent-Length: 1\r\n\r\nx".utf8))
+            }
+        }
+        #expect(throws: (any Error).self) {
+            var parser = WebsiteIconHTTPParser()
+            let headers = String(repeating: "Set-Cookie: ignored=value\r\n", count: 800)
+            try parser.append(Data("HTTP/1.1 200 OK\r\n\(headers)Content-Length: 1\r\n\r\nx".utf8))
+        }
+    }
+
     @Test(arguments: [
         "HTTP/1.1 200 OK\r\nContent-Length: 1\r\nContent-Length: 1\r\n\r\nx",
+        "HTTP/1.1 200 OK\r\nContent-Length: 1\r\nContent-Length: 2\r\n\r\nx",
+        "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nTransfer-Encoding: identity\r\n\r\n1\r\nx\r\n0\r\n\r\n",
         "HTTP/1.1 200 OK\r\nContent-Length: 1\r\nTransfer-Encoding: chunked\r\n\r\nx",
         "HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\nContent-Length: 1\r\n\r\nx",
         "HTTP/1.1 200 OK\r\n\r\nx",
@@ -243,8 +307,14 @@ struct WebsiteIconTransportTests {
         #expect(peer.request.isEmpty)
     }
 
-    @Test func actualPinnedTLSUsesOriginalSNIAndOnlyFixedRequest() async throws {
-        let peer = try SyntheticIconPeer(response: try Self.image(type: .png))
+    @Test(arguments: [false, true])
+    func actualPinnedTLSUsesOriginalSNIAndOnlyFixedRequest(repeatedHeaders: Bool) async throws {
+        let image = try Self.image(type: .png)
+        let peer = try SyntheticIconPeer(
+            response: image,
+            headers: repeatedHeaders
+                ? "Set-Cookie: first=secret\r\nset-cookie: second=private\r\nX-Trace-2: one\r\nX-Trace-2: two\r\nContent-Language: en\r\ncontent-language: fr\r\nContent-Type: image/png\r\ncontent-type: image/jpeg\r\n"
+                : "")
         let server = Task.detached { peer.serve() }
         let probe = Counter()
         let transport = PinnedWebsiteIconTransport(
@@ -264,10 +334,13 @@ struct WebsiteIconTransportTests {
                     trust, Date(timeIntervalSince1970: 1_791_244_800) as CFDate)
                 try await WebsiteIconServerTrust.evaluate(trust, host: host, deadline: deadline)
             })
-        let result = try await transport.fetch(
-            WebsiteIconOrigin(url: "https://www.example.com/private/path?token=secret")!)
+        let outcome = await Task {
+            try await transport.fetch(
+                WebsiteIconOrigin(url: "https://www.example.com/private/path?token=secret")!)
+        }.result
         _ = await server.value
-        #expect(!result.isEmpty && probe.value == 1)
+        let result = try outcome.get()
+        #expect(result == WebsiteIconImage.normalizedPNG(image) && probe.value == 1)
         #expect(peer.sni == "www.example.com")
         #expect(
             peer.request
@@ -509,6 +582,7 @@ private final class SyntheticIconPeer: @unchecked Sendable {
     private let clientSlot: Int32
     private let server: Int32
     private let response: Data
+    private let headers: String
     private let identity: SecIdentity
     private let stall: Bool
     private let lock = NSLock()
@@ -553,8 +627,9 @@ private final class SyntheticIconPeer: @unchecked Sendable {
         return reused
     }
 
-    init(response: Data, stall: Bool = false) throws {
+    init(response: Data, stall: Bool = false, headers: String = "") throws {
         self.response = response
+        self.headers = headers
         self.stall = stall
         var imported: CFArray?
         let options =
@@ -678,7 +753,8 @@ private final class SyntheticIconPeer: @unchecked Sendable {
             }
             return
         }
-        var reply = Data("HTTP/1.1 200 OK\r\nContent-Length: \(response.count)\r\n\r\n".utf8)
+        var reply = Data(
+            "HTTP/1.1 200 OK\r\nContent-Length: \(response.count)\r\n\(headers)\r\n".utf8)
         reply.append(response)
         var offset = 0
         while offset < reply.count {

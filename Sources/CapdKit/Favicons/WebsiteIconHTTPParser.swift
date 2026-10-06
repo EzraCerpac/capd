@@ -9,6 +9,7 @@ struct WebsiteIconHTTPParser {
     static let bodyLimit = 256 * 1024
     static let headerLimit = 16 * 1024
     static let framingLimit = 16 * 1024
+    private static let fieldNamePunctuation = Set("!#$%&'*+-.^_`|~".utf8)
     private enum State {
         case headers
         case fixed(Int)
@@ -128,13 +129,20 @@ struct WebsiteIconHTTPParser {
                 !line.hasPrefix(" "), !line.hasPrefix("\t")
             else { throw WebsiteIconTransportError.invalidHTTP }
             let name = line[..<colon].lowercased()
-            guard name.utf8.allSatisfy({ (97...122).contains($0) || $0 == 45 }), fields[name] == nil
+            guard
+                name.utf8.allSatisfy({
+                    (97...122).contains($0) || (48...57).contains($0)
+                        || Self.fieldNamePunctuation.contains($0)
+                })
             else { throw WebsiteIconTransportError.invalidHTTP }
             let value = line[line.index(after: colon)...].trimmingCharacters(in: .whitespaces)
             guard value.utf8.allSatisfy({ $0 == 9 || (32...126).contains($0) }) else {
                 throw WebsiteIconTransportError.invalidHTTP
             }
-            fields[name] = value
+            if ["content-length", "transfer-encoding", "content-encoding"].contains(name) {
+                guard fields[name] == nil else { throw WebsiteIconTransportError.invalidHTTP }
+                fields[name] = value
+            }
         }
         guard code == 200 else { throw WebsiteIconTransportError.status(code) }
         guard
