@@ -12,7 +12,9 @@ struct WebsiteIconTests {
         let f = try IconFixture()
         defer { f.clean() }
         let client = try f.client("a", device: f.a)
-        let first = f.capture()
+        let first = SharedCapture(
+            id: UUID(uuidString: "10000000-0000-4000-8000-000000000001")!,
+            source: f.capture().source)
         try client.enqueue(captureID: first.id, mutation: .create(first))
         try client.push(to: f.transport(f.a))
         let blob = try client.blobs.put(iconPNG)
@@ -23,7 +25,9 @@ struct WebsiteIconTests {
         let pending = try client.pendingOperations()
         var removed = try #require(f.server.baseline().captures.first)
         removed.deleted = true
-        let added = f.capture(path: "/replacement")
+        let added = SharedCapture(
+            id: UUID(uuidString: "10000000-0000-4000-8000-000000000002")!,
+            source: f.capture(path: "/replacement").source)
         let snapshot = ContentSnapshotImport(
             snapshotID: UUID(), targetBinding: f.binding, sourceDeviceID: UUID(),
             captures: replacement ? [removed, added] : [removed],
