@@ -64,21 +64,32 @@ public struct PinnedWebsiteIconTransport: Sendable {
             addresses.allSatisfy(WebsiteIconAddressPolicy.isPublic)
         else { throw WebsiteIconTransportError.refusedAddress }
         let cancellation = WebsiteIconCancellation()
+        let streamBudget = WebsiteIconStreamBudget()
         let worker = Task.detached(priority: .utility) {
             try cancellation.check(deadline)
             var lastError: any Error = WebsiteIconTransportError.connection
             for address in addresses {
                 try cancellation.check(deadline)
+                guard streamBudget.remaining > 0 else { throw WebsiteIconTransportError.tooLarge }
                 let descriptor: Int32
                 do { descriptor = try connect(address, deadline, cancellation) } catch {
+                    guard error as? WebsiteIconTransportError == .connection else { throw error }
                     lastError = error
                     continue
                 }
                 let socket = WebsiteIconSocket(
-                    descriptor: descriptor, deadline: deadline, cancellation: cancellation)
+                    descriptor: descriptor, deadline: deadline, cancellation: cancellation,
+                    streamBudget: streamBudget)
                 defer { socket.close() }
-                let data = try await socket.exchange(
-                    host: origin.host, evaluateTrust: evaluateTrust)
+                let data: Data
+                do {
+                    data = try await socket.exchange(
+                        host: origin.host, evaluateTrust: evaluateTrust)
+                } catch {
+                    guard error as? WebsiteIconTransportError == .connection else { throw error }
+                    lastError = error
+                    continue
+                }
                 try cancellation.check(deadline)
                 guard let normalized = WebsiteIconImage.normalizedPNG(data) else {
                     throw WebsiteIconTransportError.invalidImage
@@ -118,20 +129,37 @@ final class WebsiteIconCancellation: @unchecked Sendable {
     }
 }
 
+final class WebsiteIconStreamBudget: @unchecked Sendable {
+    private let lock = NSLock()
+    private var received = 0
+    var remaining: Int { lock.withLock { WebsiteIconHTTPParser.bodyLimit - received } }
+    func consume(_ count: Int) throws {
+        try lock.withLock {
+            guard count >= 0, count <= WebsiteIconHTTPParser.bodyLimit - received else {
+                throw WebsiteIconTransportError.tooLarge
+            }
+            received += count
+        }
+    }
+}
+
 final class WebsiteIconSocket: @unchecked Sendable {
     private var descriptor: Int32
     private let deadline: ContinuousClock.Instant
     private let cancellation: WebsiteIconCancellation
     private var wantedEvents = Int16(POLLIN)
-    private var incomingBytes = 0
+    private let streamBudget: WebsiteIconStreamBudget
+    private var connectionFailed = false
     private var streamLimitReached = false
 
     init(
-        descriptor: Int32, deadline: ContinuousClock.Instant, cancellation: WebsiteIconCancellation
+        descriptor: Int32, deadline: ContinuousClock.Instant, cancellation: WebsiteIconCancellation,
+        streamBudget: WebsiteIconStreamBudget = WebsiteIconStreamBudget()
     ) {
         self.descriptor = descriptor
         self.deadline = deadline
         self.cancellation = cancellation
+        self.streamBudget = streamBudget
     }
 
     func close() {
@@ -211,7 +239,9 @@ final class WebsiteIconSocket: @unchecked Sendable {
                 guard trusted else { throw WebsiteIconTransportError.trust }
                 break
             } else {
-                throw WebsiteIconTransportError.trust
+                throw connectionFailed || status == errSSLClosedGraceful
+                    || status == errSSLClosedAbort
+                    ? WebsiteIconTransportError.connection : WebsiteIconTransportError.trust
             }
         }
         let request = Self.request(host: host)
@@ -241,7 +271,7 @@ final class WebsiteIconSocket: @unchecked Sendable {
             if status == errSSLWouldBlock {
                 try wait(events: wantedEvents)
             } else if status == errSSLClosedGraceful {
-                break
+                throw WebsiteIconTransportError.connection
             } else if status != errSecSuccess {
                 throw WebsiteIconTransportError.connection
             }
@@ -311,7 +341,7 @@ final class WebsiteIconSocket: @unchecked Sendable {
         }
         wantedEvents = Int16(POLLIN)
         let requested = length.pointee
-        let remaining = WebsiteIconHTTPParser.bodyLimit - incomingBytes
+        let remaining = streamBudget.remaining
         guard remaining > 0 else {
             streamLimitReached = true
             length.pointee = 0
@@ -319,13 +349,22 @@ final class WebsiteIconSocket: @unchecked Sendable {
         }
         let count = Darwin.read(descriptor, data, min(requested, remaining))
         if count > 0 {
-            incomingBytes += count
+            do { try streamBudget.consume(count) } catch {
+                streamLimitReached = true
+                length.pointee = 0
+                return errSecIO
+            }
             length.pointee = count
             return count == requested ? errSecSuccess : errSSLWouldBlock
         }
         length.pointee = 0
-        if count == 0 { return errSSLClosedAbort }
-        return errno == EAGAIN || errno == EINTR ? errSSLWouldBlock : errSecIO
+        if count == 0 {
+            connectionFailed = true
+            return errSSLClosedAbort
+        }
+        if errno == EAGAIN || errno == EINTR { return errSSLWouldBlock }
+        connectionFailed = true
+        return errSecIO
     }
 
     private func write(_ data: UnsafeRawPointer?, _ length: UnsafeMutablePointer<Int>) -> OSStatus {
@@ -341,6 +380,8 @@ final class WebsiteIconSocket: @unchecked Sendable {
             return count == requested ? errSecSuccess : errSSLWouldBlock
         }
         length.pointee = 0
-        return errno == EAGAIN || errno == EINTR ? errSSLWouldBlock : errSecIO
+        if errno == EAGAIN || errno == EINTR { return errSSLWouldBlock }
+        connectionFailed = true
+        return errSecIO
     }
 }

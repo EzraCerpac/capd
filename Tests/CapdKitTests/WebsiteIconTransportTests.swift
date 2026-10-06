@@ -351,6 +351,166 @@ struct WebsiteIconTransportTests {
                 && !peer.request.contains("Cookie"))
     }
 
+    @Test(arguments: [(false, false), (false, true), (true, false), (true, true)])
+    func exchangeDropRetriesTheNextPinnedAddress(handshake: Bool, graceful: Bool) async throws {
+        let image = try Self.image(type: .png)
+        let first = try SyntheticIconPeer(
+            response: image, dropHandshake: handshake, responseByteLimit: handshake ? nil : 0,
+            gracefulClose: graceful)
+        let second = try SyntheticIconPeer(response: image)
+        let servers = [first, second].map { peer in Task.detached { peer.serve() } }
+        let attempts = NetworkAttempts()
+        let trusts = Counter()
+        let addresses = [
+            WebsiteIconAddress(numeric: "8.8.8.8")!, WebsiteIconAddress(numeric: "1.1.1.1")!,
+        ]
+        let transport = PinnedWebsiteIconTransport(
+            resolve: { host, _ in
+                #expect(host == "www.example.com")
+                return addresses
+            },
+            connect: { address, deadline, _ in
+                attempts.record(address, deadline)
+                return try (address == addresses[0] ? first : second).claimClient()
+            },
+            evaluateTrust: { trust, host, deadline in
+                trusts.increment()
+                try await Self.anchoredTrust(trust, host: host, deadline: deadline)
+            })
+        let outcome = await Task {
+            try await transport.fetch(WebsiteIconOrigin(url: "https://www.example.com/private")!)
+        }.result
+        for peer in [first, second] { peer.closeUnclaimedClient() }
+        for server in servers { _ = await server.value }
+        #expect(attempts.addresses == addresses)
+        #expect(attempts.deadlines.count == 2)
+        if attempts.deadlines.count == 2 {
+            #expect(attempts.deadlines[0] == attempts.deadlines[1])
+        }
+        #expect(try outcome.get() == WebsiteIconImage.normalizedPNG(image))
+        #expect(trusts.value == (handshake ? 1 : 2))
+        #expect(first.request.isEmpty == handshake)
+        #expect(second.sni == "www.example.com")
+        #expect(
+            second.request
+                == String(
+                    decoding: WebsiteIconSocket.request(host: "www.example.com"), as: UTF8.self))
+        #expect(second.observedPeerClosure)
+    }
+
+    @Test func retriesShareTheEncryptedByteBudget() async throws {
+        let first = try SyntheticIconPeer(
+            response: Data(repeating: 65, count: 80_000), responseByteLimit: 55_000)
+        let second = try SyntheticIconPeer(
+            response: Data(repeating: 65, count: 80_000), responseByteLimit: 55_000)
+        let third = try SyntheticIconPeer(response: try Self.image(type: .png))
+        let peers = [first, second, third]
+        let servers = peers.map { peer in Task.detached { peer.serve() } }
+        let attempts = NetworkAttempts()
+        let addresses = ["8.8.8.8", "1.1.1.1", "9.9.9.9"].map { WebsiteIconAddress(numeric: $0)! }
+        let transport = PinnedWebsiteIconTransport(
+            resolve: { _, _ in addresses },
+            connect: { address, deadline, _ in
+                attempts.record(address, deadline)
+                return try peers[addresses.firstIndex(of: address)!].claimClient()
+            }, evaluateTrust: Self.anchoredTrust)
+        let outcome = await Task {
+            try await transport.fetch(WebsiteIconOrigin(url: "https://www.example.com")!)
+        }.result
+        for peer in peers { peer.closeUnclaimedClient() }
+        for server in servers { _ = await server.value }
+        #expect(throws: WebsiteIconTransportError.tooLarge) { try outcome.get() }
+        #expect(attempts.addresses == Array(addresses.prefix(2)))
+        #expect(!third.clientWasClaimed && third.request.isEmpty)
+        #expect(first.encryptedBytesWritten < WebsiteIconHTTPParser.bodyLimit)
+        #expect(second.encryptedBytesWritten < WebsiteIconHTTPParser.bodyLimit)
+        #expect(
+            first.encryptedBytesWritten + second.encryptedBytesWritten
+                >= WebsiteIconHTTPParser.bodyLimit)
+    }
+
+    @Test(arguments: ["trust", "redirect", "malformed", "tooLarge"])
+    func terminalResponsesNeverTryAnAlternate(_ failure: String) async throws {
+        let image = try Self.image(type: .png)
+        let first = try SyntheticIconPeer(
+            response: failure == "tooLarge" ? Data(repeating: 65, count: 250_000) : image,
+            headers: failure == "malformed" ? "Content-Length: 1\r\n" : "",
+            status: failure == "redirect" ? 302 : 200)
+        let second = try SyntheticIconPeer(response: image)
+        let peers = [first, second]
+        let servers = peers.map { peer in Task.detached { peer.serve() } }
+        let attempts = Counter()
+        let addresses = [
+            WebsiteIconAddress(numeric: "8.8.8.8")!, WebsiteIconAddress(numeric: "1.1.1.1")!,
+        ]
+        let transport = PinnedWebsiteIconTransport(
+            resolve: { _, _ in addresses },
+            connect: { address, _, _ in
+                attempts.increment()
+                return try (address == addresses[0] ? first : second).claimClient()
+            },
+            evaluateTrust: { trust, host, deadline in
+                if failure == "trust" {
+                    try await WebsiteIconServerTrust.evaluate(trust, host: host, deadline: deadline)
+                } else {
+                    try await Self.anchoredTrust(trust, host: host, deadline: deadline)
+                }
+            })
+        let outcome = await Task {
+            try await transport.fetch(WebsiteIconOrigin(url: "https://www.example.com")!)
+        }.result
+        for peer in peers { peer.closeUnclaimedClient() }
+        for server in servers { _ = await server.value }
+        let expected: WebsiteIconTransportError =
+            failure == "trust"
+            ? .trust
+            : failure == "redirect"
+                ? .status(302) : failure == "malformed" ? .invalidHTTP : .tooLarge
+        #expect(throws: expected) { try outcome.get() }
+        #expect(attempts.value == 1 && !second.clientWasClaimed && second.request.isEmpty)
+        if failure == "trust" { #expect(first.request.isEmpty) }
+    }
+
+    @Test(arguments: [false, true])
+    func terminalDeadlineAndCancellationNeverTryAnAlternate(cancelled: Bool) async throws {
+        let first = try SyntheticIconPeer(response: try Self.image(type: .png), stall: true)
+        let second = try SyntheticIconPeer(response: try Self.image(type: .png))
+        let peers = [first, second]
+        let servers = peers.map { peer in Task.detached { peer.serve() } }
+        let attempts = Counter()
+        let addresses = [
+            WebsiteIconAddress(numeric: "8.8.8.8")!, WebsiteIconAddress(numeric: "1.1.1.1")!,
+        ]
+        let transport = PinnedWebsiteIconTransport(
+            timeout: cancelled ? .seconds(5) : .milliseconds(100),
+            resolve: { _, _ in addresses },
+            connect: { address, _, _ in
+                attempts.increment()
+                return try (address == addresses[0] ? first : second).claimClient()
+            }, evaluateTrust: Self.anchoredTrust)
+        let completed = Counter()
+        let operation = Task {
+            defer { completed.increment() }
+            return try await transport.fetch(WebsiteIconOrigin(url: "https://www.example.com")!)
+        }
+        if cancelled {
+            while first.request.isEmpty && completed.value == 0 {
+                try await Task.sleep(for: .milliseconds(1))
+            }
+            operation.cancel()
+        }
+        let outcome = await operation.result
+        for peer in peers { peer.closeUnclaimedClient() }
+        for server in servers { _ = await server.value }
+        if cancelled {
+            #expect(!first.request.isEmpty)
+            #expect(throws: CancellationError.self) { try outcome.get() }
+        } else {
+            #expect(throws: WebsiteIconTransportError.deadline) { try outcome.get() }
+        }
+        #expect(attempts.value <= 1 && !second.clientWasClaimed && second.request.isEmpty)
+    }
+
     @Test func activeTLSDeadlineAndCancellationCloseTheConnection() async throws {
         for cancelled in [false, true] {
             let peer = try SyntheticIconPeer(response: try Self.image(type: .png), stall: true)
@@ -492,6 +652,15 @@ struct WebsiteIconTransportTests {
     fileprivate static func root() -> SecCertificate {
         SecCertificateCreateWithData(nil, IconTLSFixture.root as CFData)!
     }
+    private static func anchoredTrust(
+        _ trust: SecTrust, host: String, deadline: ContinuousClock.Instant
+    ) async throws {
+        #expect(SecTrustSetAnchorCertificates(trust, [root()] as CFArray) == errSecSuccess)
+        #expect(
+            SecTrustSetVerifyDate(trust, Date(timeIntervalSince1970: 1_791_244_800) as CFDate)
+                == errSecSuccess)
+        try await WebsiteIconServerTrust.evaluate(trust, host: host, deadline: deadline)
+    }
     private static func trust() throws -> SecTrust {
         let leaf = try #require(SecCertificateCreateWithData(nil, IconTLSFixture.leaf as CFData))
         var trust: SecTrust?
@@ -555,6 +724,15 @@ private final class Counter: @unchecked Sendable {
     var value: Int { lock.withLock { count } }
     func increment() { lock.withLock { count += 1 } }
 }
+private final class NetworkAttempts: @unchecked Sendable {
+    private let lock = NSLock()
+    private var values: [(WebsiteIconAddress, ContinuousClock.Instant)] = []
+    var addresses: [WebsiteIconAddress] { lock.withLock { values.map(\.0) } }
+    var deadlines: [ContinuousClock.Instant] { lock.withLock { values.map(\.1) } }
+    func record(_ address: WebsiteIconAddress, _ deadline: ContinuousClock.Instant) {
+        lock.withLock { values.append((address, deadline)) }
+    }
+}
 private final class DNSProbe: @unchecked Sendable {
     private let lock = NSLock()
     private var receiver: WebsiteIconDNSResolver.Receiver?
@@ -583,6 +761,10 @@ private final class SyntheticIconPeer: @unchecked Sendable {
     private let server: Int32
     private let response: Data
     private let headers: String
+    private let dropHandshake: Bool
+    private let responseByteLimit: Int?
+    private let gracefulClose: Bool
+    private let status: Int
     private let identity: SecIdentity
     private let stall: Bool
     private let lock = NSLock()
@@ -591,12 +773,14 @@ private final class SyntheticIconPeer: @unchecked Sendable {
     private var unclaimedClient: Int32?
     private var claimed = false
     private var peerClosed = false
+    private var encryptedWritten = 0
     private var wanted = Int16(POLLIN)
     private let deadline = ContinuousClock.now.advanced(by: .seconds(5))
     var request: String { lock.withLock { received } }
     var sni: String { lock.withLock { serverName } }
     var clientWasClaimed: Bool { lock.withLock { claimed } }
     var observedPeerClosure: Bool { lock.withLock { peerClosed } }
+    var encryptedBytesWritten: Int { lock.withLock { encryptedWritten } }
 
     func claimClient() throws -> Int32 {
         try lock.withLock {
@@ -627,9 +811,16 @@ private final class SyntheticIconPeer: @unchecked Sendable {
         return reused
     }
 
-    init(response: Data, stall: Bool = false, headers: String = "") throws {
+    init(
+        response: Data, stall: Bool = false, headers: String = "", dropHandshake: Bool = false,
+        responseByteLimit: Int? = nil, gracefulClose: Bool = false, status: Int = 200
+    ) throws {
         self.response = response
         self.headers = headers
+        self.dropHandshake = dropHandshake
+        self.responseByteLimit = responseByteLimit
+        self.gracefulClose = gracefulClose
+        self.status = status
         self.stall = stall
         var imported: CFArray?
         let options =
@@ -694,6 +885,29 @@ private final class SyntheticIconPeer: @unchecked Sendable {
     }
     func serve() {
         defer { Darwin.close(server) }
+        if dropHandshake {
+            var bytes = [UInt8](repeating: 0, count: 2048)
+            while wait() {
+                if Darwin.read(server, &bytes, bytes.count) > 0 {
+                    if gracefulClose {
+                        let alert: [UInt8] = [21, 3, 3, 0, 2, 1, 0]
+                        guard Darwin.write(server, alert, alert.count) == alert.count else {
+                            return
+                        }
+                        while wait() {
+                            let count = Darwin.read(server, &bytes, bytes.count)
+                            if count == 0 {
+                                lock.withLock { peerClosed = true }
+                                return
+                            }
+                            if count < 0, errno != EAGAIN, errno != EINTR { return }
+                        }
+                    }
+                    return
+                }
+            }
+            return
+        }
         guard let context = SSLCreateContext(nil, .serverSide, .streamType) else { return }
         let pointer = Unmanaged.passUnretained(self).toOpaque()
         guard SSLSetConnection(context, pointer) == errSecSuccess,
@@ -754,18 +968,24 @@ private final class SyntheticIconPeer: @unchecked Sendable {
             return
         }
         var reply = Data(
-            "HTTP/1.1 200 OK\r\nContent-Length: \(response.count)\r\n\(headers)\r\n".utf8)
+            "HTTP/1.1 \(status) Response\r\nContent-Length: \(response.count)\r\n\(headers)\r\n"
+                .utf8)
         reply.append(response)
+        let responseEnd = min(reply.count, responseByteLimit ?? reply.count)
         var offset = 0
-        while offset < reply.count {
+        while offset < responseEnd {
             var written = 0
             let result = reply.withUnsafeBytes {
                 SSLWrite(
-                    context, $0.baseAddress!.advanced(by: offset), min(17, reply.count - offset),
+                    context, $0.baseAddress!.advanced(by: offset), min(17, responseEnd - offset),
                     &written)
             }
             offset += written
             guard result == errSecSuccess || (result == errSSLWouldBlock && wait()) else { return }
+        }
+        if responseByteLimit != nil {
+            if gracefulClose { _ = SSLClose(context) }
+            return
         }
         _ = SSLClose(context)
         wanted = Int16(POLLIN)
@@ -805,6 +1025,7 @@ private final class SyntheticIconPeer: @unchecked Sendable {
         wanted = Int16(POLLOUT)
         let requested = length.pointee
         let written = Darwin.write(server, bytes, requested)
+        if written > 0 { lock.withLock { encryptedWritten += written } }
         length.pointee = max(0, written)
         if written < 0, errno == EPIPE || errno == ECONNRESET {
             lock.withLock { peerClosed = true }
