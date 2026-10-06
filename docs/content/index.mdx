@@ -1,65 +1,76 @@
 ---
-title: Capd
-description: Save anything on your Mac and find it again in seconds.
+title: Capd fork
+description: Capture and search locally on Mac and iPhone, with optional sync through your own library service.
 ---
 
-## Save anything. Find it in seconds.
+## Your library, on Mac and iPhone
 
-Capd is a private, native macOS app for capturing useful web pages, selected
-text, links, notes, and images—then finding them again with full-text search.
+Capd saves the useful things you come across and helps you find them again.
+The Mac app captures pages, selected text, links, notes and images. This fork adds
+a local iPhone/iPad app and optional sync through a service you configure.
 
-No account. No subscription. No telemetry. Your library stays on your Mac.
+These pages describe [EzraCerpac/capd](https://github.com/EzraCerpac/capd), built on
+[Jamie Davenport’s upstream Capd](https://github.com/jamiedavenport/capd). The
+upstream website, releases, Homebrew cask and existing in-app update links
+describe upstream. Follow this fork’s [installation guide](/install) for its
+source build.
 
-[Download the latest release](https://github.com/jamiedavenport/capd/releases/latest)
-· [Install with Homebrew](/install#homebrew)
+![Current Mac search view, rendered with synthetic captures](/fork/mac-search.png)
 
-![Capture a page, then find it again with full-text search](/capture-to-search.gif)
+## Start locally
 
-## Capture without breaking focus
+1. [Build and install the fork](/install), keeping the matching app, CLI and Agent together.
+2. On the Mac, press **⌃⌥C** to capture, then **⌥⇧Space** to search.
+3. On the phone, use **+** or the share extension to save a link or text.
+4. Connect devices only when you have a prepared library service and device grant.
 
-Press **⌃⌥C** in any app, drag a link or image to the menu bar or MacBook notch,
-or share a page through the macOS share sheet. A compact HUD confirms what was
-saved and lets you add a note without opening a main window.
+Captures are saved locally before sync. A closed-app phone share remains local
+until the app can deliver it. Suspended iOS delivery is not guaranteed.
 
-Capd understands links, selected text, clipboard images, and dropped files. It
-also removes common tracking parameters and folds repeat captures into the
-existing item.
+## Save, find and annotate
 
-[See every way to capture](/capture)
+The Mac captures browser content, processes images with OCR and generates
+on-device tags. The phone displays synchronized content, and lets you search,
+edit notes/manual tags, review conflicts and delete a source.
 
-## Search what you remember
+Ask Cap provides local answers with supporting quotes and source links when
+Apple’s on-device model is available. It has no remote model fallback. Optional
+Spotlight and Shortcuts expose titles and manual tags; capture shortcuts still
+require Save.
 
-Press **⌥⇧Space** for fast, keyboard-first search across titles, websites,
-notes, selections, readable page content, and text recognized inside images.
-On-device tags provide another quick way to narrow a growing library. With
-Apple Intelligence available, Ask Cap answers natural-language questions using
-the best matches and links every claim to its source capture.
+[Capturing](/capture) · [Search and Ask Cap](/search) · [App controls](/app)
 
-![Search saved content in Capd](/search-window.gif)
+## Connect an existing service
 
-[Learn about search and filters](/search)
+The fork includes an authenticated library server and explicit device-connection
+flows. Hosting, trusted HTTPS, device authorization and backups are separate
+operator responsibilities. This is not automatic NAS discovery or shared-folder
+sync.
 
-## Private by design
+[Connect devices and plan upgrades](/sync) · [Troubleshoot a connection](/troubleshooting)
 
-Everything Capd stores lives in a SQLite database and assets folder on your
-Mac. There is no cloud account, sync service, analytics, or telemetry. OCR and
-automatic tagging run on-device.
+## Icons without phone-to-website requests
 
-[Read the privacy details](/privacy)
+**Load website icons** is off by default on the Mac. When enabled, an awake Mac
+Agent generates icons for eligible links saved on connected devices, and sends
+them through the existing library service. The phone displays locally cached
+icons and never fetches website icons itself. Already cached icons work offline.
 
-## Powerful when you need it
+[Icon settings](/app#settings) · [Network and privacy details](/privacy)
 
-The bundled `capd` CLI captures, searches, and exports the same local library.
-It offers stable JSON output for automation and a read-only MCP server for
-compatible AI assistants.
+## Automate your local library
 
-[Explore the CLI](/cli)
+Use the bundled Mac CLI for capture, search, export, sync inspection and
+read-only MCP tools. Raycast adds search and capture commands.
 
-## Get started
+[CLI reference](/cli) · [FAQ](/faq) · [Troubleshooting](/troubleshooting)
 
-1. [Download and install Capd](/install).
-2. Press **⌃⌥C** anywhere to save your first capture.
-3. Press **⌥⇧Space** and search for a word from it.
+The screenshots in these pages show current views with synthetic records and
+fixture assets. They contain no personal library and do not establish a deployed
+server connection.
 
-Need more detail? Continue with [Capturing](/capture), [Search](/search),
-[Menu bar and settings](/app), or the [FAQ](/faq).
+[View the interface examples](/screenshots)
+
+Capd has no built-in account service, telemetry or analytics. Optional sync sends
+library data to your configured service. Page capture, icon generation and update
+checks can use the network; see [Privacy](/privacy).

@@ -1,139 +1,169 @@
-[![Capd](./banner.png)](https://capd.jxd.dev)
+[![Capd](./banner.png)](https://github.com/EzraCerpac/capd)
 
-# Save anything. Find it in seconds.
+# Capd — a local library for Mac and iPhone
 
-Capd is a private, native macOS app for capturing the useful things you come
-across—web pages, selected text, links, notes, and images—and finding them again
-with full-text search.
+Capture useful links, selected text, notes and images on your Mac, then find them
+with full-text search. This fork adds an iPhone/iPad client and optional device
+sync through a library server you configure. Each device keeps a local library,
+so saving and reading do not depend on a live connection.
 
-No account. No subscription. No telemetry. Your library stays on your Mac.
+This is **[EzraCerpac/capd](https://github.com/EzraCerpac/capd)**, a fork of
+**[Jamie Davenport’s Capd](https://github.com/jamiedavenport/capd)**. Jamie’s
+native Mac app is the foundation. The upstream website, Homebrew cask and
+release channel describe upstream Capd; they do not install this fork’s added
+features.
 
-[Download the latest release](https://github.com/jamiedavenport/capd/releases/latest)
-· [Read the documentation](https://capd.jxd.dev)
+[Install this fork](docs/content/01-install.mdx) ·
+[Connect devices](docs/content/08-sync.mdx) ·
+[Troubleshooting](docs/content/09-troubleshooting.mdx) ·
+[Build and contribute](CONTRIBUTING.md)
 
-If Capd is useful to you, [star the repository](https://github.com/jamiedavenport/capd)
-to help other Mac users discover it.
+## What you can do
 
-![Capture a page, then find it again with full-text search](./docs/public/capture-to-search.gif)
+| | Mac | iPhone and iPad |
+| --- | --- | --- |
+| Capture | Browser pages, selected text, links, clipboard images, dropped files, share sheet and CLI | Links and text in the app or incoming share sheet |
+| Find | Full-text search, filters, Raycast and optional Spotlight/Shortcuts | Local search and optional Spotlight/Shortcuts |
+| Annotate | Notes, tags, ratings and reminders | Notes, manual tags, conflict review and deletion |
+| Process | Readable page content, image OCR and on-device automatic tagging | Display synchronized content; no mobile page fetching or OCR |
+| Ask Cap | On-device answers with source citations | On-device answers when Apple’s model is available; no remote fallback |
+| Website icons | Opt-in generation for eligible links saved on any connected device | Display verified icons received through sync |
+| Sync | Enrolled HTTPS library connection and background Agent | Automatic sync while the app is active or reopened; share saves locally first |
 
-## Why Capd?
+The phone app does not promise delivery while iOS suspends it. A closed-app share
+is available locally; opening Capd lets the app deliver queued work.
 
-- **Capture without breaking focus.** Press `⌃⌥C`, drag something to the menu
-  bar or notch, use the macOS share sheet, or run the `capd` CLI.
-- **Search more than bookmarks.** Capd indexes page titles, readable article
-  text, selections, notes, and text recognized inside images.
-- **Ask your library.** Get private, on-device answers with clickable citations
-  to the captures behind each claim.
-- **Stay organized automatically.** On-device tagging groups captures into a
-  small, useful vocabulary without sending their contents anywhere.
-- **Use your library everywhere.** Search in the native app or Raycast, automate
-  with the CLI, export your data, or give an AI assistant read-only access over
-  MCP.
-- **Keep control of your data.** Everything lives in a local SQLite database and
-  assets folder. Network behavior is limited and documented in full.
+## Start with a local library
 
-## Install
-
-Capd requires **macOS 26 or later** and supports Apple silicon and Intel Macs.
-
-Download the notarized `.dmg` from the
-[latest GitHub release](https://github.com/jamiedavenport/capd/releases/latest),
-open it, and drag `capd.app` to Applications.
-
-Or install the app and CLI with Homebrew:
+The Mac app requires **macOS 26 or later**. For a source build, use an Xcode
+toolchain matching the fork’s build CI, currently **Xcode 26.4.1**. The iOS project
+targets iOS 17 or later; Ask Cap separately requires iOS 26 or later and an
+available Apple Intelligence model.
 
 ```sh
-brew install jamiedavenport/tap/capd
+git clone https://github.com/EzraCerpac/capd.git
+cd capd
+./Scripts/bootstrap.sh
+Scripts/package-app.sh
 ```
 
-On first launch, Capd guides you through its hotkeys and optional macOS
-permissions. Then press `⌃⌥C` anywhere to make your first capture and
-`⌥⇧Space` to find it.
+Packaging produces the Mac app and disk image in `dist/`. Local packages use an
+ad hoc signature unless you supply a signing identity; packaging does not
+notarize them. The iPhone app and library server are separate builds.
 
-[See the installation guide](https://capd.jxd.dev/install) for permission,
-update, and uninstall details.
+Read the [installation guide](docs/content/01-install.mdx) before replacing an
+existing Capd installation: upstream and this fork share application identifiers,
+the background helper and the default library location. A source build is not
+automatically isolated from your existing data.
 
-## Capture your way
+On the Mac, first-run onboarding introduces capture, search and optional macOS
+permissions. Press `⌃⌥C` to capture and `⌥⇧Space` to search. The phone app has a
+**+** capture button and a share extension.
 
-Capd saves links, selected text, clipboard images, and dropped files. Browser
-captures include the current page and, where available, its readable content.
-Image text is recognized on-device and becomes searchable.
+## Connect your devices
 
-Re-capturing the same item updates the existing entry instead of creating a
-duplicate. Add a note from the confirmation HUD with `⌃⌥N`.
+Sync is optional. It uses an explicitly selected library, device identity and
+credential, rather than a built-in account service.
 
-![Drag a link to the MacBook notch to capture it with Capd](./docs/public/drag-to-capture.gif)
+The included server exposes a loopback HTTP endpoint; remote clients require an
+HTTPS proxy and separately provisioned device grants. Hosting it on a NAS is a
+deployment choice, not an automatic NAS installer or shared-folder sync. The
+documented server build targets macOS; a Linux NAS deployment is not established
+by that build.
 
-[Explore every capture method](https://capd.jxd.dev/capture).
+On the phone, open **Device sync → Prepare device connection**. The connection
+flow retains a backup and verifies the chosen service, library and device before
+activation. An existing populated library needs the reviewed import workflow or
+an explicit archive-only choice. The Mac’s `capd sync` commands activate, inspect,
+pause and resume a prepared connection.
 
-## Recall what matters
+Follow [device setup and enrollment](docs/content/08-sync.mdx), including backup
+and upgrade guidance. Keep the selected authority’s history and each device’s
+queued work intact; a JSON content export is not a full sync-state backup.
 
-Press `⌥⇧Space` for fast, keyboard-first search across everything you saved.
-Use natural keywords or narrow the results with site, tag, and date filters:
+## Recognize links at a glance
+
+Enable **Settings → Network → Load website icons** on the Mac to generate icons.
+Generation defaults off. The Mac Agent requests only an eligible saved HTTPS
+host’s `/favicon.ico`, with no page path, query, cookies or credentials, and no
+redirects.
+
+Links saved on the phone acquire icons after their captures reach an opted-in,
+awake Mac Agent. Icons then travel through the existing library server. Cached
+icons remain available offline and when generation is disabled; the phone never
+contacts saved websites for icons.
+
+The phone’s **Show synced website icons** setting controls display. Missing or
+unusable icons use a native symbol. See the [icon guide](docs/designs/website-icons.md)
+for host, transport and compatibility limits.
+
+## Recall and automate
+
+Search the saved title, content, notes and OCR on the Mac, or narrow results:
 
 ```text
 swift concurrency site:swift.org tag:development after:2026-01-01
 ```
 
-Click **Ask Cap**, or prefix a question with `?`, to assemble an answer from the
-best matches. Apple Intelligence generates the answer on-device and every claim
-links back to its source capture.
+Ask Cap answers from selected local sources with clickable citations. The phone
+also displays supporting quotes. Availability depends on the device, OS, Apple
+Intelligence settings, model readiness and locale. There is no remote model fallback, and citations
+are evidence to inspect rather than a guarantee that an answer is correct.
 
-![Search saved content in Capd](./docs/public/search-window.gif)
+Spotlight and Shortcuts are optional. They expose saved titles and manual tags,
+not private bodies, notes or OCR. Discovery fails closed for libraries over
+1,000 live captures. A capture shortcut stages a draft that still requires Save.
 
-[Learn how search works](https://capd.jxd.dev/search).
-
-## Built for the keyboard—and automation
-
-The bundled `capd` command captures, searches, manages, and exports the same
-local library:
+The bundled Mac CLI uses the same selected local library:
 
 ```sh
 capd add https://example.com/article
 capd search "reading list" --site example.com
 capd export --format markdown
+capd sync status
 capd mcp
 ```
 
-`capd mcp` exposes read-only search and cited-answer tools to compatible AI
-assistants. The CLI also provides stable JSON output for scripts.
+The [CLI reference](docs/content/04-cli/index.mdx) describes commands, output and
+repair operations. The [Raycast extension](raycast/) provides search and capture.
+The MCP command supplies read-only search and cited-answer tools.
 
-The Raycast extension in [`raycast/`](./raycast) adds **Capd: Search** and
-**Capd: Capture** commands to Raycast, backed by the same local library.
+## Screenshots
 
-[See the CLI reference](https://capd.jxd.dev/cli).
+The documentation examples use synthetic captures and local fixture assets.
+They do not show a personal library or establish a deployed server connection.
 
-Website icons work across an enrolled Mac and iPhone library. Enable **Load
-website icons** on the Mac to let its Agent generate icons for eligible links
-saved on either device. Icons travel through the configured library server and
-remain available offline; the iPhone does not contact saved websites for icons.
-See [website icon generation and sync](docs/designs/website-icons.md).
+![Current Mac search view with synthetic captures](docs/public/fork/mac-search.png)
 
-## Private by design
+<p>
+  <img src="docs/public/fork/iphone-library-light.png" width="250" alt="Current iPhone library with synthetic sources">
+  <img src="docs/public/fork/iphone-detail-light.png" width="250" alt="Saved synthetic source with its note and manual tags">
+  <img src="docs/public/fork/iphone-share-light.png" width="250" alt="Actual share extension saving synthetic text locally">
+</p>
 
-Capd has no built-in account service, analytics, or telemetry. Optional library
-sync uses your configured server. Page fetching,
-favicon requests, update checks, OCR, and automatic tagging are documented in
-the [privacy guide](docs/content/06-privacy.mdx), including which network
-features can be disabled.
+The Mac image is an offscreen render of the actual view; phone images come from
+the app in an isolated simulator. [Image provenance](docs/public/fork/provenance.json)
+records their source and hashes.
 
-Capd is open source under the [MIT License](LICENSE).
+See the [app guide](docs/content/05-app.mdx) and
+[iPhone guide](iOS/README.md) for the current interface and platform differences.
+The [interface gallery](docs/content/10-screenshots.mdx) also shows settings and
+the explicitly labeled synthetic citation example.
 
-## Contributing
+## Privacy, support and credit
 
-Want to build Capd, improve the docs, or send a patch? See
-[CONTRIBUTING.md](CONTRIBUTING.md).
+Capd has no built-in account service, telemetry or analytics. Optional sync sends
+library data to your configured server. Capturing a page, generating an icon and
+checking for updates can use the network; the
+[privacy guide](docs/content/06-privacy.mdx) describes their destinations and
+controls.
 
-<!-- Edit the shared source in jamiedavenport/jamiedavenport.me: readme-snippets/more-by-jamie.md. -->
-<!-- md:include start path="more-by-jamie.md" required=true -->
+Existing in-app help and update links still point to upstream. Use this fork’s
+[issues](https://github.com/EzraCerpac/capd/issues) for fork-specific problems and
+[troubleshooting guide](docs/content/09-troubleshooting.mdx) for setup checks.
+Upstream releases and Homebrew updates should not be used as an upgrade path for
+an enrolled fork library.
 
-## More by Jamie
-
-| Name        | Description                                                           | Website                                    | Repo                                                    |
-| ----------- | --------------------------------------------------------------------- | ------------------------------------------ | ------------------------------------------------------- |
-| PolicyStack | Privacy policies and cookie consent driven by the same configuration. | [policystack.dev](https://policystack.dev) | [GitHub](https://github.com/jamiedavenport/policystack) |
-| Sidequest   | A personal task manager designed with ADHD in mind.                   | [sdqst.app](https://sdqst.app)             | [GitHub](https://github.com/jamiedavenport/sidequest)   |
-| Capd        | A private Mac app for saving and finding links, notes, and images.    | [capd.jxd.dev](https://capd.jxd.dev)       | [GitHub](https://github.com/jamiedavenport/capd)        |
-| htomd       | Focused Markdown and metadata from messy HTML, in pure Python.        |                                            | [GitHub](https://github.com/jamiedavenport/htomd)       |
-
-<!-- md:include end -->
+Thanks to Jamie Davenport and the upstream contributors. Capd remains available
+under the [MIT License](LICENSE). Technical architecture and implementation
+limits live in [docs/designs/](docs/designs/).

@@ -3,8 +3,12 @@ title: Capture
 description: Save pages, selections, links, images, and files without breaking focus.
 ---
 
-Capd offers several ways to save something. Every method uses the same local
-library, duplicate detection, confirmation HUD, and background enrichment.
+On the Mac, Capd offers several ways to save something to the same local library.
+GUI capture shows a confirmation HUD; the CLI reports its result in the terminal.
+Duplicate detection and background enrichment apply to saved Mac captures.
+
+The animations below are retained upstream examples. See the
+[interface gallery](/screenshots) for current fork views.
 
 ## Use the capture hotkey
 
@@ -93,3 +97,13 @@ seen count and timestamp instead of creating a duplicate.
 The background helper extracts readable page text and runs image OCR. A failed
 page fetch never discards the capture: its URL, title, selection, and note stay
 searchable. Re-capture the page or run `capd refetch` to try again.
+
+## Capture on iPhone and iPad
+
+Use **+** in the library to save a link or text, or choose Capd in another app's
+share sheet. Review the form and tap **Save**. The share extension can save with
+the main app closed. Mobile capture does not fetch page bodies or run image OCR.
+
+Saved content is available locally. An enrolled app delivers queued work while
+active or when reopened; iOS suspension can delay delivery. See
+[the app guide](/app) and [device setup](/sync).

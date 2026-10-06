@@ -1,17 +1,37 @@
 ---
 title: Privacy
-description: What stays on your Mac, what can connect to the network, and how on-device processing works.
+description: Local libraries, optional enrolled sync, website requests, system discovery, and on-device processing.
 ---
 
 Your Capd library lives in local SQLite databases and asset folders. Optional
 enrolled library sync sends captures and verified assets to your configured
 server. Capd has no built-in account service, analytics, advertising, or telemetry.
 
-This page lists every network feature in the app.
+This page describes the app's network features and optional local system index.
+
+## Library sync
+
+A library without enrollment stays on its device. Explicit enrollment connects
+the selected library to a configured HTTPS service. Capture content, notes,
+manual/generated tags, metadata, deletion records, and referenced assets travel
+to that service and other enrolled devices. Use a service whose operator and
+retention policy you trust; the app does not provide a hosted sync account.
+
+Connection files contain public service/library/device identity. Device
+credentials are held in Keychain. The phone connection flow retains the prior
+library before verified activation. Its optional **Check private connection**
+probe sends no credential and establishes reachability only. See [library
+sync](/sync) for the reviewed import and activation workflow.
+
+The main phone app delivers changes while active. Its share extension writes
+locally to the selected library and never reads the credential or starts network
+sync. The Mac app, Agent, and ordinary CLI commands can deliver queued changes.
+`capd sync deactivate` pauses Mac networking while retaining library binding
+and queued changes; it does not delete server data or undo enrollment.
 
 ## Page-content fetching
 
-Capd stores readable page text so search can match more than a bookmark's title.
+The Mac stores readable page text so search can match more than a bookmark's title.
 When a capture comes from Safari, Chrome, or Arc, Capd first reads the rendered
 page directly from that browser tab. No additional page request is needed.
 
@@ -24,6 +44,9 @@ browsers, Capd can fetch the page itself. That fetch uses:
 - a 15-second timeout and 10 MB response limit
 
 A failed fetch does not discard the capture.
+
+The phone saves links and text without fetching webpages. Saved page text and
+OCR received through sync can still appear in its library and local answers.
 
 **Control it:** use `capd add --no-fetch` for one CLI capture, or disable **Fetch
 page content for link captures** in Settings.
@@ -50,14 +73,16 @@ never contacts the website for an icon.
 
 **Control generation:** use **Load website icons** in Mac Settings. Disabling it
 stops new claims; existing verified icons remain readable. The iPhone's
-**Show website icons** setting controls display only. Confirmed misses retry
-after seven days. Removing the last live link hides its shared icon; retained
-blob bytes are not physically erased by that deletion.
+**Show synced website icons** setting controls display only and starts enabled.
+Confirmed misses retry after seven days. Removing the last live link hides its
+shared icon; retained blob bytes are not physically erased by that deletion.
 
 ## Update checks
 
-At most once a week, the menu-bar app asks the GitHub Releases API for the latest
-version number. Updating is always manual.
+At most once a week, the menu-bar app asks the upstream
+`jamiedavenport/capd` GitHub Releases API for the latest version number. Updating
+is always manual. The current notice copies an upstream Homebrew command; it
+does not install an update or establish a new fork release.
 
 **Control it:** disable **Check weekly for a new version** in Settings.
 
@@ -81,12 +106,36 @@ when **Contextual reminders** is off.
 
 ## On-device processing
 
-Image text recognition uses Apple's Vision framework. Automatic topic tagging
+Mac image text recognition uses Apple's Vision framework. Automatic topic tagging
 and Ask Cap answers use Apple's on-device Foundation Models when Apple
 Intelligence is available. Captured content is not sent to a model service.
 
 **Control tagging:** disable **Auto-tag captures on device** in Settings. OCR
 continues to run locally for image captures.
+
+The phone's Ask Cap requires iOS 26 or later and an available local model on
+eligible hardware, with Apple Intelligence enabled and a supported locale.
+Its questions and answers are not persisted. It reads saved text only after an
+explicit question and has no remote fallback. Model availability does not
+guarantee successful or correct generation.
+
+## Spotlight and Shortcuts
+
+System discovery starts off on both platforms. Enabling it indexes saved titles
+and manual tags in a named local Spotlight index. Bodies, OCR, source text,
+notes, conflicts, and generated tags are excluded; titles derived from source
+text are conservatively redacted. The index is separate from Capd's SQLite
+full-text index.
+
+Entries receive a 30-day expiration and renew while the app is active. Expiration
+is not a guarantee of physical erasure by the OS. Turning discovery off disables
+routing and requests scoped removal; removal failures remain visible for retry.
+Libraries over 1,000 live captures fail closed rather than indexing a partial
+library. See [system search and Shortcuts](/search#system-search-and-shortcuts).
+
+Find Captures and Open Capture use the local selected library. Draft Text stages
+explicitly supplied text for review and requires Save. These actions do not read
+the clipboard, listen in the background, or invoke a model.
 
 ## MCP and other tools
 
@@ -97,12 +146,20 @@ client. The server does not make network requests itself. A connected AI
 assistant may process those results elsewhere, so its own privacy policy also
 applies.
 
+MCP opens the database read-only. Even for an enrolled library, it does not start
+a sync client, read the device credential, migrate the database, or flush queued
+changes. Other ordinary CLI commands use the current Mac library session and
+can attempt sync after their local work.
+
 ## App security and distribution
 
-Capd runs outside the App Sandbox because reading the frontmost browser tab with
-Accessibility and Automation is incompatible with sandboxing. Release builds
-use the hardened runtime, are signed with a Developer ID certificate, and are
-notarized by Apple.
+The Mac app runs outside the App Sandbox to read frontmost browser context using
+Accessibility and Automation. The iPhone app and share extension use an App Group
+container. Building this fork locally does not establish Developer ID signing,
+notarization, App Store distribution, or a physical-device installation. See
+[installation](/install) for the fork's build and signing requirements.
 
-The source is MIT-licensed and available at
-[github.com/jamiedavenport/capd](https://github.com/jamiedavenport/capd).
+This fork is MIT-licensed and available at
+[EzraCerpac/capd](https://github.com/EzraCerpac/capd). It builds on
+[Jamie Davenport's Capd](https://github.com/jamiedavenport/capd); the existing
+copyright and third-party notices are retained.

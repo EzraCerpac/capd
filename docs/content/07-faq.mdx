@@ -1,6 +1,6 @@
 ---
 title: FAQ
-description: Answers about permissions, capturing, local data, the background helper, and troubleshooting.
+description: Answers about Mac and iPhone capture, optional sync, icons, local answers, permissions, and data.
 ---
 
 ## Permissions
@@ -16,7 +16,8 @@ continue to work.
 
 macOS can revoke Accessibility when an app's code signature changes. Open
 System Settings → Privacy & Security → Accessibility, remove the existing Capd
-entry, and add the app again. `capd doctor` reports the current permission state.
+entry, and add the app again. `capd doctor` reports Accessibility for its CLI
+process; that result can differ from the menu-bar app's permission.
 
 ### Why does macOS ask about Safari, Chrome, and Arc separately?
 
@@ -60,14 +61,23 @@ matching.
 
 ### Where is my library, and how do I back it up?
 
-The default location is `~/Library/Application Support/capd/`. Copy the complete
-folder for a full backup, including captured images. `capd export` creates a
-lossless JSON data export; image files remain in the `assets/` folder.
+The Mac's default location is `~/Library/Application Support/capd/`. Retain a
+consistent database and the complete assets/configuration while writers are
+stopped. The phone library is in its App Group; **Device sync → Prepare device
+connection** retains a backup before activation. `capd export` exports capture
+fields, not image/icon bytes, sync history, or Keychain credentials. See the
+[sync guide](/sync) before moving or restoring an enrolled library.
 
 ### Can I import bookmarks?
 
-There is no provider-specific importer. A plain list of URLs can be captured in
-bulk:
+Use **Import from Pinboard…** in the Mac menu or run:
+
+```sh
+capd import pinboard pinboard_export.json
+```
+
+Pinboard imports retain titles, notes, tags, and timestamps. A plain list of
+URLs can also be captured in bulk:
 
 ```sh
 cat urls.txt | capd add -
@@ -75,16 +85,84 @@ cat urls.txt | capd add -
 
 Each URL becomes its own deduplicated, searchable capture.
 
-### Does Capd sync between Macs?
+## Sync and iPhone
 
-No. Capd is intentionally local to one Mac and does not operate a sync service.
+### Does this fork sync between devices?
+
+Yes, after explicit enrollment in an authorized HTTPS library. Unconfigured
+libraries remain local. This fork includes Mac and iPhone clients and a server
+implementation, but does not provide a hosted service or create device access
+from the app. Start with [library sync](/sync), including backup, import review,
+and separate device authorization.
+
+### Does sharing to the iPhone app deliver immediately to my Mac?
+
+The share extension saves locally, including while the main app is closed. The
+main phone app delivers those changes when active or reopened. iOS can suspend
+the app, so background delivery is not guaranteed. A source marked **Available
+on this device** is locally saved; that label does not prove another device or
+the server has received it.
+
+### What does the iPhone app capture?
+
+Links and text, with optional titles and notes. Tap **Capture** or share from
+another app, review the source, then choose **Save**. It does not fetch webpages,
+perform OCR, or create image captures. It can display page text, recognized
+image text, and generated tags received from the library. Details support
+manual note/tag edits, note resolution, deletion, and sharing a URL or text.
+
+### What happens to conflicting notes?
+
+Saved note versions are retained for review. On Mac, choose **Review conflicting
+notes…** from the menu. On iPhone, open the source's **Edit** form, review **Notes
+to resolve**, and explicitly choose **Use this note to resolve all variants**
+before **Save changes**. A newer version can require another review.
+
+### Are local saves the same as accepted changes?
+
+No. Local edits commit immediately and remain available offline; server delivery
+and acceptance happen separately. Connection failures and rejected operations
+retain local data. Use `capd sync status` on Mac or **Device sync** on iPhone to
+inspect the state. See [troubleshooting](/troubleshooting).
+
+## Icons and local intelligence
+
+### Why does a link show a symbol instead of its website icon?
+
+Mac **Load website icons** starts off. Enable it and keep the background agent
+available to generate icons for eligible HTTPS links. Phone **Show synced website
+icons** controls display only and starts on. New icons from either device require
+the Mac Agent and, for delivery, a compatible connected server. Unsupported
+hosts, missing icons, unavailable assets, and refused responses use a symbol;
+the capture remains usable. See [website icon privacy](/privacy#website-icons)
+and [troubleshooting](/troubleshooting).
+
+### Why is Ask Cap unavailable or unable to answer?
+
+It requires eligible hardware and enabled, ready Apple Intelligence. Phone Ask
+Cap additionally requires iOS 26 or later and a supported locale; the rest of
+the phone app supports iOS 17 or later. There is no remote fallback. The model
+can also fail to generate, find insufficient saved evidence, or find that its
+sources changed during generation. On iPhone, **Check again** refreshes model
+availability. [Search](/search#ask-cap) explains citations and source review.
+
+### Can Spotlight or Siri search all my captured text?
+
+The opt-in system index contains titles and manual tags, excluding source text,
+notes, page bodies, OCR, and generated tags. It fails closed above 1,000 live
+captures or when a complete valid snapshot cannot be built. In-app search still
+reads the library. The named Shortcuts are **Find Captures**, **Open Capture**,
+and **Draft Text**; they do not provide arbitrary Siri questions. Draft Text
+requires review and Save. See [system discovery](/search#system-search-and-shortcuts).
 
 ## Background helper
 
 ### What is `capd-agent` in my login items?
 
-It is Capd's enrichment helper. It extracts readable page content and runs OCR
-even when the menu-bar app is closed. It idles when no captures are waiting.
+It is Capd's background helper. It extracts readable page content, runs OCR and
+on-device tagging, and generates website icons when enabled. In an enrolled
+library it also runs sync. It can work while the menu-bar app is closed; available
+model, network, and processing settings still apply.
 
 ### Captures are stuck in pending
 
@@ -97,15 +175,18 @@ charger.
 
 ### Is there a configuration file?
 
-No. Hotkeys, page fetching, update checks, and automatic tagging are controlled
-in Settings. `CAPD_DIR` is the only environment variable and changes the storage
-root.
+Ordinary controls are in Settings or the shared database. Mac enrollment adds
+`sync-configuration.json` with public connection identity; credentials remain
+in Keychain. `CAPD_DIR` changes the Mac storage root and must match across the
+app, Agent, and CLI. Deleting configuration does not safely disconnect a bound
+library. See [Mac settings](/app) and [sync](/sync).
 
 ### Why isn't Capd in the Mac App Store?
 
-Reading the frontmost browser tab requires capabilities unavailable inside the
-App Sandbox. Capd is distributed as a signed and notarized direct download and
-through Homebrew instead.
+Reading frontmost browser context requires capabilities unavailable inside the
+Mac App Sandbox. Upstream provides direct downloads and Homebrew distribution.
+Those artifacts do not establish installation or signing of this fork. Follow
+the [fork installation guide](/install).
 
 ### My hotkey does not work
 

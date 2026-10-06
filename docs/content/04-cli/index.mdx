@@ -1,14 +1,21 @@
 ---
 title: CLI
-description: Capture, search, manage, and export your Capd library from the terminal.
+description: Capture, search, import, export, inspect sync, and connect read-only assistants from the Mac CLI.
 ---
 
-The bundled `capd` command works with the same local library as the Capd app. It
+The bundled Mac `capd` command works with the same selected library as the app. It
 is useful for quick terminal capture, bulk imports, shell scripts, backups, and
 AI-assistant integrations.
 
-Homebrew adds `capd` to your `PATH`. Direct installations keep it at
-`/Applications/capd.app/Contents/MacOS/capd`.
+For an app installed at `/Applications/capd.app`, the bundled executable is
+`/Applications/capd.app/Contents/MacOS/capd`. Add that directory to `PATH` or use
+the full path. Follow [installation](/install) to build/install this fork;
+`jamiedavenport/tap/capd` installs the upstream project.
+
+Without sync configuration, commands use the local-only library. In an enrolled
+library, ordinary commands can attempt a five-second sync flush after local
+work. A connection failure does not undo a saved capture. `CAPD_DIR` must match
+the app and Agent's root. MCP uses a separate read-only path.
 
 ## Capture
 
@@ -67,13 +74,43 @@ available in the app from the menu bar icon.
 ## Export
 
 ```sh
-capd export                    # lossless JSON with every stored field
+capd export                    # JSON with saved capture fields
 capd export --format markdown  # readable links, notes, and selections
 ```
 
-The JSON export is the complete portable backup format. Copy the entire
-[storage folder](/app#where-your-data-lives) when captured image files must be
-included as well.
+JSON includes saved capture fields such as notes, tags, body text, OCR, and
+metadata. It does not include image/icon bytes, enrollment configuration,
+Keychain credentials, or the shared outbox and sync history. For a restorable
+library backup, retain a consistent database and complete asset/configuration
+snapshot; see [storage](/app#where-your-data-lives) and [sync](/sync).
+
+## Library sync
+
+```sh
+capd sync status      # local JSON status; no network request
+capd sync run         # attempt queued delivery and receive remote captures
+capd sync deactivate  # pause networking, retain binding and queued changes
+capd sync resume      # resume the existing bound connection
+```
+
+`capd sync run` requires an enrolled library and waits up to 35 seconds, with
+SQLite busy waits potentially adding time. It returns code 3 when another
+process owns sync, the library is offline, or attention is required. A successful
+local save is separate from server acceptance; inspect pending/rejected work
+and note conflicts in the returned state.
+
+Activation is for a prepared library, matching authorized device credential,
+and verified server baseline. Stop other writers and complete the backup/import
+steps in [library sync](/sync) before using:
+
+```sh
+capd sync activate --enrollment /path/to/public-enrollment.json
+```
+
+The enrollment file supplies `endpoint`, `binding`, and `deviceID`, not a bearer
+credential. Activation does not create a server, device grant, or credential.
+Deactivate pauses networking; it does not remove enrollment. Do not remove
+configuration or reset device sequences to obtain local-only writes.
 
 ## Connect an AI assistant
 
@@ -109,6 +146,10 @@ Capd's MCP server cannot add, edit, or delete captures. It communicates over
 standard input and output; review the privacy policy of the assistant receiving
 the results to understand whether that assistant sends them elsewhere.
 
+Even for an enrolled library, MCP opens SQLite read-only, performs no migration,
+reads no sync credential, and starts no sync runtime. `ask_cap` depends on an
+available Apple on-device model and has no remote fallback.
+
 ## Use Raycast
 
 The Capd extension for Raycast is another client for the same local library. It
@@ -121,9 +162,10 @@ adds two commands:
   selection, or the clipboard. Set it as a Raycast fallback command to capture
   whatever you type into root search.
 
-The extension runs the bundled `capd` command and nothing else, so captures and
-searches stay on your Mac. It locates `capd` inside the installed `capd.app`,
-which means a direct `.dmg` install works without adding anything to your `PATH`.
+The extension runs the bundled `capd` command. It locates that command inside
+the installed `capd.app`, so the CLI directory does not need to be in `PATH`.
+It uses the same selected local library; ordinary commands can also attempt
+delivery through that library's configured sync service.
 
 ## Check health
 
@@ -136,11 +178,16 @@ capd doctor   # integrity checks, repairs, and permission status
 repair the background helper. Use `capd doctor --uninstall-agent` to remove the
 helper or `--skip-agent` to check only the library.
 
+Doctor performs repairs; it is not a read-only status command. Its Accessibility
+report applies to the CLI process, which can differ from the app's permission.
+Use [troubleshooting](/troubleshooting) for connection, icon, and model issues.
+
 ## Conventions
 
 - Data goes to standard output; diagnostics go to standard error.
-- Exit codes are `0` for success, `1` for no results, `2` for invalid usage,
-  `3` when the store is unavailable, and `4` when the helper is not running.
+- Exit codes are `0` for success, `1` for no results or unresolved doctor
+  problems, `2` for invalid usage, `3` when the store or requested sync is
+  unavailable, and `4` when the enrichment helper is not running.
 - `CAPD_DIR` overrides the default storage root.
 - JSON output is stable for scripts. Existing fields are not renamed, retyped,
   or removed, but new fields may be added. Consumers should ignore unknown keys.
