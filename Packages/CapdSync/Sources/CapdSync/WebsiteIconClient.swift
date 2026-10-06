@@ -285,6 +285,10 @@ extension SyncClient {
             guard let record = receipt.record, record.revision > operation.baseRevision else {
                 throw SyncHTTPError.invalidResponse
             }
+        case .capacityRejected:
+            guard receipt.record == nil, operation.baseRevision == 0 else {
+                throw SyncHTTPError.invalidResponse
+            }
         case .unreferenced:
             guard case .upsert = operation.mutation,
                 (receipt.record?.revision ?? 0) == operation.baseRevision
@@ -297,6 +301,11 @@ extension SyncClient {
     ) throws {
         try read { db in
             try validateWebsiteIconReceipt(receipt, operation: operation)
+            if receipt.outcome == .capacityRejected {
+                guard try WebsiteIconDatabase.record(db, id: operation.origin.id) == nil else {
+                    throw SyncHTTPError.invalidResponse
+                }
+            }
             if let record = receipt.record,
                 let current = try WebsiteIconDatabase.record(db, id: record.id),
                 current.revision == record.revision, current != record
@@ -334,6 +343,11 @@ extension SyncClient {
                 throw SyncError.invalidOperation
             }
             try validateWebsiteIconReceipt(receipt, operation: operation)
+            if receipt.outcome == .capacityRejected {
+                guard try WebsiteIconDatabase.record(db, id: operation.origin.id) == nil else {
+                    throw SyncHTTPError.invalidResponse
+                }
+            }
             if let record = receipt.record {
                 if let current = try WebsiteIconDatabase.record(db, id: record.id) {
                     guard current.revision != record.revision || current == record else {

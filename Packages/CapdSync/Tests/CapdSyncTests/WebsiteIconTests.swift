@@ -6,6 +6,154 @@ import Testing
 
 @Suite("Independent website icon sync")
 struct WebsiteIconTests {
+    @Test func capacityDoesNotConsumeSequenceOnInvalidDataOrRejectedTransaction() throws {
+        let f = try IconFixture()
+        defer { f.clean() }
+        let full = try f.seedFullIconAuthority()
+        let capture = f.capture()
+        _ = try f.server.apply(
+            SyncOperation(
+                deviceID: f.a, sequence: 1, captureID: capture.id, baseRevision: 0,
+                mutation: .create(capture)))
+        let captureAuthority = try f.server.baseline()
+        let bad = try f.server.blobs.put(Data("not a PNG".utf8))
+        let corrupted = WebsiteIconOperation(
+            deviceID: f.a, sequence: 1, origin: f.origin, baseRevision: 0,
+            mutation: .upsert(WebsiteIconContent(blob: bad)))
+        #expect(throws: (any Error).self) { try f.server.applyWebsiteIcon(corrupted) }
+        #expect(try f.server.websiteIconBaseline().deviceSequences[f.a] == nil)
+        let valid = WebsiteIconOperation(
+            deviceID: f.a, sequence: 1, origin: f.origin, baseRevision: 0,
+            mutation: .upsert(WebsiteIconContent(blob: BlobReference(data: iconPNG))))
+        #expect(throws: SyncHTTPError.invalidResponse) {
+            try f.server.applyWebsiteIcon(
+                valid, validating: { _ in throw SyncHTTPError.invalidResponse })
+        }
+        #expect(try f.server.websiteIconBaseline().records == full.records)
+        #expect(try f.server.websiteIconBaseline().deviceSequences[f.a] == nil)
+        let receipt = try f.transport(f.a).applyWebsiteIcon(valid)
+        #expect(receipt.outcome == .capacityRejected && receipt.record == nil)
+        let tombstone = WebsiteIconOperation(
+            deviceID: f.a, sequence: 2, origin: WebsiteIconOrigin(url: "https://never.capd.dev")!,
+            baseRevision: 0, mutation: .tombstone)
+        #expect(try f.transport(f.a).applyWebsiteIcon(tombstone).outcome == .capacityRejected)
+        #expect(try f.transport(f.a).applyWebsiteIcon(valid) == receipt)
+        #expect(try f.server.websiteIconBaseline().records == full.records)
+        #expect(try f.server.websiteIconBaseline().cursor == full.cursor)
+        #expect(try f.server.baseline() == captureAuthority)
+    }
+
+    @Test func malformedCapacityReceiptCannotAcknowledgeKnownAuthorityOrAnotherOperation() throws {
+        let f = try IconFixture()
+        defer { f.clean() }
+        let client = try f.client("a", device: f.a)
+        let blob = try client.blobs.put(iconPNG)
+        let record = WebsiteIconRecord(
+            origin: f.origin, revision: 1, content: WebsiteIconContent(blob: blob))
+        try client.writer.write {
+            try SyncClient.seedWebsiteIconBaseline(
+                in: $0,
+                baseline: WebsiteIconBaseline(cursor: 1, records: [record], deviceSequences: [:]),
+                binding: f.binding, deviceID: f.a, blobs: client.blobs)
+        }
+        let operation = try client.enqueueWebsiteIcon(
+            origin: f.origin, mutation: .upsert(WebsiteIconContent(blob: blob)), baseRevision: 0)
+        let forged = WebsiteIconReceipt(
+            operationID: operation.id, outcome: .capacityRejected, record: nil)
+        #expect(throws: SyncHTTPError.invalidResponse) {
+            try client.validateWebsiteIconReceiptBeforeCaching(forged, operation: operation)
+        }
+        #expect(throws: SyncHTTPError.invalidResponse) {
+            try client.acknowledgeWebsiteIcon(forged, operation: operation)
+        }
+        for reply in [
+            WebsiteIconReceipt(operationID: UUID(), outcome: .capacityRejected, record: nil),
+            WebsiteIconReceipt(
+                operationID: operation.id, outcome: .capacityRejected, record: record),
+        ] {
+            #expect(throws: SyncHTTPError.invalidResponse) {
+                try client.validateWebsiteIconReceipt(reply, operation: operation)
+            }
+        }
+        let based = WebsiteIconOperation(
+            deviceID: f.a, sequence: 2, origin: f.origin, baseRevision: 1, mutation: .tombstone)
+        #expect(throws: SyncHTTPError.invalidResponse) {
+            try client.validateWebsiteIconReceipt(
+                WebsiteIconReceipt(operationID: based.id, outcome: .capacityRejected, record: nil),
+                operation: based)
+        }
+        #expect(try client.pendingWebsiteIconOperations() == [operation])
+        #expect(try client.writer.read { try WebsiteIconDatabase.records($0) } == [record])
+    }
+
+    @Test(arguments: [false, true])
+    func fullRetainedIconCapacityRejectsDurablyAndLetsTheOrderedQueueProgress(asynchronous: Bool)
+        async throws
+    {
+        let f = try IconFixture()
+        defer { f.clean() }
+        let full = try f.seedFullIconAuthority()
+        let client = try f.client("a", device: f.a)
+        try client.pull(from: f.transport(f.a))
+        let blob = try client.blobs.put(iconPNG)
+        try await client.writer.write {
+            try SyncClient.seedWebsiteIconBaseline(
+                in: $0, baseline: full, binding: f.binding, deviceID: f.a, blobs: client.blobs)
+        }
+        let capture = f.capture()
+        try client.enqueue(captureID: capture.id, mutation: .create(capture))
+        try client.push(to: f.transport(f.a))
+        try client.enqueue(captureID: capture.id, mutation: .edit(CaptureEdit(rating: 4)))
+        let capturePending = try client.pendingOperations()
+        let captureAuthority = try f.server.baseline()
+        let existing = try #require(full.records.first { !$0.deleted })
+        let removed = try #require(full.records.first { !$0.deleted && $0.id != existing.id })
+        let rejected = try client.enqueueWebsiteIcon(
+            origin: f.origin, mutation: .upsert(WebsiteIconContent(blob: blob)))
+        try client.enqueueWebsiteIcon(
+            origin: existing.origin,
+            mutation: .upsert(
+                WebsiteIconContent(blob: blob, fetchedAt: Date(timeIntervalSince1970: 456))))
+        try client.enqueueWebsiteIcon(origin: removed.origin, mutation: .tombstone)
+        #expect(try client.pendingWebsiteIconOperations().map(\.sequence) == [1, 2, 3])
+        let files = try FileManager.default.contentsOfDirectory(
+            atPath: f.server.blobs.directory.path
+        ).sorted()
+        let receipt = try f.transport(f.a).applyWebsiteIcon(rejected)
+        #expect(receipt.outcome.rawValue == "capacityRejected" && receipt.record == nil)
+        #expect(try f.server.websiteIconBaseline().records == full.records)
+        #expect(try f.server.websiteIconChanges(after: full.cursor).changes.isEmpty)
+        #expect(
+            try FileManager.default.contentsOfDirectory(atPath: f.server.blobs.directory.path)
+                .sorted() == files)
+        #expect(try f.server.websiteIconBaseline().deviceSequences[f.a] == 1)
+        let reopened = try f.client("a", device: f.a)
+        #expect(
+            try reopened.pendingWebsiteIconOperations() == client.pendingWebsiteIconOperations())
+        if asynchronous {
+            try await reopened.pushWebsiteIcons(
+                to: f.asyncTransport(f.a), credential: { f.a.uuidString })
+        } else {
+            try reopened.pushWebsiteIcons(to: f.transport(f.a))
+        }
+        #expect(try reopened.pendingWebsiteIconOperations().isEmpty)
+        #expect(try reopened.websiteIcon(originID: f.origin.id) == nil)
+        let after = try f.server.websiteIconBaseline()
+        #expect(after.records.count == 4_096 && after.cursor == full.cursor + 2)
+        #expect(after.deviceSequences[f.a] == 3)
+        #expect(
+            after.records.first { $0.id == existing.id }?.content?.fetchedAt
+                == Date(timeIntervalSince1970: 456))
+        #expect(after.records.first { $0.id == removed.id }?.deleted == true)
+        #expect(try reopened.pendingOperations() == capturePending)
+        #expect(try f.server.baseline() == captureAuthority)
+        let restarted = try SyncServer(
+            databaseURL: f.root.appendingPathComponent("server.sqlite"),
+            blobDirectory: f.server.blobs.directory, libraryID: f.binding.libraryID,
+            serviceID: f.binding.serviceID)
+        #expect(try restarted.applyWebsiteIcon(rejected) == receipt)
+    }
+
     @Test func internationalAndEscapedASCIICapturesKeepTheirAuthoritativeIconRelationships() throws
     {
         let f = try IconFixture()
@@ -1174,6 +1322,31 @@ private struct IconFixture: Sendable {
             blobDirectory: root.appendingPathComponent("server-assets"),
             libraryID: binding.libraryID, serviceID: binding.serviceID)
     }
+    func seedFullIconAuthority() throws -> WebsiteIconBaseline {
+        let blob = BlobReference(data: iconPNG)
+        try server.uploadWebsiteIcon(blob, offset: 0, chunk: iconPNG, final: true)
+        try server.writer.write { db in
+            for index in 0..<4_096 {
+                var capture = SharedCapture(
+                    source: CaptureSource(kind: .link, url: "https://site\(index).capd.dev/page"))
+                capture.revision = 1
+                try capture.validateHistorical()
+                try SyncDatabase.save(db, capture, updateWebsiteIcons: false)
+            }
+            try db.execute(sql: "UPDATE sync_meta SET cursor=1,floor=1")
+            try WebsiteIconDatabase.prepare(db)
+            for index in 0..<4_096 {
+                let record = WebsiteIconRecord(
+                    origin: WebsiteIconOrigin(url: "https://site\(index).capd.dev")!,
+                    revision: Int64(index + 1), deleted: index.isMultiple(of: 2),
+                    content: WebsiteIconContent(blob: blob))
+                try WebsiteIconDatabase.save(db, record)
+            }
+            try db.execute(sql: "UPDATE sync_website_icon_meta SET cursor=4096,floor=4096")
+        }
+        return try server.websiteIconBaseline()
+    }
+
     func client(_ name: String, device: UUID) throws -> SyncClient {
         try SyncClient(
             databaseURL: root.appendingPathComponent("\(name).sqlite"),

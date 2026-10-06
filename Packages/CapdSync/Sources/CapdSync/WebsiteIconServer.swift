@@ -52,10 +52,6 @@ extension SyncServer {
                 db, sql: "SELECT EXISTS(SELECT 1 FROM sync_website_icon_devices WHERE id=?)",
                 arguments: [operation.deviceID.uuidString])!
             guard deviceCount < 4096 || knownDevice else { throw SyncHTTPError.resourceLimit }
-            guard
-                try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM sync_website_icon_records")! < 4096
-                    || WebsiteIconDatabase.record(db, id: operation.origin.id) != nil
-            else { throw SyncHTTPError.resourceLimit }
             let previous =
                 try Int64.fetchOne(
                     db, sql: "SELECT sequence FROM sync_website_icon_devices WHERE id=?",
@@ -85,10 +81,17 @@ extension SyncServer {
                     content = current?.content
                     deleted = true
                 }
-                record = WebsiteIconRecord(
-                    origin: operation.origin, revision: try WebsiteIconDatabase.nextCursor(db),
-                    deleted: deleted, content: content)
-                outcome = .accepted
+                if current == nil,
+                    try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM sync_website_icon_records")!
+                        >= 4096
+                {
+                    outcome = .capacityRejected
+                } else {
+                    record = WebsiteIconRecord(
+                        origin: operation.origin, revision: try WebsiteIconDatabase.nextCursor(db),
+                        deleted: deleted, content: content)
+                    outcome = .accepted
+                }
             }
             let receipt = WebsiteIconReceipt(
                 operationID: operation.id, outcome: outcome, record: record)

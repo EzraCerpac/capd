@@ -136,7 +136,9 @@ public struct WebsiteIconOperation: Codable, Equatable, Sendable {
 }
 
 public struct WebsiteIconReceipt: Codable, Equatable, Sendable {
-    public enum Outcome: String, Codable, Sendable { case accepted, stale, unreferenced }
+    public enum Outcome: String, Codable, Sendable {
+        case accepted, stale, unreferenced, capacityRejected
+    }
     public let operationID: UUID
     public let outcome: Outcome
     public let record: WebsiteIconRecord?
