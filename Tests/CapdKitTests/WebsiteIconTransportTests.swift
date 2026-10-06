@@ -296,7 +296,7 @@ struct WebsiteIconTransportTests {
 
     @Test func actualTLSChecksDefaultTrustBeforeSendingHTTP() async throws {
         let peer = try SyntheticIconPeer(response: try Self.image(type: .png))
-        let server = Task.detached { peer.serve() }
+        let server = peer.start()
         let transport = PinnedWebsiteIconTransport(
             resolve: { _, _ in [WebsiteIconAddress(numeric: "8.8.8.8")!] },
             connect: { _, deadline, _ in try peer.claimClient(deadline: deadline) })
@@ -316,7 +316,7 @@ struct WebsiteIconTransportTests {
             headers: repeatedHeaders
                 ? "Set-Cookie: first=secret\r\nset-cookie: second=private\r\nX-Trace-2: one\r\nX-Trace-2: two\r\nContent-Language: en\r\ncontent-language: fr\r\nContent-Type: image/png\r\ncontent-type: image/jpeg\r\n"
                 : "")
-        let server = Task.detached { peer.serve() }
+        let server = peer.start()
         let probe = Counter()
         let transport = PinnedWebsiteIconTransport(
             resolve: { host, _ in
@@ -357,7 +357,7 @@ struct WebsiteIconTransportTests {
         let peer = try SyntheticIconPeer(response: try Self.image(type: .png))
         let descriptor = try peer.claimClient(
             deadline: ContinuousClock.now.advanced(by: .seconds(5)))
-        let server = Task.detached { peer.serve() }
+        let server = peer.start()
         peer.finish()
         let close = Task.detached {
             try? await Task.sleep(for: .milliseconds(50))
@@ -374,7 +374,7 @@ struct WebsiteIconTransportTests {
         let second = try SyntheticIconPeer(response: image)
         let unused = try SyntheticIconPeer(response: image)
         let peers = [first, second, unused]
-        let servers = peers.map { peer in Task.detached { peer.serve() } }
+        let servers = peers.map { $0.start() }
         defer { for peer in peers { peer.finish() } }
         try await Task.sleep(for: .milliseconds(5_100))
         #expect(peers.allSatisfy { !$0.clientWasClaimed && $0.request.isEmpty })
@@ -403,7 +403,7 @@ struct WebsiteIconTransportTests {
             response: image, dropHandshake: handshake, responseByteLimit: handshake ? nil : 0,
             gracefulClose: graceful)
         let second = try SyntheticIconPeer(response: image)
-        let servers = [first, second].map { peer in Task.detached { peer.serve() } }
+        let servers = [first, second].map { $0.start() }
         let attempts = NetworkAttempts()
         let trusts = Counter()
         let addresses = [
@@ -451,7 +451,7 @@ struct WebsiteIconTransportTests {
             response: Data(repeating: 65, count: 80_000), responseByteLimit: 55_000)
         let third = try SyntheticIconPeer(response: try Self.image(type: .png))
         let peers = [first, second, third]
-        let servers = peers.map { peer in Task.detached { peer.serve() } }
+        let servers = peers.map { $0.start() }
         let attempts = NetworkAttempts()
         let addresses = ["8.8.8.8", "1.1.1.1", "9.9.9.9"].map { WebsiteIconAddress(numeric: $0)! }
         let transport = PinnedWebsiteIconTransport(
@@ -484,7 +484,7 @@ struct WebsiteIconTransportTests {
             status: failure == "redirect" ? 302 : 200)
         let second = try SyntheticIconPeer(response: image)
         let peers = [first, second]
-        let servers = peers.map { peer in Task.detached { peer.serve() } }
+        let servers = peers.map { $0.start() }
         let attempts = Counter()
         let addresses = [
             WebsiteIconAddress(numeric: "8.8.8.8")!, WebsiteIconAddress(numeric: "1.1.1.1")!,
@@ -526,7 +526,7 @@ struct WebsiteIconTransportTests {
             onRequest: { if cancelled { cancellation.cancel() } })
         let second = try SyntheticIconPeer(response: try Self.image(type: .png))
         let peers = [first, second]
-        let servers = peers.map { peer in Task.detached { peer.serve() } }
+        let servers = peers.map { $0.start() }
         let attempts = Counter()
         let addresses = [
             WebsiteIconAddress(numeric: "8.8.8.8")!, WebsiteIconAddress(numeric: "1.1.1.1")!,
@@ -561,7 +561,7 @@ struct WebsiteIconTransportTests {
             let peer = try SyntheticIconPeer(
                 response: try Self.image(type: .png), stall: true,
                 onRequest: { if cancelled { cancellation.cancel() } })
-            let server = Task.detached { peer.serve() }
+            let server = peer.start()
             let transport = PinnedWebsiteIconTransport(
                 timeout: cancelled ? .seconds(3) : .milliseconds(100),
                 resolve: { _, _ in [WebsiteIconAddress(numeric: "8.8.8.8")!] },
@@ -603,7 +603,7 @@ struct WebsiteIconTransportTests {
     @Test(arguments: [false, true])
     func deadlineBeforeConnectionLeavesFixtureOwnershipIntact(pressure: Bool) async throws {
         let peer = try SyntheticIconPeer(response: try Self.image(type: .png), stall: true)
-        let server = Task.detached { peer.serve() }
+        let server = peer.start()
         let work = (0..<(pressure ? 4 : 0)).map { _ in
             Task.detached(priority: .userInitiated) {
                 let end = ContinuousClock.now.advanced(by: .milliseconds(200))
@@ -668,7 +668,7 @@ struct WebsiteIconTransportTests {
 
     @Test func encryptedTLSStreamBudgetIncludesRecordOverhead() async throws {
         let peer = try SyntheticIconPeer(response: Data(repeating: 65, count: 250_000))
-        let server = Task.detached { peer.serve() }
+        let server = peer.start()
         let transport = PinnedWebsiteIconTransport(
             resolve: { _, _ in [WebsiteIconAddress(numeric: "8.8.8.8")!] },
             connect: { _, deadline, _ in try peer.claimClient(deadline: deadline) },
@@ -952,7 +952,19 @@ private final class SyntheticIconPeer: @unchecked Sendable {
         _ = setsockopt(
             server, SOL_SOCKET, SO_NOSIGPIPE, &enabled, socklen_t(MemoryLayout<Int32>.size))
     }
-    func serve() {
+    func start() -> Task<Void, Never> {
+        let queue = DispatchQueue(label: "capd.synthetic-icon-peer")
+        return Task {
+            await withCheckedContinuation { continuation in
+                queue.async {
+                    self.serve()
+                    continuation.resume()
+                }
+            }
+        }
+    }
+
+    private func serve() {
         defer { Darwin.close(server) }
         if dropHandshake {
             var bytes = [UInt8](repeating: 0, count: 2048)
