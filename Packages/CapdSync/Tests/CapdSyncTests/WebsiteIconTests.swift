@@ -6,6 +6,105 @@ import Testing
 
 @Suite("Independent website icon sync")
 struct WebsiteIconTests {
+    @Test func internationalAndEscapedASCIICapturesKeepTheirAuthoritativeIconRelationships() throws
+    {
+        let f = try IconFixture()
+        defer { f.clean() }
+        _ = try f.server.websiteIconBaseline()
+        let client = try f.client("a", device: f.a)
+        let peer = try f.client("b", device: f.b)
+        let captures = [
+            "https://bücher.de/one", "https://xn--bcher-kva.de/two", "https://%77ww.capd.dev/three",
+        ].map {
+            SharedCapture(source: CaptureSource(kind: .link, url: $0))
+        }
+        for capture in captures {
+            try client.enqueue(captureID: capture.id, mutation: .create(capture))
+        }
+        try client.push(to: f.transport(f.a))
+        let captureBaseline = try f.server.baseline()
+        let international = try #require(WebsiteIconOrigin(url: "https://bücher.de"))
+        let blob = try client.blobs.put(iconPNG)
+        for origin in [international, f.origin] {
+            try client.enqueueWebsiteIcon(
+                origin: origin, mutation: .upsert(WebsiteIconContent(blob: blob)))
+        }
+        try client.pushWebsiteIcons(to: f.transport(f.a))
+        #expect(try f.server.baseline() == captureBaseline)
+        try peer.pullWebsiteIcons(from: f.transport(f.b))
+        for origin in [international, f.origin] {
+            let record = try #require(try peer.websiteIcon(originID: origin.id))
+            #expect(record.origin.canonicalHTTPSOrigin == origin.canonicalHTTPSOrigin)
+            #expect(
+                try SyncDatabase.decode(WebsiteIconRecord.self, SyncDatabase.encode(record))
+                    == record)
+            #expect(try peer.blobs.read(record.content!.blob) == iconPNG)
+        }
+        try client.enqueue(captureID: captures[0].id, mutation: .delete)
+        try client.push(to: f.transport(f.a))
+        #expect(
+            try f.server.websiteIconBaseline().records.first { $0.id == international.id }?.deleted
+                == false)
+        try client.enqueue(captureID: captures[1].id, mutation: .delete)
+        try client.push(to: f.transport(f.a))
+        #expect(
+            try f.server.websiteIconBaseline().records.first { $0.id == international.id }?.deleted
+                == true)
+        try client.enqueue(
+            captureID: captures[2].id, mutation: .recapture)
+        try client.push(to: f.transport(f.a))
+        #expect(
+            try f.server.websiteIconBaseline().records.first { $0.id == f.origin.id }?.deleted
+                == false)
+        #expect(try client.pendingWebsiteIconOperations().isEmpty)
+    }
+
+    @Test(arguments: [
+        ("https://bücher.de/path?q=1#part", "https://xn--bcher-kva.de"),
+        ("https://XN--BCHER-KVA.DE:443/path", "https://xn--bcher-kva.de"),
+        ("https://WWW.例え.テスト:443/path", "https://www.xn--r8jz45g.xn--zckzah"),
+        ("https://faß.de", "https://xn--fa-hia.de"),
+        ("https://BÜCHER。DE:443/path", "https://xn--bcher-kva.de"),
+        ("https://bu\u{0308}cher.de", "https://xn--bcher-kva.de"),
+    ])
+    func internationalOriginsUseTheSameASCIIIdentity(input: String, canonical: String) throws {
+        let origin = try #require(WebsiteIconOrigin(url: input))
+        let ascii = try #require(WebsiteIconOrigin(url: canonical))
+        #expect(origin == ascii)
+        #expect(origin.canonicalHTTPSOrigin == canonical)
+        #expect(origin.host == String(canonical.dropFirst("https://".count)))
+        #expect(origin.id == ascii.id)
+        #expect(
+            try SyncDatabase.decode(WebsiteIconOrigin.self, SyncDatabase.encode(origin)) == origin)
+        #expect(throws: DecodingError.self) {
+            try SyncDatabase.decode(
+                WebsiteIconOrigin.self, Data("{\"canonicalHTTPSOrigin\":\"\(input)\"}".utf8))
+        }
+    }
+
+    @Test(arguments: [
+        "https://example%2ecom/path", "https://%65xample.com", "https://WWW.EXAMPLE.COM:443/path",
+    ])
+    func priorASCIIHostSpellingsKeepTheirCanonicalIdentity(_ input: String) throws {
+        let origin = try #require(WebsiteIconOrigin(url: input))
+        let expected = input.contains("WWW.") ? "https://www.example.com" : "https://example.com"
+        #expect(origin.canonicalHTTPSOrigin == expected)
+        #expect(origin == WebsiteIconOrigin(url: expected))
+        #expect(
+            try SyncDatabase.decode(WebsiteIconOrigin.self, SyncDatabase.encode(origin)) == origin)
+    }
+
+    @Test(arguments: [
+        "https://xn--.de", "https://xn--bcher-kva.local", "https://bücher.local",
+        "https://user@bücher.de", "https://bücher.de:444", "http://bücher.de",
+        "https://１２７.０.０.１", "https://[::1]", "https://b%C3%BCcher.de",
+        "https://%ZZ.de", "https://%FF.de", "https://bücher.de.", "https://bücher..de",
+        "https://bücher.ｌｏｃａｌ",
+    ])
+    func internationalHostsRetainOriginRefusals(_ input: String) {
+        #expect(WebsiteIconOrigin(url: input) == nil)
+    }
+
     @Test(arguments: [false, true], [false, true])
     func snapshotIconLifecycleUsesTheFinalCaptureSet(explicitIcons: Bool, replacement: Bool) throws
     {

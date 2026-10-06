@@ -9,8 +9,10 @@ public struct WebsiteIconOrigin: Codable, Equatable, Hashable, Sendable {
         guard let components = URLComponents(string: url),
             components.scheme?.lowercased() == "https", components.user == nil,
             components.password == nil, components.port == nil || components.port == 443,
-            let hostname = components.host?.lowercased(), hostname.utf8.count <= 253
+            let decodedHost = components.host, let encodedHost = components.encodedHost
         else { return nil }
+        let hostname = (encodedHost.contains("%") ? decodedHost : encodedHost).lowercased()
+        guard hostname.utf8.count <= 253 else { return nil }
         let labels = hostname.split(separator: ".", omittingEmptySubsequences: false)
         let reserved: Set<String> = [
             "localhost", "local", "internal", "home", "lan", "test", "invalid", "example",
