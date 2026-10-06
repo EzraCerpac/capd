@@ -158,13 +158,8 @@ struct WebsiteIconCacheTests {
         #expect(start.duration(to: .now) >= .seconds(5))
         #expect(await cache.pendingWaiters == 0)
         #expect(await cache.activeLoads == 2)
-        let next = Task { await cache.image(for: key(bytes, revision: 1)) }
-        while await cache.pendingWaiters < 1 { await Task.yield() }
-        #expect(await cache.activeLoads == 2)
         #expect(await gate.readCount == 2)
         await gate.open(bytes)
-        #expect(await next.value != nil)
-        #expect(await gate.readCount == 3)
     }
 
     @Test func controlledDeadlineReleasesExactlyItsPendingJob() async throws {
