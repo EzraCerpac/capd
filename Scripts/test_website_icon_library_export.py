@@ -3,6 +3,7 @@ import hashlib
 import json
 import sqlite3
 import struct
+import sys
 import unittest
 from unittest import mock
 import uuid
@@ -36,12 +37,11 @@ class WebsiteIconLibraryExportTests(unittest.TestCase):
     def tearDown(self):
         self.fixture.tearDown()
 
-    def add_icons(self):
+    def add_icons(self, origin="https://www.example.com", capture_url=None):
         self.db.executescript("""CREATE TABLE website_icon_jobs(id TEXT PRIMARY KEY,origin TEXT,content BLOB,revision INTEGER);
             CREATE TABLE capture_icon_origins(capture_id INTEGER PRIMARY KEY,origin_id TEXT);""")
-        origin = "https://www.example.com"
         self.db.execute("UPDATE captures SET kind='link',url=?,content_hash=? WHERE id=81",
-                        (origin + "/synthetic", hashlib.sha256(origin.encode()).hexdigest()))
+                        (capture_url or origin + "/synthetic", hashlib.sha256(origin.encode()).hexdigest()))
         data = png()
         fingerprint = hashlib.sha256(data).hexdigest()
         self.content = {"blob": {"digest": fingerprint, "byteCount": len(data)},
@@ -56,6 +56,100 @@ class WebsiteIconLibraryExportTests(unittest.TestCase):
         directory = self.source / "assets" / "website-icons"
         directory.mkdir()
         (directory / fingerprint).write_bytes(data)
+
+    @unittest.skipUnless(sys.platform == "darwin", "IDN parity uses macOS Foundation")
+    def test_origin_identity_matches_foundation(self):
+        cases = [
+            ("https://bücher.de/path?q=1#part", "https://xn--bcher-kva.de"),
+            ("https://XN--BCHER-KVA.DE:443/path", "https://xn--bcher-kva.de"),
+            ("https://WWW.例え.テスト:443/path", "https://www.xn--r8jz45g.xn--zckzah"),
+            ("https://faß.de", "https://xn--fa-hia.de"),
+            ("https://BÜCHER。DE:443/path", "https://xn--bcher-kva.de"),
+            ("https://bu\u0308cher.de", "https://xn--bcher-kva.de"),
+            ("https://ｅｘａｍｐｌｅ．ｃｏｍ", "https://example.com"),
+            ("https://example%2ecom/path", "https://example.com"),
+            ("https://%65xample.com", "https://example.com"),
+            ("https://WWW.EXAMPLE.COM:443/path", "https://www.example.com"),
+        ]
+        for url, expected in cases:
+            with self.subTest(url=url):
+                self.assertEqual(migration.website_origin(url), expected)
+                self.assertEqual(migration.website_origin(expected), expected)
+
+    @unittest.skipUnless(sys.platform == "darwin", "IDN parity uses macOS Foundation")
+    def test_origin_refusals_match_foundation(self):
+        for url in [
+            "https://xn--.de", "https://xn--bcher-kva.local", "https://bücher.local",
+            "https://user@bücher.de", "https://bücher.de:444", "http://bücher.de",
+            "https://１２７.０.０.１", "https://[::1]", "https://b%C3%BCcher.de",
+            "https://%ZZ.de", "https://%FF.de", "https://bücher.de.", "https://bücher..de",
+            "https://bücher.ｌｏｃａｌ", "https://2130706433", "https://0x7f.0.0.0x1",
+        ]:
+            with self.subTest(url=url):
+                self.assertIsNone(migration.website_origin(url))
+
+    @unittest.skipUnless(sys.platform == "darwin", "IDN parity uses macOS Foundation")
+    def test_idn_icon_export_preserves_canonical_record_and_verified_png(self):
+        origin = "https://xn--bcher-kva.de"
+        self.add_icons(origin, "https://bücher.de/synthetic")
+        before = migration.inventory(self.source)
+        result = snapshot.export_content(self.prepared(), self.output, self.binding)
+        self.assertEqual(result["websiteIcons"][0]["origin"]["canonicalHTTPSOrigin"], origin)
+        self.assertEqual(result["websiteIcons"][0]["content"], self.content)
+        self.assertEqual((self.output / "assets" / self.content["blob"]["digest"]).read_bytes(), png())
+        self.assertEqual(migration.inventory(self.source), before)
+
+    def test_escaped_ascii_live_icon_exports_with_unchanged_identity(self):
+        origin = "https://www.example.com"
+        self.add_icons(origin, "https://%77ww.example%2ecom/synthetic")
+        result = snapshot.export_content(self.prepared(), self.output, self.binding)
+        self.assertEqual(result["websiteIcons"][0]["origin"]["canonicalHTTPSOrigin"], origin)
+        self.assertEqual(result["websiteIcons"][0]["content"], self.content)
+
+    def test_non_mac_ascii_remains_standalone_and_idn_fails_closed(self):
+        with mock.patch.object(migration.sys, "platform", "linux"):
+            self.assertEqual(migration.website_origin("https://%65xample.com"), "https://example.com")
+            self.assertEqual(migration.website_origin("https://xn--fa-hia.de"), "https://xn--fa-hia.de")
+            self.assertIsNone(migration.website_origin("https://0x7f.0.0.0x1"))
+            self.assertIsNone(migration.website_origin("https://xn--.de"))
+            with self.assertRaisesRegex(migration.PreparationError, "requires macOS Foundation"):
+                migration.website_origin("https://faß.de")
+
+    def test_foundation_unavailable_refuses_without_mutating_source(self):
+        if sys.platform != "darwin":
+            self.skipTest("Foundation is a macOS exporter dependency")
+        import foundation_website_origin
+        self.add_icons()
+        prepared = self.prepared()
+        before = migration.inventory(prepared)
+        with mock.patch.object(foundation_website_origin, "host", side_effect=OSError("synthetic missing Foundation")):
+            with self.assertRaisesRegex(migration.PreparationError, "requires macOS Foundation"):
+                snapshot.export_content(prepared, self.output, self.binding)
+        self.assertFalse(self.output.exists())
+        self.assertEqual(migration.inventory(prepared), before)
+
+    def test_foundation_cache_is_bounded_and_long_urls_are_not_retained(self):
+        import foundation_website_origin
+        foundation_website_origin._cached_host.cache_clear()
+        url = "https://example.com"
+        long_url = url + "/" + "x" * 4096
+        with mock.patch.object(foundation_website_origin, "_host", return_value="example.com") as parse:
+            self.assertEqual(foundation_website_origin.host(url), "example.com")
+            foundation_website_origin.host(url)
+            foundation_website_origin.host(long_url)
+            foundation_website_origin.host(long_url)
+            self.assertEqual(parse.call_count, 3)
+            for index in range(300):
+                foundation_website_origin.host(f"https://site{index}.com")
+            self.assertEqual(foundation_website_origin._cached_host.cache_info().currsize, 256)
+        foundation_website_origin._cached_host.cache_clear()
+
+    def test_control_input_is_refused_before_foundation(self):
+        import foundation_website_origin
+        with mock.patch.object(foundation_website_origin, "host") as parse:
+            for url in ["https://example.com\0.other", "https://exam\tple.com", "https://example.com\n"]:
+                self.assertIsNone(migration.website_origin(url))
+            parse.assert_not_called()
 
     def prepared(self):
         snapshot.capture_quiesced(self.source, self.fixture.archive)

@@ -12,10 +12,11 @@ import os
 from pathlib import Path
 import shutil
 import sqlite3
+import sys
 import tempfile
 import unicodedata
 import uuid
-from urllib.parse import urlsplit
+from urllib.parse import unquote, urlsplit
 
 MARKER = ".capd-synthetic-fixture"
 MARKER_BYTES = b"synthetic-capd-library-v1\n"
@@ -424,12 +425,28 @@ def imported_capture(identity, payload, import_id):
 
 def website_origin(url):
     try:
-        value = urlsplit(url)
-        host = value.hostname.lower() if value.hostname else ""
+        if not isinstance(url, str) or any(ord(c) < 32 or ord(c) == 127 for c in url):
+            return None
+        if sys.platform == "darwin":
+            from foundation_website_origin import host as foundation_host
+            try:
+                host = foundation_host(url)
+            except (OSError, RuntimeError) as exc:
+                raise PreparationError("website icon export requires macOS Foundation host parsing") from exc
+            if host is None:
+                return None
+        else:
+            value = urlsplit(url)
+            if (value.scheme.lower() != "https" or value.username is not None
+                    or value.password is not None or value.port not in (None, 443)):
+                return None
+            host = unquote(value.hostname or "", errors="strict").lower()
+            if not host.isascii():
+                raise PreparationError("international website icon export requires macOS Foundation host parsing")
         labels = host.split(".")
-        if (value.scheme.lower() != "https" or value.username is not None
-                or value.password is not None or value.port not in (None, 443)
-                or len(host.encode()) > 253 or len(labels) < 2
+        numeric = all(label.isdigit() or (label.startswith("0x") and len(label) > 2
+                       and all(c in "0123456789abcdef" for c in label[2:])) for label in labels)
+        if (len(host.encode()) > 253 or len(labels) < 2 or numeric
                 or labels[-1] in {"localhost", "local", "internal", "home", "lan", "test",
                                    "invalid", "example", "onion", "arpa", "alt"}
                 or not any("a" <= c <= "z" for c in labels[-1])):
