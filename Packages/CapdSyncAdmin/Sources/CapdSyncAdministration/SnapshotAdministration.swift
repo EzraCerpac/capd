@@ -214,8 +214,12 @@ public final class SnapshotAdministration {
         let snapshot = try JSONDecoder().decode(ContentSnapshotImport.self, from: bytes)
         guard snapshot.targetBinding == binding else { throw AdministrationError.invalidAuthority }
         var assets: [String: BlobReference] = [:]
-        for capture in snapshot.captures {
-            guard let blob = capture.source.blob else { continue }
+        let icons = snapshot.websiteIcons ?? []
+        for icon in icons { try icon.validate() }
+        let iconAssets = Set(icons.compactMap(\.content?.blob.digest))
+        for blob in snapshot.captures.compactMap(\.source.blob)
+            + icons.compactMap(\.content?.blob)
+        {
             guard SafeFiles.isDigest(blob.digest), (0...8_388_608).contains(blob.byteCount),
                 assets[blob.digest] == nil || assets[blob.digest] == blob
             else { throw AdministrationError.invalidAsset }
@@ -226,7 +230,9 @@ public final class SnapshotAdministration {
             ordered.reduce(Int64(0), { $0 + Int64($1.byteCount) }) <= Self.maximumAssetBytes
         else { throw AdministrationError.invalidAsset }
         for blob in ordered {
-            _ = try verifiedAsset(assetDirectory.appendingPathComponent(blob.digest), blob: blob)
+            let data = try verifiedAsset(
+                assetDirectory.appendingPathComponent(blob.digest), blob: blob)
+            if iconAssets.contains(blob.digest) { try WebsiteIconPNG.validate(data) }
             let destination = blobDirectory.appendingPathComponent(blob.digest)
             if SafeFiles.exists(destination) { _ = try verifiedAsset(destination, blob: blob) }
         }

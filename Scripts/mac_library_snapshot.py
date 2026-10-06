@@ -2,6 +2,7 @@
 """Read-only acquisition and copy-only preparation of an explicitly authorized Mac library."""
 
 import contextlib
+import argparse
 import json
 import os
 from pathlib import Path
@@ -248,3 +249,83 @@ def import_copy(archive, authority, binding, import_id):
     migration.separate(Path(manifest["sourceRoot"]), authority)
     return migration._import_initial_mac(archive, manifest, authority, binding, import_id,
                                           "authority.sqlite", None, "blobs", verify_prepared)
+
+
+def export_content(archive, destination, binding):
+    archive = canonical(archive)
+    manifest = verify_prepared(archive)
+    source = archive / "payload"
+    destination = migration.separate(archive, destination)
+    if destination.exists():
+        raise migration.PreparationError("content export destination must be new")
+    binding = {key: str(uuid.UUID(binding[key])).upper() for key in ("libraryID", "serviceID")}
+    snapshot_id = str(uuid.UUID(manifest["snapshotID"])).upper()
+    references = {}
+    records = []
+    with contextlib.closing(migration.connect(source / DATABASE, readonly=True)) as db:
+        db.row_factory = sqlite3.Row
+        sidecars = db.execute("SELECT local_id,global_id,payload FROM sync_legacy_snapshot ORDER BY local_id").fetchall()
+        if not sidecars or {row[0] for row in sidecars} != {row[0] for row in db.execute("SELECT id FROM captures")}:
+            raise migration.PreparationError("all captures require verified preparatory identities")
+        for local_id, identity, raw in sidecars:
+            uuid.UUID(identity)
+            row = db.execute("SELECT * FROM captures WHERE id=?", (local_id,)).fetchone()
+            payload = json.loads(raw)
+            if payload != migration.legacy_snapshot({key: migration.sql_value(row[key]) for key in row.keys()}, source):
+                raise migration.PreparationError("legacy backfill differs from archived source")
+            records.append(migration.imported_capture(identity, payload, uuid.UUID(snapshot_id)))
+            if payload["blob"]:
+                blob = payload["blob"]
+                references[blob["digest"]] = (blob["byteCount"], source / "assets" / blob["path"])
+        icons = migration.local_website_icons(db, source)
+        for icon in icons or []:
+            blob = icon["content"]["blob"]
+            if blob["digest"] in references and references[blob["digest"]][0] != blob["byteCount"]:
+                raise migration.PreparationError("shared asset size differs")
+            references[blob["digest"]] = (blob["byteCount"], source / "assets" / "website-icons" / blob["digest"])
+        device = None
+        if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='sync_meta'").fetchone():
+            row = db.execute("SELECT device FROM sync_meta WHERE id=1").fetchone()
+            device = row[0] if row else None
+    device = str(uuid.UUID(device)).upper() if device else str(uuid.uuid5(uuid.UUID(snapshot_id), "content-source-device")).upper()
+    snapshot = {"version": 1 if icons is None else 2, "snapshotID": snapshot_id,
+                "targetBinding": binding, "sourceDeviceID": device,
+                "captures": sorted(records, key=lambda record: record["id"]),
+                "countPolicy": "maximumKnownLowerBound"}
+    if icons is not None:
+        snapshot["websiteIcons"] = icons
+    data = migration.encode(snapshot)
+    if len(data) > migration.MAXIMUM_SHARED_FRAME_BYTES or len(references) > 4_096 or sum(size for size, _ in references.values()) > 1_073_741_824:
+        raise migration.PreparationError("content export exceeds the shared import limit")
+    destination.mkdir(mode=0o700)
+    try:
+        assets = destination / "assets"
+        assets.mkdir(mode=0o700)
+        for fingerprint, (size, original) in references.items():
+            if original.stat().st_size != size or migration.digest(original) != fingerprint:
+                raise migration.PreparationError("exported asset differs from archived content")
+            with original.open("rb") as reader, (assets / fingerprint).open("xb") as writer:
+                shutil.copyfileobj(reader, writer)
+            if migration.digest(assets / fingerprint) != fingerprint:
+                raise migration.PreparationError("exported asset failed verification")
+        (destination / "snapshot.json").write_bytes(data)
+        (destination / "snapshot.json").chmod(0o600)
+        verify_prepared(archive)
+        return snapshot
+    except BaseException:
+        shutil.rmtree(destination)
+        raise
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Export a verified copied Mac library for reviewed host import.")
+    parser.add_argument("command", choices=["export-content"])
+    parser.add_argument("archive", type=Path)
+    parser.add_argument("--destination", type=Path, required=True)
+    parser.add_argument("--library-id", required=True)
+    parser.add_argument("--service-id", required=True)
+    args = parser.parse_args()
+    result = export_content(args.archive, args.destination,
+                            {"libraryID": args.library_id, "serviceID": args.service_id})
+    print(json.dumps({"snapshotID": result["snapshotID"], "captureCount": len(result["captures"]),
+                      "websiteIconCount": len(result.get("websiteIcons", []))}))

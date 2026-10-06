@@ -382,6 +382,72 @@ struct AdministrationTests {
         #expect(repeated.output == imported.output)
     }
 
+    @Test func reviewedIconAssetsAreVerifiedImportedAndRetainedOnExactRetry() throws {
+        let f = try Fixture()
+        defer { f.clean() }
+        let bytes = try administrationIconPNG()
+        let origin = try #require(WebsiteIconOrigin(url: "https://www.example.com"))
+        let icon = WebsiteIconRecord(
+            origin: origin, revision: 0,
+            content: WebsiteIconContent(blob: BlobReference(data: bytes)))
+        let capture = SharedCapture(
+            source: CaptureSource(kind: .link, url: "https://www.example.com/page"))
+        let snapshot = ContentSnapshotImport(
+            snapshotID: UUID(), targetBinding: f.binding, sourceDeviceID: UUID(),
+            captures: [capture], websiteIcons: [icon])
+        try Fixture.encode(snapshot).write(to: f.snapshot)
+        try bytes.write(to: f.assets.appendingPathComponent(icon.content!.blob.digest))
+        let (review, hash) = try f.prepare()
+        #expect(review.assets == [icon.content!.blob])
+        #expect(review.preview.websiteIcons?.first?.content == icon.content)
+        let receipt: ContentSnapshotImportReceipt
+        do {
+            receipt = try f.admin().importSnapshot(
+                snapshotURL: f.snapshot, assetDirectory: f.assets, reviewURL: f.review,
+                reviewedSHA256: hash)
+        }
+        #expect(receipt.websiteIcons == review.preview.websiteIcons)
+        #expect(receipt.websiteIconCursor == review.preview.websiteIconCursor)
+        #expect(
+            try Data(contentsOf: f.blobs.appendingPathComponent(icon.content!.blob.digest)) == bytes
+        )
+        #expect(
+            try f.admin().importSnapshot(
+                snapshotURL: f.snapshot, assetDirectory: f.assets, reviewURL: f.review,
+                reviewedSHA256: hash) == receipt)
+    }
+
+    @Test(arguments: ["missing", "corrupt", "invalid-png"])
+    func invalidIconAssetsRefuseBeforeAuthorityMutation(kind: String) throws {
+        let f = try Fixture()
+        defer { f.clean() }
+        let bytes =
+            kind == "invalid-png" ? Data("synthetic non-PNG".utf8) : try administrationIconPNG()
+        let origin = try #require(WebsiteIconOrigin(url: "https://www.example.com"))
+        let icon = WebsiteIconRecord(
+            origin: origin, revision: 0,
+            content: WebsiteIconContent(blob: BlobReference(data: bytes)))
+        let snapshot = ContentSnapshotImport(
+            snapshotID: UUID(), targetBinding: f.binding, sourceDeviceID: UUID(),
+            captures: [
+                SharedCapture(
+                    source: CaptureSource(kind: .link, url: "https://www.example.com/page"))
+            ], websiteIcons: [icon])
+        try Fixture.encode(snapshot).write(to: f.snapshot)
+        if kind != "missing" {
+            try (kind == "corrupt" ? Data("corrupt".utf8) : bytes).write(
+                to: f.assets.appendingPathComponent(icon.content!.blob.digest))
+        }
+        #expect(throws: (any Error).self) {
+            try f.admin().preview(snapshotURL: f.snapshot, assetDirectory: f.assets)
+        }
+        #expect(try f.server().baseline().captures.isEmpty)
+        #expect(try f.server().websiteIconBaseline().records.isEmpty)
+        #expect(
+            try FileManager.default.contentsOfDirectory(atPath: f.blobs.path) == ["library-owner"])
+        #expect(!FileManager.default.fileExists(atPath: f.review.path))
+    }
+
     private func run(_ executable: URL, _ arguments: [String]) throws -> (
         status: Int32, output: String
     ) {
@@ -466,4 +532,14 @@ private struct Fixture {
     }
     static func encode<T: Encodable>(_ value: T) throws -> Data { try JSONEncoder().encode(value) }
     func clean() { try? FileManager.default.removeItem(at: root) }
+}
+
+private func administrationIconPNG() throws -> Data {
+    let bytes = try #require(
+        Data(
+            base64Encoded:
+                "iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAYAAACqaXHeAAAAmElEQVR4nO3QMREAIBDAsFeCHOTgfwMZGeiQvddZ+9yfjQ7QGqADtAboAK0BOkBrgA7QGqADtAboAK0BOkBrgA7QGqADtAboAK0BOkBrgA7QGqADtAboAK0BOkBrgA7QGqADtAboAK0BOkBrgA7QGqADtAboAK0BOkBrgA7QGqADtAboAK0BOkBrgA7QGqADtAboAK0BOkB7np4RtCy3pxgAAAAASUVORK5CYII="
+        ))
+    try WebsiteIconPNG.validate(bytes)
+    return bytes
 }

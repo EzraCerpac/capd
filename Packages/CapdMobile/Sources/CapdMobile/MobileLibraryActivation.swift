@@ -144,10 +144,12 @@ public struct MobileLibraryActivation: Sendable {
             throw MobileActivationError.fileTooLarge
         }
         try bytes.write(to: transfer.appendingPathComponent("snapshot.json"), options: .atomic)
+        let iconAssets = Set((snapshot.websiteIcons ?? []).compactMap(\.content?.blob.digest))
         for blob in try Self.assets(snapshot) {
             let source = backup.appendingPathComponent("assets/\(blob.digest)")
             let data = try Self.readBounded(source, maximum: 8 * 1_024 * 1_024)
             guard BlobReference(data: data) == blob else { throw SyncError.invalidBlob }
+            if iconAssets.contains(blob.digest) { try WebsiteIconPNG.validate(data) }
             try data.write(
                 to: transfer.appendingPathComponent("assets/\(blob.digest)"), options: .atomic)
         }
@@ -296,6 +298,25 @@ public struct MobileLibraryActivation: Sendable {
             Set(receipt.items.map(\.sourceCaptureID)).count == receipt.items.count,
             Set(receipt.items.map(\.id)).count == receipt.items.count
         else { throw MobileActivationError.invalidHandoff }
+        if let sourceIcons = snapshot.websiteIcons {
+            guard let icons = preview.websiteIcons,
+                icons == receipt.websiteIcons,
+                let cursor = preview.websiteIconCursor, cursor >= 0,
+                cursor == receipt.websiteIconCursor,
+                Set(icons.map(\.id)).count == icons.count
+            else { throw MobileActivationError.invalidHandoff }
+            let records = Dictionary(uniqueKeysWithValues: icons.map { ($0.id, $0) })
+            for icon in icons { try icon.validate() }
+            for source in sourceIcons {
+                guard records[source.id]?.origin == source.origin else {
+                    throw MobileActivationError.invalidHandoff
+                }
+            }
+        } else {
+            guard preview.websiteIcons == nil, preview.websiteIconCursor == nil,
+                receipt.websiteIcons == nil, receipt.websiteIconCursor == nil
+            else { throw MobileActivationError.invalidHandoff }
+        }
         let mappings = Dictionary(
             uniqueKeysWithValues: receipt.items.map { ($0.sourceCaptureID, $0.canonicalCaptureID) })
         for item in preview.items {
@@ -359,11 +380,14 @@ public struct MobileLibraryActivation: Sendable {
                 let captures = try Data.fetchAll(db, sql: "SELECT payload FROM sync_visible")
                     .map { try JSONDecoder().decode(SharedCapture.self, from: $0) }
                 let device = try String.fetchOne(db, sql: "SELECT device FROM sync_meta WHERE id=1")
+                let icons = try SyncClient.exportWebsiteIcons(in: db, includeDeleted: true)
                 return device == preparation.snapshot.sourceDeviceID.uuidString
+                    && (preparation.snapshot.websiteIcons != nil || icons.isEmpty)
                     && ContentSnapshotImport(
                         snapshotID: preparation.snapshot.snapshotID,
                         targetBinding: preparation.enrollment.binding,
-                        sourceDeviceID: preparation.snapshot.sourceDeviceID, captures: captures)
+                        sourceDeviceID: preparation.snapshot.sourceDeviceID, captures: captures,
+                        websiteIcons: preparation.snapshot.websiteIcons == nil ? nil : icons)
                         == preparation.snapshot
             })
         else { throw MobileActivationError.stalePreparation }
@@ -406,11 +430,29 @@ public struct MobileLibraryActivation: Sendable {
             throw MobileActivationError.identityAlreadyUsed
         }
         if let handoff { try Self.verifyAuthority(baseline, handoff: handoff) }
+        let importedIcons: WebsiteIconBaseline?
+        if let handoff, handoff.receipt.websiteIcons != nil {
+            let icons = try await remote.importWebsiteIconBaseline(
+                expectedCaptureCursor: baseline.cursor, credential: readCredential)
+            guard icons.deviceSequences[enrollment.deviceID] == nil else {
+                throw MobileActivationError.identityAlreadyUsed
+            }
+            try Self.verifyWebsiteIcons(icons, handoff: handoff)
+            importedIcons = icons
+        } else {
+            importedIcons = nil
+        }
         let next = MobileLibraryConfiguration(generation: UUID(), enrollment: enrollment)
         let staged = try MobileStore(
             url: next.databaseURL(in: root), deviceID: enrollment.deviceID,
             binding: enrollment.binding)
         try await staged.pull(from: remote, credential: readCredential)
+        if let importedIcons {
+            try await Self.installWebsiteIcons(
+                importedIcons, captureAssets: baseline.captures.compactMap(\.source.blob),
+                databaseURL: next.databaseURL(in: root), enrollment: enrollment,
+                remote: remote, credential: readCredential)
+        }
         guard try staged.pending().isEmpty else { throw MobileActivationError.identityAlreadyUsed }
         // Recheck authoritative device history and imported content immediately before publication.
         let verified = try await remote.importBaseline(
@@ -420,12 +462,36 @@ public struct MobileLibraryActivation: Sendable {
             throw MobileActivationError.identityAlreadyUsed
         }
         if let handoff { try Self.verifyAuthority(verified, handoff: handoff) }
+        let verifiedIcons: WebsiteIconBaseline?
+        if let handoff, handoff.receipt.websiteIcons != nil {
+            let icons = try await remote.importWebsiteIconBaseline(
+                expectedCaptureCursor: verified.cursor, credential: readCredential)
+            guard icons.deviceSequences[enrollment.deviceID] == nil else {
+                throw MobileActivationError.identityAlreadyUsed
+            }
+            try Self.verifyWebsiteIcons(icons, handoff: handoff)
+            verifiedIcons = icons
+        } else {
+            verifiedIcons = nil
+        }
         let stagedReader = try Self.reader(next.databaseURL(in: root))
         let stagedCursor = try await stagedReader.read { db in
             try Int64.fetchOne(db, sql: "SELECT cursor FROM sync_meta WHERE id=1")
         }
         guard let stagedCursor, stagedCursor >= verified.cursor else {
             throw SyncError.invalidCursor
+        }
+        if let verifiedIcons {
+            let installed = try await stagedReader.read { db in
+                WebsiteIconBaseline(
+                    cursor: try Int64.fetchOne(db, sql: "SELECT cursor FROM sync_website_icon_meta")
+                        ?? -1,
+                    captureCursor: stagedCursor,
+                    records: try SyncClient.exportWebsiteIcons(in: db, includeDeleted: true),
+                    deviceSequences: [:])
+            }
+            guard installed.cursor >= verifiedIcons.cursor else { throw SyncError.invalidCursor }
+            try Self.verifyWebsiteIconRecords(installed.records, retaining: verifiedIcons.records)
         }
         if let handoff {
             let visible = try staged.search()
@@ -519,6 +585,93 @@ public struct MobileLibraryActivation: Sendable {
         }
     }
 
+    private static func installWebsiteIcons(
+        _ baseline: WebsiteIconBaseline, captureAssets: [BlobReference], databaseURL: URL,
+        enrollment: SyncEnrollment, remote: any AsyncSyncTransport,
+        credential: @escaping @Sendable () throws -> String
+    ) async throws {
+        guard baseline.records.count <= 4_096, baseline.records.count == baseline.totalIconCount,
+            Set(baseline.records.map(\.id)).count == baseline.records.count
+        else { throw SyncHTTPError.resourceLimit }
+        var references: [String: BlobReference] = [:]
+        for reference in captureAssets + baseline.records.compactMap(\.content?.blob) {
+            guard references[reference.digest] == nil || references[reference.digest] == reference
+            else { throw SyncError.invalidBlob }
+            references[reference.digest] = reference
+        }
+        guard references.count <= 4_096,
+            references.values.reduce(Int64(0), { $0 + Int64($1.byteCount) }) <= 1_073_741_824
+        else { throw SyncHTTPError.resourceLimit }
+        let directory = FileManager.default.temporaryDirectory.resolvingSymlinksInPath()
+            .appendingPathComponent("capd-mobile-import-icons-\(UUID())", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let staging = try BlobStore(directory: directory)
+        var iconAssets: [String: BlobReference] = [:]
+        for record in baseline.records {
+            try record.validate()
+            guard let reference = record.content?.blob else { continue }
+            if iconAssets[reference.digest] != nil { continue }
+            try Task.checkCancellation()
+            let bytes = try await remote.importWebsiteIconData(reference, credential: credential)
+            try WebsiteIconPNG.validate(bytes)
+            try staging.receive(reference, offset: 0, chunk: bytes, final: true)
+            iconAssets[reference.digest] = reference
+        }
+        guard
+            try await remote.importWebsiteIconBaseline(
+                expectedCaptureCursor: baseline.captureCursor, credential: credential) == baseline
+        else { throw SyncError.invalidCursor }
+        try Task.checkCancellation()
+        let assets = try BlobStore(
+            directory: databaseURL.deletingLastPathComponent().appendingPathComponent("assets"),
+            binding: enrollment.binding)
+        var added: [URL] = []
+        do {
+            for reference in iconAssets.values.sorted(by: { $0.digest < $1.digest }) {
+                let destination = assets.directory.appendingPathComponent(reference.digest)
+                let existed = FileManager.default.fileExists(atPath: destination.path)
+                try assets.receive(
+                    reference, offset: 0, chunk: staging.read(reference), final: true)
+                if !existed { added.append(destination) }
+            }
+            let writer = try DatabaseQueue(path: databaseURL.path)
+            try await writer.write { db in
+                try SyncClient.seedWebsiteIconBaseline(
+                    in: db, baseline: baseline, binding: enrollment.binding,
+                    deviceID: enrollment.deviceID, blobs: assets)
+            }
+        } catch {
+            for file in added { try? FileManager.default.removeItem(at: file) }
+            throw error
+        }
+    }
+
+    private static func verifyWebsiteIcons(
+        _ baseline: WebsiteIconBaseline, handoff: MobileReviewedImport
+    ) throws {
+        guard let cursor = handoff.receipt.websiteIconCursor,
+            let records = handoff.receipt.websiteIcons, baseline.cursor >= cursor
+        else { throw MobileActivationError.missingImport }
+        try verifyWebsiteIconRecords(baseline.records, retaining: records)
+    }
+
+    private static func verifyWebsiteIconRecords(
+        _ current: [WebsiteIconRecord], retaining expected: [WebsiteIconRecord]
+    ) throws {
+        guard Set(current.map(\.id)).count == current.count else {
+            throw MobileActivationError.missingImport
+        }
+        let records = Dictionary(uniqueKeysWithValues: current.map { ($0.id, $0) })
+        for previous in expected {
+            guard let record = records[previous.id], record.origin == previous.origin,
+                record.revision >= previous.revision,
+                record.revision != previous.revision || record == previous
+            else { throw MobileActivationError.missingImport }
+            try record.validate()
+        }
+    }
+
     private static func reader(_ url: URL) throws -> DatabaseQueue {
         _ = try readBounded(url, maximum: 1_073_741_824, contents: false)
         var config = Configuration()
@@ -537,7 +690,8 @@ public struct MobileLibraryActivation: Sendable {
                 sql:
                     "SELECT name FROM sqlite_master WHERE type='table' AND (name LIKE 'sync_%' OR name='mobile_captures' OR name='grdb_migrations') ORDER BY name"
             )
-            for name in names {
+            let unusedIconTables = try unusedWebsiteIconTables(db, names: Set(names))
+            for name in names where !unusedIconTables.contains(name) {
                 hash.update(data: Data([0xf0]))
                 hashValue(.string(name), into: &hash)
                 let quoted = quotedIdentifier(name)
@@ -571,6 +725,51 @@ public struct MobileLibraryActivation: Sendable {
             }
             return hash.finalize().map { String(format: "%02x", $0) }.joined()
         }
+    }
+
+    private static func unusedWebsiteIconTables(_ db: Database, names: Set<String>) throws
+        -> Set<String>
+    {
+        let tables: Set<String> = [
+            "sync_website_icon_meta", "sync_website_icon_records", "sync_website_icon_visible",
+            "sync_website_icon_receipts", "sync_website_icon_devices", "sync_website_icon_feed",
+            "sync_website_icon_outbox", "sync_website_icon_observed",
+        ]
+        guard tables.isSubset(of: names),
+            Set(try db.columns(in: "sync_website_icon_meta").map(\.name))
+                == [
+                    "id", "sequence", "cursor", "floor", "observed_sequence",
+                    "presentation_revision",
+                ]
+        else { return [] }
+        let metadata = try Row.fetchAll(
+            db,
+            sql: """
+                SELECT id,sequence,cursor,floor,observed_sequence,presentation_revision
+                FROM sync_website_icon_meta LIMIT 2
+                """)
+        guard metadata.count == 1, (metadata[0]["id"] as Int64?) == 1,
+            ["sequence", "cursor", "floor", "observed_sequence", "presentation_revision"]
+                .allSatisfy({ (metadata[0][$0] as Int64?) == 0 })
+        else { return [] }
+        var known = tables
+        if names.contains("sync_website_icon_origins") {
+            known.insert("sync_website_icon_origins")
+        }
+        for name in known where name != "sync_website_icon_meta" {
+            if try Bool.fetchOne(db, sql: "SELECT 1 FROM \(quotedIdentifier(name)) LIMIT 1") == true
+            {
+                return []
+            }
+        }
+        if try db.tableExists("sqlite_sequence") {
+            for row in try Row.fetchAll(db, sql: "SELECT name,seq FROM sqlite_sequence") {
+                let name: String = row["name"]
+                if known.contains(name), (row["seq"] as Int64?) != 0 { return [] }
+            }
+        }
+        // An unused, lazy icon lane must not strand an older preparation or credential journal.
+        return known
     }
 
     private static func quotedIdentifier(_ value: String) -> String {
@@ -625,7 +824,11 @@ public struct MobileLibraryActivation: Sendable {
 
     private static func assets(_ snapshot: ContentSnapshotImport) throws -> [BlobReference] {
         var unique: [String: BlobReference] = [:]
-        for blob in snapshot.captures.compactMap(\.source.blob) {
+        let icons = snapshot.websiteIcons ?? []
+        for icon in icons { try icon.validate() }
+        for blob in snapshot.captures.compactMap(\.source.blob)
+            + icons.compactMap(\.content?.blob)
+        {
             guard unique[blob.digest] == nil || unique[blob.digest] == blob else {
                 throw SyncError.invalidBlob
             }
