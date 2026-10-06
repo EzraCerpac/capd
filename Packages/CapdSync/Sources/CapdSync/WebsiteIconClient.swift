@@ -163,6 +163,46 @@ extension SyncClient {
 
     public static func seedWebsiteIconBaseline(
         in db: Database, baseline: WebsiteIconBaseline, binding: SyncLibraryBinding, deviceID: UUID,
+        blobs: BlobStore, deferredRecords: [WebsiteIconRecord] = []
+    ) throws {
+        guard db.isInsideTransaction else { throw SyncTransactionError.requiresTransaction }
+        try validateCompleteWebsiteIconBaseline(baseline)
+        guard deferredRecords.count <= 4_096,
+            Set(deferredRecords.map(\.id)).count == deferredRecords.count
+        else { throw SyncHTTPError.resourceLimit }
+        for record in deferredRecords {
+            try record.validate()
+            guard !record.deleted, let content = record.content else {
+                throw SyncError.invalidOperation
+            }
+            try WebsiteIconPNG.validate(blobs.read(content.blob))
+        }
+        let acceptedIDs = Set(baseline.records.map(\.id))
+        let missing = deferredRecords.filter { !acceptedIDs.contains($0.id) }
+        guard baseline.records.count + missing.count <= 4_096,
+            try SyncDatabase.encode(baseline.records + missing).count <= SyncHTTPHandler
+                .maximumBodyBytes / 2
+        else { throw SyncHTTPError.resourceLimit }
+        if !missing.isEmpty {
+            guard (baseline.deviceSequences[deviceID] ?? 0) == 0 else {
+                throw SyncError.wrongDevice
+            }
+        }
+        try db.inSavepoint {
+            try installWebsiteIconBaseline(
+                in: db, baseline: baseline, binding: binding, deviceID: deviceID, blobs: blobs)
+            for record in missing {
+                _ = try enqueueWebsiteIcon(
+                    in: db, origin: record.origin, mutation: .upsert(record.content!),
+                    baseRevision: 0, deviceID: deviceID, blobs: blobs, rebuild: false)
+            }
+            try WebsiteIconDatabase.rebuild(db)
+            return .commit
+        }
+    }
+
+    private static func installWebsiteIconBaseline(
+        in db: Database, baseline: WebsiteIconBaseline, binding: SyncLibraryBinding, deviceID: UUID,
         blobs: BlobStore
     ) throws {
         guard db.isInsideTransaction else { throw SyncTransactionError.requiresTransaction }
@@ -199,7 +239,6 @@ extension SyncClient {
                 baseline.cursor, baseline.deviceSequences[deviceID] ?? 0,
                 baseline.deviceSequences[deviceID] ?? 0,
             ])
-        try WebsiteIconDatabase.rebuild(db)
     }
 
     static func validateCompleteWebsiteIconBaseline(_ baseline: WebsiteIconBaseline) throws {

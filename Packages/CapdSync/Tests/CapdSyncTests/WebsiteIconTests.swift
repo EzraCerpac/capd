@@ -6,6 +6,122 @@ import Testing
 
 @Suite("Independent website icon sync")
 struct WebsiteIconTests {
+    @Test(arguments: ["absent", "live", "deleted"])
+    func capableEnrollmentDefersOnlyMissingIcons(target: String) throws {
+        let f = try IconFixture()
+        defer { f.clean() }
+        let first = f.capture()
+        let otherOrigin = WebsiteIconOrigin(url: "https://other.capd.dev")!
+        let other = SharedCapture(
+            source: CaptureSource(kind: .link, url: otherOrigin.canonicalHTTPSOrigin + "/page"))
+        for (index, capture) in [first, other].enumerated() {
+            _ = try f.server.apply(
+                SyncOperation(
+                    deviceID: f.b, sequence: Int64(index + 1), captureID: capture.id,
+                    baseRevision: 0, mutation: .create(capture)))
+        }
+        let blob = BlobReference(data: iconPNG)
+        try f.server.uploadWebsiteIcon(blob, offset: 0, chunk: iconPNG, final: true)
+        if target != "absent" {
+            _ = try f.server.applyWebsiteIcon(
+                WebsiteIconOperation(
+                    deviceID: f.b, sequence: 1, origin: f.origin, baseRevision: 0,
+                    mutation: .upsert(
+                        WebsiteIconContent(blob: blob, fetchedAt: Date(timeIntervalSince1970: 456)))
+                ))
+            if target == "deleted" {
+                _ = try f.server.applyWebsiteIcon(
+                    WebsiteIconOperation(
+                        deviceID: f.b, sequence: 2, origin: f.origin, baseRevision: 1,
+                        mutation: .tombstone))
+            }
+        }
+        let baseline = try f.server.websiteIconBaseline()
+        let captureAuthority = try f.server.baseline()
+        let client = try f.client("a", device: f.a)
+        try client.pull(from: f.transport(f.a))
+        _ = try client.blobs.put(iconPNG)
+        let deferred = [f.origin, otherOrigin].map {
+            WebsiteIconRecord(
+                origin: $0, revision: 99,
+                content: WebsiteIconContent(blob: blob, fetchedAt: Date(timeIntervalSince1970: 123))
+            )
+        }
+        try client.writer.write {
+            try SyncClient.seedWebsiteIconBaseline(
+                in: $0, baseline: baseline, binding: f.binding, deviceID: f.a, blobs: client.blobs,
+                deferredRecords: deferred)
+        }
+        let pending = try client.pendingWebsiteIconOperations()
+        #expect(pending.count == (target == "absent" ? 2 : 1))
+        #expect(pending.map(\.sequence) == Array(1...Int64(pending.count)))
+        #expect(pending.allSatisfy { $0.baseRevision == 0 })
+        #expect(try client.writer.read { try WebsiteIconDatabase.records($0) } == baseline.records)
+        #expect(try client.websiteIconCursor() == baseline.cursor)
+        let reopened = try f.client("a", device: f.a)
+        #expect(try reopened.pendingWebsiteIconOperations() == pending)
+        let receipt = try f.transport(f.a).applyWebsiteIcon(pending[0])
+        try reopened.pushWebsiteIcons(to: f.transport(f.a))
+        #expect(try f.transport(f.a).applyWebsiteIcon(pending[0]) == receipt)
+        #expect(try reopened.pendingWebsiteIconOperations().isEmpty)
+        for original in baseline.records {
+            #expect(
+                try f.server.websiteIconBaseline().records.first { $0.id == original.id }
+                    == original)
+        }
+        #expect(try f.server.baseline() == captureAuthority)
+        #expect(try reopened.pendingOperations().isEmpty)
+    }
+
+    @Test(arguments: ["blob", "cursor", "device", "late-write", "count"])
+    func capableEnrollmentPendingFailureRollsBackTheAcceptedBaseline(kind: String) throws {
+        let f = try IconFixture()
+        defer { f.clean() }
+        let client = try f.client("a", device: f.a)
+        let blob = try client.blobs.put(iconPNG)
+        let target = WebsiteIconRecord(
+            origin: f.origin, revision: 1, content: WebsiteIconContent(blob: blob))
+        let targetRecords =
+            kind == "count"
+            ? (0..<4_096).map {
+                WebsiteIconRecord(
+                    origin: WebsiteIconOrigin(url: "https://site\($0).capd.dev")!,
+                    revision: Int64($0 + 1), content: target.content)
+            } : [target]
+        let baseline = WebsiteIconBaseline(
+            cursor: kind == "count" ? 4_096 : 1, captureCursor: kind == "cursor" ? 1 : 0,
+            records: targetRecords,
+            deviceSequences: [:])
+        let missing = ["https://second.capd.dev", "https://third.capd.dev"].map {
+            WebsiteIconRecord(
+                origin: WebsiteIconOrigin(url: $0)!, revision: 0,
+                content: WebsiteIconContent(
+                    blob: kind == "blob" ? BlobReference(data: Data("absent".utf8)) : blob))
+        }
+        if kind == "late-write" {
+            try client.writer.write { db in
+                try WebsiteIconDatabase.prepare(db)
+                try db.execute(
+                    sql:
+                        "CREATE TRIGGER refuse_second_pending BEFORE INSERT ON sync_website_icon_outbox WHEN NEW.sequence=2 BEGIN SELECT RAISE(ABORT,'synthetic pending refusal'); END"
+                )
+            }
+        }
+        try client.writer.write { (db: Database) throws -> Void in
+            #expect(throws: (any Error).self) {
+                try SyncClient.seedWebsiteIconBaseline(
+                    in: db, baseline: baseline, binding: f.binding,
+                    deviceID: kind == "device" ? f.b : f.a, blobs: client.blobs,
+                    deferredRecords: missing)
+            }
+            #expect(try WebsiteIconDatabase.records(db).isEmpty)
+            #expect(try WebsiteIconDatabase.operations(db).isEmpty)
+        }
+        #expect(try client.websiteIconCursor() == 0)
+        #expect(try client.websiteIconRevision() == 0)
+        #expect(try client.pendingOperations().isEmpty)
+    }
+
     @Test(arguments: [false, true])
     func deferredBootstrapSurvivesLegacyHostReopenAndExactDelivery(targetExists: Bool) throws {
         let f = try IconFixture()
