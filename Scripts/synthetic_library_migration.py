@@ -425,7 +425,7 @@ def imported_capture(identity, payload, import_id):
 
 def website_origin(url):
     try:
-        if not isinstance(url, str) or any(ord(c) < 32 or ord(c) == 127 for c in url):
+        if not isinstance(url, str) or "\0" in url:
             return None
         if sys.platform == "darwin":
             from foundation_website_origin import host as foundation_host
@@ -436,6 +436,8 @@ def website_origin(url):
             if host is None:
                 return None
         else:
+            if any(ord(c) < 32 or ord(c) == 127 for c in url):
+                return None
             value = urlsplit(url)
             if (value.scheme.lower() != "https" or value.username is not None
                     or value.password is not None or value.port not in (None, 443)):

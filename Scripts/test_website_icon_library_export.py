@@ -91,7 +91,7 @@ class WebsiteIconLibraryExportTests(unittest.TestCase):
     @unittest.skipUnless(sys.platform == "darwin", "IDN parity uses macOS Foundation")
     def test_idn_icon_export_preserves_canonical_record_and_verified_png(self):
         origin = "https://xn--bcher-kva.de"
-        self.add_icons(origin, "https://bücher.de/synthetic")
+        self.add_icons(origin, "https://bücher.de/synthetic\tpath?q=one\ntwo")
         before = migration.inventory(self.source)
         result = snapshot.export_content(self.prepared(), self.output, self.binding)
         self.assertEqual(result["websiteIcons"][0]["origin"]["canonicalHTTPSOrigin"], origin)
@@ -144,10 +144,23 @@ class WebsiteIconLibraryExportTests(unittest.TestCase):
             self.assertEqual(foundation_website_origin._cached_host.cache_info().currsize, 256)
         foundation_website_origin._cached_host.cache_clear()
 
-    def test_control_input_is_refused_before_foundation(self):
+    @unittest.skipUnless(sys.platform == "darwin", "URL parity uses macOS Foundation")
+    def test_path_query_controls_preserve_foundation_origin(self):
+        for url, expected in [
+            ("https://example.com/path\npart", "https://example.com"),
+            ("https://example.com/?q=one\ttwo", "https://example.com"),
+            ("https://bücher.de/path\tpart?q=one\ntwo", "https://xn--bcher-kva.de"),
+        ]:
+            with self.subTest(url=url):
+                self.assertEqual(migration.website_origin(url), expected)
+        for url in ["https://exam\tple.com/path", "https://example.com\n/path"]:
+            with self.subTest(url=url):
+                self.assertIsNone(migration.website_origin(url))
+
+    def test_nul_input_is_refused_before_foundation(self):
         import foundation_website_origin
         with mock.patch.object(foundation_website_origin, "host") as parse:
-            for url in ["https://example.com\0.other", "https://exam\tple.com", "https://example.com\n"]:
+            for url in ["https://example.com\0.other", "https://example.com/path\0suffix"]:
                 self.assertIsNone(migration.website_origin(url))
             parse.assert_not_called()
 
