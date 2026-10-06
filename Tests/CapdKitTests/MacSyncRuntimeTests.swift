@@ -235,6 +235,10 @@ struct MacSyncRuntimeTests {
         }
         #expect(try encoder.encode(f.server.baseline()).count > SyncHTTPHandler.maximumBodyBytes)
         let prepared = try await f.activate()
+        let preparedProbes = await f.wire.summaryProbeCounts()
+        #expect(preparedProbes.captureSummary == 1)
+        #expect(
+            preparedProbes.total == preparedProbes.captureSummary + preparedProbes.iconCapability)
         #expect(try SearchService(store: prepared.store).totalCaptureCount() == 24)
         #expect(try prepared.store.syncClient?.cursor() == 1)
         let empty = try await MacLibrarySession.activate(
@@ -243,7 +247,9 @@ struct MacSyncRuntimeTests {
         #expect(await empty.runtime!.sync().phase == .idle)
         #expect(try SearchService(store: empty.store).totalCaptureCount() == 24)
         #expect(await f.wire.wholeBaselines == 0)
-        #expect(await f.wire.summaryProbes == 2)
+        let finalProbes = await f.wire.summaryProbeCounts()
+        #expect(finalProbes.captureSummary == 2)
+        #expect(finalProbes.total == finalProbes.captureSummary + finalProbes.iconCapability)
     }
 
     @Test func discoveryReadsBoundProjectionWithoutRequestsOrOutboxWrites() async throws {
@@ -756,11 +762,17 @@ private actor RuntimeWire: AsyncSyncTransport {
     var applies = 0
     var applyBodies: [Data] = []
     var wholeBaselines = 0
-    var summaryProbes = 0
+    var summaryProbeCount = 0
+    var captureSummaryProbes = 0
+    var websiteIconCapabilityProbes = 0
+    private var capabilityProbeAwaitingAction = false
     init(binding: SyncLibraryBinding, deviceID: UUID, handler: SyncHTTPHandler) {
         self.binding = binding
         self.deviceID = deviceID
         self.handler = handler
+    }
+    func summaryProbeCounts() -> (total: Int, captureSummary: Int, iconCapability: Int) {
+        (summaryProbeCount, captureSummaryProbes, websiteIconCapabilityProbes)
     }
     func releaseGate() async {
         fault = .none
@@ -785,8 +797,21 @@ private actor RuntimeWire: AsyncSyncTransport {
         }
         let reply = handler.handle(request)
         let envelope = try JSONDecoder().decode(SyncHTTPEnvelope.self, from: request.body)
+        if capabilityProbeAwaitingAction {
+            switch envelope.action {
+            case .applyWebsiteIcon, .websiteIconChanges, .websiteIconBaselinePage,
+                .uploadWebsiteIcon, .downloadWebsiteIcon:
+                websiteIconCapabilityProbes += 1
+            default:
+                captureSummaryProbes += 1
+            }
+            capabilityProbeAwaitingAction = false
+        }
         if case .baseline = envelope.action { wholeBaselines += 1 }
-        if case .baselinePage(_, 0, _) = envelope.action { summaryProbes += 1 }
+        if case .baselinePage(_, 0, _) = envelope.action {
+            summaryProbeCount += 1
+            capabilityProbeAwaitingAction = true
+        }
         if fault == .missingProcessing, case .baselinePage = envelope.action {
             let decoded = try JSONDecoder().decode(SyncHTTPReply.self, from: reply.body)
             return SyncHTTPResponse(
