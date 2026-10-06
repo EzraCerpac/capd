@@ -103,12 +103,16 @@ extension Store {
         let enumerator = fileManager.enumerator(
             at: root, includingPropertiesForKeys: Array(keys))
         while let entry = enumerator?.nextObject() as? URL {
+            if entry.path == root.appendingPathComponent("website-icons").path {
+                enumerator?.skipDescendants()
+                continue
+            }
             let url = entry.resolvingSymlinksInPath()
             guard let values = try? url.resourceValues(forKeys: keys),
                 values.isRegularFile == true
             else { continue }
             let relative = String(url.path.dropFirst(root.path.count + 1))
-            if relative.hasPrefix("sync/") { continue }
+            if relative.hasPrefix("sync/") || relative.hasPrefix("website-icons/") { continue }
             guard !referenced.contains(relative) else { continue }
             if let modified = values.contentModificationDate,
                 now.timeIntervalSince(modified) < grace

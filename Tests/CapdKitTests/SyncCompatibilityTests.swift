@@ -37,7 +37,10 @@ struct SyncCompatibilityTests {
                 let applied = try Migrations.migrator.appliedMigrations(db)
                 let journal = try String.fetchOne(db, sql: "PRAGMA journal_mode")
                 let columns = try db.columns(in: Schema.capturesFTS).map(\.name)
-                #expect(applied == ["001", "002", "003", "004", "005", "006"])
+                #expect(applied == ["001", "002", "003", "004", "005", "006", "007"])
+                #expect(try !Store.websiteIconsEnabled(in: db))
+                #expect(try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM website_icon_jobs") == 0)
+                #expect(try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM capture_icon_origins") == 0)
                 #expect(journal == "wal")
                 #expect(columns == Schema.ranking.map(\.column))
             }

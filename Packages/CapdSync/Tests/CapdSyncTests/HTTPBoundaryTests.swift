@@ -983,7 +983,7 @@ struct HTTPBoundaryTests {
                     method: "POST", path: valid.path, headers: valid.headers,
                     body: Data("bad A secret payload".utf8)), 400, .malformedRequest
             ),
-            (try f.request(.baseline, version: 5), 400, .unsupportedVersion),
+            (try f.request(.baseline, version: 6), 400, .unsupportedVersion),
             (
                 try f.request(
                     .upload(
@@ -1055,7 +1055,7 @@ struct HTTPBoundaryTests {
                 version: 1, principal: principal,
                 result: .page(FeedPage(cursor: 1, changes: [change()])),
                 metadataContractVersion: 1, generatedProcessingContractVersion: 1,
-                extractionQualityContractVersion: 1)
+                extractionQualityContractVersion: 1, websiteIconContractVersion: 1)
         ).count
         capture.source.selection = String(
             repeating: "x", count: SyncHTTPHandler.maximumBodyBytes - overhead)
@@ -1162,7 +1162,7 @@ struct HTTPBoundaryTests {
                 result: .baseline(
                     Baseline(cursor: 10, captures: [capture], deviceSequences: sequences)),
                 metadataContractVersion: 1, generatedProcessingContractVersion: 1,
-                extractionQualityContractVersion: 1)
+                extractionQualityContractVersion: 1, websiteIconContractVersion: 1)
         ).count
         capture.source.selection = String(
             repeating: "x", count: SyncHTTPHandler.maximumBodyBytes - overhead)

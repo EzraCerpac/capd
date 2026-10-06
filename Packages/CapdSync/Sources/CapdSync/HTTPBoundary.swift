@@ -51,6 +51,12 @@ public enum SyncHTTPAction: Codable, Sendable {
     case baselinePage(after: UUID?, limit: Int, expectedCursor: Int64?)
     case upload(BlobReference, offset: Int, chunk: Data, final: Bool)
     case download(BlobReference)
+    case applyWebsiteIcon(WebsiteIconOperation)
+    case websiteIconChanges(cursor: Int64, limit: Int)
+    case websiteIconBaselinePage(
+        after: String?, limit: Int, expectedCursor: Int64?, expectedCaptureCursor: Int64?)
+    case uploadWebsiteIcon(BlobReference, offset: Int, chunk: Data, final: Bool)
+    case downloadWebsiteIcon(BlobReference)
 }
 
 public struct SyncHTTPEnvelope: Codable, Sendable {
@@ -80,6 +86,9 @@ public enum SyncHTTPError: String, Error, Codable, Sendable {
 
 public enum SyncHTTPResult: Codable, Sendable {
     case receipt(SyncReceipt)
+    case websiteIconReceipt(WebsiteIconReceipt)
+    case websiteIconPage(WebsiteIconFeedPage)
+    case websiteIconBaseline(WebsiteIconBaseline)
     case page(FeedPage)
     case baseline(Baseline)
     case data(Data)
@@ -95,11 +104,12 @@ public struct SyncHTTPReply: Codable, Sendable {
     public let metadataContractVersion: Int?
     public let generatedProcessingContractVersion: Int?
     public let extractionQualityContractVersion: Int?
+    public let websiteIconContractVersion: Int?
 
     public init(
         version: Int, principal: SyncPrincipal?, result: SyncHTTPResult,
         metadataContractVersion: Int? = nil, generatedProcessingContractVersion: Int? = nil,
-        extractionQualityContractVersion: Int? = nil
+        extractionQualityContractVersion: Int? = nil, websiteIconContractVersion: Int? = nil
     ) {
         self.version = version
         self.principal = principal
@@ -107,6 +117,7 @@ public struct SyncHTTPReply: Codable, Sendable {
         self.metadataContractVersion = metadataContractVersion
         self.generatedProcessingContractVersion = generatedProcessingContractVersion
         self.extractionQualityContractVersion = extractionQualityContractVersion
+        self.websiteIconContractVersion = websiteIconContractVersion
     }
 }
 
@@ -122,7 +133,8 @@ struct SyncHTTPResponseBudget {
             version: 1, principal: principal, result: result,
             metadataContractVersion: principal == nil ? nil : contractVersion,
             generatedProcessingContractVersion: principal == nil ? nil : contractVersion,
-            extractionQualityContractVersion: principal == nil ? nil : contractVersion)
+            extractionQualityContractVersion: principal == nil ? nil : contractVersion,
+            websiteIconContractVersion: principal == nil ? nil : contractVersion)
     }
 
     init(principal: SyncPrincipal, deviceCount: Int) throws {
@@ -255,7 +267,7 @@ public struct SyncHTTPHandler: Sendable {
         do { envelope = try SyncDatabase.decode(SyncHTTPEnvelope.self, request.body) } catch {
             return failure(.malformedRequest, status: 400)
         }
-        guard (1...4).contains(envelope.version) else {
+        guard (1...5).contains(envelope.version) else {
             return failure(.unsupportedVersion, status: 400)
         }
         guard principal.serviceID == serviceID, envelope.expectedServiceID == serviceID,
@@ -267,12 +279,36 @@ public struct SyncHTTPHandler: Sendable {
         if case .apply(let operation) = envelope.action, operation.deviceID != principal.deviceID {
             return failure(.forbidden, status: 403)
         }
+        if case .applyWebsiteIcon(let operation) = envelope.action,
+            operation.deviceID != principal.deviceID
+        {
+            return failure(.forbidden, status: 403)
+        }
         if envelope.version < envelope.action.requiredEnvelopeVersion {
             return failure(.unsupportedVersion, status: 400)
         }
         if case .upload(_, _, let chunk, _) = envelope.action, chunk.count > Self.maximumChunkBytes
         {
             return failure(.requestTooLarge, status: 413)
+        }
+        if case .uploadWebsiteIcon(let blob, _, let chunk, _) = envelope.action,
+            !(1...262_144).contains(blob.byteCount) || chunk.count > Self.maximumChunkBytes
+        {
+            return failure(.requestTooLarge, status: 413)
+        }
+        if case .websiteIconChanges(_, let limit) = envelope.action,
+            !(1...Self.maximumPageSize).contains(limit)
+        {
+            return domainFailure(.invalidCursor)
+        }
+        if case .websiteIconBaselinePage(let after, let limit, _, _) = envelope.action {
+            guard (0...Self.maximumPageSize).contains(limit),
+                after == nil
+                    || (after!.utf8.count == 64
+                        && after!.utf8.allSatisfy {
+                            (48...57).contains($0) || (97...102).contains($0)
+                        })
+            else { return domainFailure(.invalidCursor) }
         }
         if case .changes(_, let limit) = envelope.action,
             !(1...Self.maximumPageSize).contains(limit)
@@ -342,6 +378,30 @@ public struct SyncHTTPHandler: Sendable {
                 try authority.upload(blob, offset: offset, chunk: chunk, final: final)
                 result = .okay
             case .download(let blob): result = .data(try authority.download(blob))
+            case .applyWebsiteIcon(let operation):
+                result = .websiteIconReceipt(
+                    try authority.applyWebsiteIcon(operation) { receipt in
+                        try checkResponseSize(.websiteIconReceipt(receipt), principal: principal)
+                    })
+            case .websiteIconChanges(let cursor, let limit):
+                result = .websiteIconPage(
+                    try authority.websiteIconChanges(after: cursor, limit: limit))
+            case .websiteIconBaselinePage(let after, let limit, let expected, let captureCursor):
+                result = .websiteIconBaseline(
+                    try authority.websiteIconBaselinePage(
+                        afterOriginID: after, limit: limit, expectedCursor: expected,
+                        expectedCaptureCursor: captureCursor))
+            case .uploadWebsiteIcon(let blob, let offset, let chunk, let final):
+                guard blob.byteCount <= 262_144, chunk.count <= Self.maximumChunkBytes else {
+                    throw SyncHTTPError.resourceLimit
+                }
+                try authority.uploadWebsiteIcon(blob, offset: offset, chunk: chunk, final: final)
+                result = .okay
+            case .downloadWebsiteIcon(let blob):
+                guard blob.byteCount <= 262_144 else { throw SyncHTTPError.resourceLimit }
+                let bytes = try authority.download(blob)
+                try WebsiteIconPNG.validate(bytes)
+                result = .data(bytes)
             }
             return reply(result, principal: principal, status: 200)
         } catch let error as SyncError { return domainFailure(error) } catch let error
@@ -426,7 +486,7 @@ private func bearer(_ headers: [String: String]) -> String? {
 }
 
 /// Local executor bridge, not a network client. Host/URL/redirect policy belongs to the future HTTPS adapter.
-public struct SyncHTTPTransport: BoundSyncTransport {
+public struct SyncHTTPTransport: WebsiteIconSyncTransport {
     public let binding: SyncLibraryBinding
     public let deviceID: UUID
     private let credential: @Sendable () throws -> String

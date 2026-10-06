@@ -94,12 +94,23 @@ enum SyncDatabase {
             let tables = [
                 "sync_records", "sync_aliases", "sync_receipts", "sync_devices", "sync_feed",
                 "sync_outbox", "sync_visible", "sync_rejections", "sync_observed",
+                "sync_website_icon_records", "sync_website_icon_visible",
+                "sync_website_icon_receipts",
+                "sync_website_icon_devices", "sync_website_icon_feed", "sync_website_icon_outbox",
+                "sync_website_icon_observed", "sync_website_icon_origins",
             ]
             let usedRows = try tables.contains {
                 try existingTables.contains($0)
                     && Int.fetchOne(db, sql: "SELECT COUNT(*) FROM \($0)")! > 0
             }
-            guard !usedMeta, !usedRows, !hasUnboundBlobs else {
+            let usedIcons =
+                try existingTables.contains("sync_website_icon_meta")
+                && Int.fetchOne(
+                    db,
+                    sql:
+                        "SELECT COUNT(*) FROM sync_website_icon_meta WHERE sequence != 0 OR cursor != 0 OR floor != 0 OR observed_sequence != 0 OR presentation_revision != 0"
+                )! > 0
+            guard !usedMeta, !usedRows, !usedIcons, !hasUnboundBlobs else {
                 throw SyncBindingError.enrollmentRequiresEmptyLibrary
             }
         }
@@ -207,8 +218,10 @@ enum SyncDatabase {
         ]
     }
 
-    static func save(_ db: Database, _ record: SharedCapture, table: String = "sync_records") throws
-    {
+    static func save(
+        _ db: Database, _ record: SharedCapture, table: String = "sync_records",
+        updateWebsiteIcons: Bool = true
+    ) throws {
         if table == "sync_records" {
             try db.execute(
                 sql: """
@@ -221,6 +234,7 @@ enum SyncDatabase {
                     """,
                 arguments: [record.id.uuidString, try encode(record)]
                     + identityArguments(record.source))
+            if updateWebsiteIcons { try WebsiteIconDatabase.captureSaved(db, record) }
         } else {
             try db.execute(
                 sql: """

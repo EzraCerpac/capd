@@ -8,6 +8,7 @@ public struct CapdSourceRow: View {
     private let tint: Color
     private let tags: [String]
     private let status: String?
+    private let customIcon: ((CGFloat) -> AnyView)?
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.colorSchemeContrast) private var contrast
     @Environment(\.dynamicTypeSize) private var textSize
@@ -24,6 +25,22 @@ public struct CapdSourceRow: View {
         self.tint = tint
         self.tags = tags
         self.status = status
+        customIcon = nil
+    }
+
+    public init(
+        title: String, metadata: String, snippet: String, symbol: String, tint: Color,
+        tags: [String] = [], status: String? = nil,
+        @ViewBuilder icon: @escaping (CGFloat) -> some View
+    ) {
+        self.title = title
+        self.metadata = metadata
+        self.snippet = snippet
+        self.symbol = symbol
+        self.tint = tint
+        self.tags = tags
+        self.status = status
+        customIcon = { AnyView(icon($0)) }
     }
 
     public var body: some View {
@@ -44,8 +61,13 @@ public struct CapdSourceRow: View {
         .frame(minHeight: 44)
     }
 
+    @ViewBuilder
     private var icon: some View {
-        CapdIconTile(symbol: symbol, tint: tint, size: min(iconSize, 44))
+        if let customIcon {
+            customIcon(min(iconSize, 44))
+        } else {
+            CapdIconTile(symbol: symbol, tint: tint, size: min(iconSize, 44))
+        }
     }
 
     private var text: some View {

@@ -81,13 +81,22 @@ private struct ActivationFixture {
         -> MobileReviewedImport
     {
         let preview = try server.previewContentSnapshotImport(preparation.snapshot)
+        for icon in preparation.snapshot.websiteIcons ?? [] {
+            guard let blob = icon.content?.blob else { continue }
+            let bytes = try Data(
+                contentsOf: preparation.transferDirectory(in: root)
+                    .appendingPathComponent("assets/\(blob.digest)"))
+            try server.upload(blob, offset: 0, chunk: bytes, final: true)
+        }
         let receipt = try server.importContentSnapshot(preparation.snapshot, preview: preview)
+        let blobs =
+            preparation.snapshot.captures.compactMap(\.source.blob)
+            + (preparation.snapshot.websiteIcons ?? []).compactMap(\.content?.blob)
         let review = MobileSnapshotReview(
             version: 1, authorityDirectory: "/synthetic/authority",
             snapshotSHA256: preparation.manifestFileDigest,
-            assets: preparation.snapshot.captures.compactMap(\.source.blob).sorted {
-                $0.digest < $1.digest
-            },
+            assets: Dictionary(grouping: blobs, by: \.digest).values.map { $0[0] }
+                .sorted { $0.digest < $1.digest },
             preview: preview)
         let r = try encoded(review)
         let c = try encoded(receipt)
@@ -1076,6 +1085,293 @@ private struct JournalCheckingCredentials: SyncCredentialCreationStore {
             throw SyncConnectionError.invalidCredential
         }
         return try store.insertIfAbsent(credential, for: enrollment)
+    }
+}
+
+private func activationIconPNG() throws -> Data {
+    let bytes = try #require(
+        Data(
+            base64Encoded:
+                "iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAYAAACqaXHeAAAAmElEQVR4nO3QMREAIBDAsFeCHOTgfwMZGeiQvddZ+9yfjQ7QGqADtAboAK0BOkBrgA7QGqADtAboAK0BOkBrgA7QGqADtAboAK0BOkBrgA7QGqADtAboAK0BOkBrgA7QGqADtAboAK0BOkBrgA7QGqADtAboAK0BOkBrgA7QGqADtAboAK0BOkBrgA7QGqADtAboAK0BOkB7np4RtCy3pxgAAAAASUVORK5CYII="
+        ))
+    try WebsiteIconPNG.validate(bytes)
+    return bytes
+}
+
+@Test func pendingActivationJournalSurvivesAnUnusedLazyIconNamespace() async throws {
+    let f = ActivationFixture()
+    defer { f.clean() }
+    let old = try f.populated()
+    let pending = try old.store.pending()
+    let prep = try f.activation.prepare(endpoint: f.endpoint, binding: f.binding)
+    #expect(prep.snapshot.version == 1 && prep.snapshot.websiteIcons == nil)
+    let server = try f.authority()
+    let handoff = try f.handoff(prep, server: server)
+    let credentials = InterruptedInsertionCredentials(store: f.credentials)
+    let activation = MobileLibraryActivation(root: f.root, credentials: credentials)
+    await #expect(throws: SyncHTTPError.unavailable) {
+        try await activation.activate(
+            prep, handoff: handoff, credential: "synthetic-activation-only",
+            transport: ActivationRemote(server, prep.enrollment))
+    }
+    let journal = prep.directory(in: f.root).appendingPathComponent("activation-credential.json")
+    let journalBytes = try Data(contentsOf: journal)
+    let source = try DatabaseQueue(path: f.originalURL.path)
+    let before = try MobileLibraryActivation.stateDigest(source)
+    try await source.write { try WebsiteIconDatabase.prepare($0) }
+    #expect(try MobileLibraryActivation.stateDigest(source) == before)
+    #expect(try activation.preparations() == [prep])
+    #expect(try activation.hasPendingCredentialRecovery(for: prep))
+    #expect(try Data(contentsOf: journal) == journalBytes)
+    _ = try await activation.activate(
+        prep, handoff: handoff, credential: "",
+        transport: ActivationRemote(server, prep.enrollment))
+    #expect(try !activation.hasPendingCredentialRecovery(for: prep))
+    #expect(try MobileStore(url: f.originalURL).pending() == pending)
+    #expect(try f.credentials.read(for: prep.enrollment) == "synthetic-activation-only")
+}
+
+@Test(arguments: ["record", "sequence", "observed", "unknown-table"])
+func lazyIconCompatibilityCannotHidePersistedIconState(kind: String) throws {
+    let f = ActivationFixture()
+    defer { f.clean() }
+    _ = try f.populated()
+    let source = try DatabaseQueue(path: f.originalURL.path)
+    let before = try MobileLibraryActivation.stateDigest(source)
+    try source.write { try WebsiteIconDatabase.prepare($0) }
+    #expect(try MobileLibraryActivation.stateDigest(source) == before)
+    try source.write { db in
+        switch kind {
+        case "record":
+            let origin = try #require(WebsiteIconOrigin(url: "https://www.example.com"))
+            let record = WebsiteIconRecord(
+                origin: origin, revision: 1,
+                content: WebsiteIconContent(blob: BlobReference(data: try activationIconPNG())))
+            try WebsiteIconDatabase.save(db, record)
+            try WebsiteIconDatabase.rebuild(db)
+        case "sequence":
+            try db.execute(sql: "UPDATE sync_website_icon_meta SET sequence=1")
+        case "observed":
+            try db.execute(
+                sql: "INSERT INTO sync_website_icon_observed VALUES(?)",
+                arguments: [UUID().uuidString])
+        default:
+            try db.execute(
+                sql:
+                    "CREATE TABLE sync_website_icon_future(value); INSERT INTO sync_website_icon_future VALUES(1)"
+            )
+        }
+    }
+    #expect(try MobileLibraryActivation.stateDigest(source) != before)
+}
+
+@Test(arguments: [false, true])
+func activationTransfersReviewedIconAssetsAndPreservesTheOriginalNamespace(deleted: Bool)
+    async throws
+{
+    let f = ActivationFixture()
+    defer { f.clean() }
+    let old = try f.populated()
+    let url = "https://www.example.com/synthetic-path"
+    try old.store.save(CaptureInput.make(text: url, isLink: true))
+    let bytes = try activationIconPNG()
+    let source = try DatabaseQueue(path: f.originalURL.path)
+    let content = WebsiteIconContent(
+        blob: BlobReference(data: bytes), fetchedAt: Date(timeIntervalSinceReferenceDate: 1234))
+    let record = WebsiteIconRecord(
+        origin: try #require(WebsiteIconOrigin(url: url)), revision: 1, deleted: deleted,
+        content: content)
+    try bytes.write(
+        to: f.originalURL.deletingLastPathComponent().appendingPathComponent(
+            "assets/\(content.blob.digest)"))
+    try await source.write { db in
+        try WebsiteIconDatabase.prepare(db)
+        try WebsiteIconDatabase.save(db, record)
+        try db.execute(sql: "UPDATE sync_website_icon_meta SET cursor=1")
+        try WebsiteIconDatabase.rebuild(db)
+    }
+    let pending = try old.store.pending()
+    let before = try MobileLibraryActivation.stateDigest(source)
+    let prep = try f.activation.prepare(endpoint: f.endpoint, binding: f.binding)
+    #expect(prep.snapshot.version == 2)
+    #expect(prep.snapshot.websiteIcons == [record])
+    #expect(
+        try Data(
+            contentsOf: prep.transferDirectory(in: f.root).appendingPathComponent(
+                "assets/\(content.blob.digest)")) == bytes)
+    let server = try f.authority()
+    let handoff = try f.handoff(prep, server: server)
+    _ = try await f.activation.activate(
+        prep, handoff: handoff, credential: "synthetic-activation-only",
+        transport: ActivationRemote(server, prep.enrollment))
+    let connected = try MobileLibrarySession.open(
+        root: f.root, role: .app, credentials: f.credentials)
+    let imported = try connected.store.websiteIcon(for: url)
+    if deleted {
+        #expect(imported == nil)
+        let installed = try DatabaseQueue(
+            path: connected.configuration.databaseURL(in: f.root).path)
+        #expect(
+            try await installed.read {
+                try SyncClient.exportWebsiteIcons(in: $0, includeDeleted: true)
+            }
+                == handoff.receipt.websiteIcons)
+    } else {
+        let icon = try #require(imported)
+        #expect(icon.content == content)
+        #expect(try connected.store.websiteIconData(icon) == bytes)
+    }
+    #expect(try MobileLibraryActivation.stateDigest(source) == before)
+    #expect(try MobileStore(url: f.originalURL).pending() == pending)
+}
+
+@Test func activationInstallsMoreThanTheSchedulerIconPageBudget() async throws {
+    let f = ActivationFixture()
+    defer { f.clean() }
+    _ = try f.populated()
+    let original = try DatabaseQueue(path: f.originalURL.path)
+    try await original.write { try WebsiteIconDatabase.prepare($0) }
+    let preparation = try f.activation.prepare(endpoint: f.endpoint, binding: f.binding)
+    #expect(preparation.snapshot.websiteIcons == [])
+    let server = try f.authority()
+    let handoff = try f.handoff(preparation, server: server)
+    let captures = (0..<801).map {
+        SharedCapture(source: CaptureSource(kind: .link, url: "https://site\($0).example.com/page"))
+    }
+    let added = ContentSnapshotImport(
+        snapshotID: UUID(), targetBinding: f.binding, sourceDeviceID: UUID(), captures: captures)
+    _ = try server.importContentSnapshot(added, preview: server.previewContentSnapshotImport(added))
+    let bytes = try activationIconPNG()
+    let blob = BlobReference(data: bytes)
+    try server.uploadWebsiteIcon(blob, offset: 0, chunk: bytes, final: true)
+    let peer = UUID()
+    for (index, capture) in captures.enumerated() {
+        let origin = try #require(WebsiteIconOrigin(url: capture.source.url!))
+        _ = try server.applyWebsiteIcon(
+            WebsiteIconOperation(
+                deviceID: peer, sequence: Int64(index + 1), origin: origin, baseRevision: 0,
+                mutation: .upsert(WebsiteIconContent(blob: blob))))
+    }
+    #expect(try server.websiteIconChanges(after: 0, limit: 100).changes.count == 100)
+    let expected = try server.websiteIconBaseline()
+    #expect(expected.records.count == 801)
+    let before = try MobileLibraryActivation.stateDigest(original)
+    let journal = try activationJournal(preparation)
+    try journal.write(
+        to: preparation.directory(in: f.root).appendingPathComponent("activation-credential.json"))
+    try f.credentials.save("synthetic-activation-only", for: preparation.enrollment)
+    _ = try await f.activation.activate(
+        preparation, handoff: handoff, credential: "",
+        transport: ActivationRemote(server, preparation.enrollment))
+    let connected = try MobileLibrarySession.open(
+        root: f.root, role: .app, credentials: f.credentials)
+    let installed = try DatabaseQueue(path: connected.configuration.databaseURL(in: f.root).path)
+    #expect(
+        try await installed.read { try SyncClient.exportWebsiteIcons(in: $0, includeDeleted: true) }
+            == expected.records)
+    #expect(
+        try await installed.read {
+            try Int64.fetchOne($0, sql: "SELECT cursor FROM sync_website_icon_meta")
+        } == expected.cursor)
+    #expect(try MobileLibraryActivation.stateDigest(original) == before)
+    #expect(try !f.activation.hasPendingCredentialRecovery(for: preparation))
+}
+
+@Test(arguments: ["corrupt-asset", "moving-baseline"])
+func refusedIconActivationPreservesOriginalSelectorAndPendingJournal(kind: String) async throws {
+    let f = ActivationFixture()
+    defer { f.clean() }
+    let old = try f.populated()
+    let url = "https://www.example.com/synthetic-path"
+    try old.store.save(CaptureInput.make(text: url, isLink: true))
+    let bytes = try activationIconPNG()
+    let content = WebsiteIconContent(
+        blob: BlobReference(data: bytes), fetchedAt: Date(timeIntervalSinceReferenceDate: 1234))
+    let record = WebsiteIconRecord(
+        origin: try #require(WebsiteIconOrigin(url: url)), revision: 1, content: content)
+    let original = try DatabaseQueue(path: f.originalURL.path)
+    try bytes.write(
+        to: f.originalURL.deletingLastPathComponent().appendingPathComponent(
+            "assets/\(content.blob.digest)"))
+    try await original.write { db in
+        try WebsiteIconDatabase.prepare(db)
+        try WebsiteIconDatabase.save(db, record)
+        try db.execute(sql: "UPDATE sync_website_icon_meta SET cursor=1")
+        try WebsiteIconDatabase.rebuild(db)
+    }
+    let preparation = try f.activation.prepare(endpoint: f.endpoint, binding: f.binding)
+    let server = try f.authority()
+    let handoff = try f.handoff(preparation, server: server)
+    let before = try MobileLibraryActivation.stateDigest(original)
+    let selected = try MobileLibraryAccess.selected(in: f.root)
+    let pending = try old.store.pending()
+    let journalFile = preparation.directory(in: f.root).appendingPathComponent(
+        "activation-credential.json")
+    let journal = try activationJournal(preparation)
+    try journal.write(to: journalFile)
+    try f.credentials.save("synthetic-activation-only", for: preparation.enrollment)
+    if kind == "corrupt-asset" {
+        try Data("corrupted target icon".utf8).write(
+            to: f.root.appendingPathComponent("new-authority-blobs/\(content.blob.digest)"))
+    }
+    let remote = MovingActivationIconRemote(
+        base: ActivationRemote(server, preparation.enrollment), server: server,
+        origin: record.origin, content: content, moving: kind == "moving-baseline")
+    await #expect(throws: (any Error).self) {
+        try await f.activation.activate(
+            preparation, handoff: handoff, credential: "", transport: remote)
+    }
+    #expect(try MobileLibraryAccess.selected(in: f.root) == selected)
+    #expect(try MobileLibraryActivation.stateDigest(original) == before)
+    #expect(try old.store.pending() == pending)
+    #expect(try Data(contentsOf: journalFile) == journal)
+    #expect(try f.activation.hasPendingCredentialRecovery(for: preparation))
+    #expect(try f.activation.preparations() == [preparation])
+    #expect(try f.credentials.read(for: preparation.enrollment) == "synthetic-activation-only")
+}
+
+private final class MovingActivationIconRemote: AsyncSyncTransport, @unchecked Sendable {
+    let base: ActivationRemote
+    let server: SyncServer
+    let origin: WebsiteIconOrigin
+    let content: WebsiteIconContent
+    let moving: Bool
+    private let lock = NSLock()
+    private var changed = false
+    var binding: SyncLibraryBinding { base.binding }
+    var deviceID: UUID { base.deviceID }
+    init(
+        base: ActivationRemote, server: SyncServer, origin: WebsiteIconOrigin,
+        content: WebsiteIconContent, moving: Bool
+    ) {
+        self.base = base
+        self.server = server
+        self.origin = origin
+        self.content = content
+        self.moving = moving
+    }
+    func send(_ request: SyncHTTPRequest) async throws -> SyncHTTPResponse {
+        let response = try await base.send(request)
+        let envelope = try JSONDecoder().decode(SyncHTTPEnvelope.self, from: request.body)
+        if moving, case .downloadWebsiteIcon = envelope.action {
+            let mutate = lock.withLock {
+                if changed { return false }
+                changed = true
+                return true
+            }
+            if mutate {
+                let current = try server.websiteIconBaseline().records.first { $0.id == origin.id }!
+                _ = try server.applyWebsiteIcon(
+                    WebsiteIconOperation(
+                        deviceID: UUID(), sequence: 1, origin: origin,
+                        baseRevision: current.revision,
+                        mutation: .upsert(
+                            WebsiteIconContent(
+                                blob: content.blob,
+                                fetchedAt: content.fetchedAt.addingTimeInterval(1)))))
+            }
+        }
+        return response
     }
 }
 

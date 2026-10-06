@@ -121,6 +121,7 @@ enum StoreSync {
                         SELECT id FROM sync_aliases WHERE canonical=? COLLATE NOCASE)
                     """, arguments: [record.id.uuidString, record.id.uuidString])
             try Capture.filter(tombstonedIDs.contains(Capture.CodingKeys.id)).deleteAll(db)
+            try Store.revokeUnreferencedWebsiteIconClaims(in: db)
             return
         }
         var capture =
@@ -197,6 +198,7 @@ enum StoreSync {
             sql:
                 "INSERT INTO sync_capture_ids VALUES (?,?) ON CONFLICT(global_id) DO UPDATE SET local_id=excluded.local_id",
             arguments: [capture.id, record.id.uuidString])
+        try Store.reconcileWebsiteIconOrigin(in: db, captureID: capture.id!)
     }
 
     private static func projectNoteConflict(_ db: Database, record: SharedCapture) throws {

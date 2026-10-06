@@ -60,8 +60,11 @@ struct NativeCaptureIdentityTests {
                     == triggers)
             #expect(
                 try Migrations.migrator.appliedMigrations(db) == [
-                    "001", "002", "003", "004", "005", "006",
+                    "001", "002", "003", "004", "005", "006", "007",
                 ])
+            #expect(try !Store.websiteIconsEnabled(in: db))
+            #expect(try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM website_icon_jobs") == 0)
+            #expect(try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM capture_icon_origins") == 0)
             #expect(try legacy.hasBeenSuperseded(db))
             let index = try #require(
                 db.indexes(on: Schema.captures).first { $0.name == "captures_on_content_hash" })
@@ -91,7 +94,9 @@ struct NativeCaptureIdentityTests {
         #expect(try SearchService(store: reopened).capture(url: url) == link)
         #expect(try SearchService(store: reopened).search("kestrel").count == 1)
         #expect(
-            try reopened.reader.read { try Migrations.migrator.appliedMigrations($0) }.count == 6)
+            try reopened.reader.read { try Migrations.migrator.appliedMigrations($0) } == [
+                "001", "002", "003", "004", "005", "006", "007",
+            ])
     }
 
     @Test func concurrentWritersDeduplicateWithinKind() async throws {

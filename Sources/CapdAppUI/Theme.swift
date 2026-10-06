@@ -62,7 +62,7 @@ struct IconTile: View {
 /// the symbol tile whenever no favicon is known — no host, store absent, still
 /// fetching, or the site has none — so rows never shift while an icon loads.
 struct FaviconTile: View {
-    var host: String?
+    var url: String?
     var fallbackSymbol: String
     var fallbackTint: Color
     var size: CGFloat
@@ -70,7 +70,7 @@ struct FaviconTile: View {
     @Environment(\.faviconStore) private var favicons
 
     var body: some View {
-        if let host, let favicon = favicons?.favicon(forHost: host) {
+        if let url, let favicon = favicons?.favicon(forURL: url) {
             Image(nsImage: favicon.image)
                 .resizable()
                 .interpolation(.high)

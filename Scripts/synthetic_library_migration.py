@@ -7,13 +7,16 @@ import contextlib
 import datetime
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import shutil
 import sqlite3
+import sys
 import tempfile
 import unicodedata
 import uuid
+from urllib.parse import unquote, urlsplit
 
 MARKER = ".capd-synthetic-fixture"
 MARKER_BYTES = b"synthetic-capd-library-v1\n"
@@ -420,6 +423,90 @@ def imported_capture(identity, payload, import_id):
     return _imported_capture(identity, payload, import_id)[0]
 
 
+def website_origin(url):
+    try:
+        if not isinstance(url, str) or "\0" in url:
+            return None
+        if sys.platform == "darwin":
+            from foundation_website_origin import host as foundation_host
+            try:
+                host = foundation_host(url)
+            except (OSError, RuntimeError) as exc:
+                raise PreparationError("website icon export requires macOS Foundation host parsing") from exc
+            if host is None:
+                return None
+        else:
+            if any(ord(c) < 32 or ord(c) == 127 for c in url):
+                return None
+            value = urlsplit(url)
+            if (value.scheme.lower() != "https" or value.username is not None
+                    or value.password is not None or value.port not in (None, 443)):
+                return None
+            host = unquote(value.hostname or "", errors="strict").lower()
+            if not host.isascii():
+                raise PreparationError("international website icon export requires macOS Foundation host parsing")
+        labels = host.split(".")
+        numeric = all(label.isdigit() or (label.startswith("0x") and len(label) > 2
+                       and all(c in "0123456789abcdef" for c in label[2:])) for label in labels)
+        if (len(host.encode()) > 253 or len(labels) < 2 or numeric
+                or labels[-1] in {"localhost", "local", "internal", "home", "lan", "test",
+                                   "invalid", "example", "onion", "arpa", "alt"}
+                or not any("a" <= c <= "z" for c in labels[-1])):
+            return None
+        for label in labels:
+            if (not 1 <= len(label.encode()) <= 63 or label.startswith("-") or label.endswith("-")
+                    or not all("a" <= c <= "z" or "0" <= c <= "9" or c == "-" for c in label)):
+                return None
+        return "https://" + host
+    except (ValueError, AttributeError, TypeError):
+        return None
+
+
+def local_website_icons(db, root):
+    tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    if "website_icon_jobs" not in tables:
+        return None
+    if "capture_icon_origins" not in tables:
+        raise PreparationError("website icon references are missing")
+    icons = {}
+    rows = db.execute("""SELECT j.id,j.origin,j.content,j.revision,c.kind,c.url
+        FROM website_icon_jobs j JOIN capture_icon_origins r ON r.origin_id=j.id
+        JOIN captures c ON c.id=r.capture_id WHERE j.content IS NOT NULL ORDER BY j.id""")
+    for identity, origin, raw, revision, kind, url in rows:
+        canonical = website_origin(origin)
+        if (not isinstance(origin, str) or canonical != origin or kind != "link" or website_origin(url) != origin
+                or hashlib.sha256(origin.encode()).hexdigest() != identity
+                or type(revision) is not int or not 0 <= revision <= 2**63 - 1):
+            raise PreparationError("website icon origin differs from its live capture")
+        try:
+            if not isinstance(raw, (str, bytes)) or len(raw) > 4_096:
+                raise ValueError("icon metadata exceeds the fixed record shape")
+            content = json.loads(raw)
+            blob = content["blob"]
+            fingerprint, size = blob["digest"], blob["byteCount"]
+            if (type(size) is not int or not 1 <= size <= 262_144
+                    or not isinstance(fingerprint, str) or len(fingerprint) != 64
+                    or any(c not in "0123456789abcdef" for c in fingerprint)
+                    or type(content["normalizerVersion"]) is not int
+                    or content["normalizerVersion"] != 1
+                    or type(content["fetchedAt"]) not in (int, float)
+                    or not math.isfinite(content["fetchedAt"])):
+                raise ValueError("invalid icon content")
+        except (ValueError, TypeError, KeyError) as exc:
+            raise PreparationError("website icon content is invalid") from exc
+        asset = root / "assets" / "website-icons" / fingerprint
+        if (asset.resolve() != asset or not asset.is_file() or asset.stat().st_size != size
+                or digest(asset) != fingerprint):
+            raise PreparationError("website icon asset differs from stored content")
+        icons[identity] = {"version": 1, "origin": {"canonicalHTTPSOrigin": origin},
+                           "revision": revision, "deleted": False,
+                           "content": {"blob": {"digest": fingerprint, "byteCount": size},
+                                       "normalizerVersion": 1, "fetchedAt": content["fetchedAt"]}}
+        if len(icons) > 4_096:
+            raise PreparationError("website icon count exceeds the shared import limit")
+    return [icons[key] for key in sorted(icons)]
+
+
 def import_initial_mac(archive, authority, binding, import_id, authority_database="server.sqlite", failure=None,
                        authority_assets="assets"):
     """Imports a synthetic Mac snapshot as a compacted authority baseline, offline only."""
@@ -476,6 +563,8 @@ def _import_initial_mac(archive, manifest, authority, binding, import_id, author
                 )
         if len(set(fingerprints)) != len(fingerprints):
             raise PreparationError("duplicate legacy content fingerprints require reconciliation")
+        if local_website_icons(legacy, source):
+            raise PreparationError("website icons require export-content and the reviewed content-snapshot import")
     created = []
     with contextlib.closing(connect(authority / authority_database)) as db:
         db.execute("BEGIN IMMEDIATE")

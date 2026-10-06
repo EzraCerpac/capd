@@ -10,7 +10,37 @@ enum Migrations {
         migrator.registerMigration("004", migrate: addCaptureRating)
         migrator.registerMigration("005", migrate: addCaptureReminder)
         migrator.registerMigration("006", migrate: scopeCaptureHashesByKind)
+        migrator.registerMigration("007", migrate: addWebsiteIcons)
         return migrator
+    }
+
+    static func addWebsiteIcons(_ db: Database) throws {
+        try db.execute(
+            sql:
+                "CREATE TABLE website_icon_policy(id INTEGER PRIMARY KEY CHECK(id=1),enabled BOOLEAN NOT NULL DEFAULT 0)"
+        )
+        try db.execute(sql: "INSERT INTO website_icon_policy VALUES(1,0)")
+        try db.execute(
+            sql:
+                "CREATE TABLE website_icon_jobs(id TEXT PRIMARY KEY,origin TEXT NOT NULL,state TEXT NOT NULL CHECK(state IN ('pending','claimed','retry','missing','succeeded')),retry_after DATETIME NOT NULL,attempts INTEGER NOT NULL,claim TEXT,claimed_at DATETIME,content BLOB,revision INTEGER NOT NULL DEFAULT 0)"
+        )
+        try db.execute(
+            sql: "CREATE INDEX website_icon_jobs_due ON website_icon_jobs(state,retry_after,id)")
+        try db.execute(
+            sql:
+                "CREATE TABLE capture_icon_origins(capture_id INTEGER PRIMARY KEY REFERENCES captures(id) ON DELETE CASCADE,origin_id TEXT NOT NULL REFERENCES website_icon_jobs(id))"
+        )
+        try db.execute(
+            sql: "CREATE INDEX capture_icon_origins_origin ON capture_icon_origins(origin_id)")
+        var cursor: Int64 = 0
+        while true {
+            let ids = try Int64.fetchAll(
+                db, sql: "SELECT id FROM captures WHERE id>? ORDER BY id LIMIT 100",
+                arguments: [cursor])
+            guard let last = ids.last else { break }
+            for id in ids { try Store.reconcileWebsiteIconOrigin(in: db, captureID: id) }
+            cursor = last
+        }
     }
 
     static func scopeCaptureHashesByKind(_ db: Database) throws {

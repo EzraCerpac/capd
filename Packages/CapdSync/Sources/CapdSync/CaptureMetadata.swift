@@ -237,6 +237,15 @@ public struct GeneratedContentPatch: Codable, Equatable, Sendable {
 }
 
 extension SyncHTTPAction {
+    var requiresWebsiteIconContract: Bool {
+        switch self {
+        case .applyWebsiteIcon, .websiteIconChanges, .websiteIconBaselinePage, .uploadWebsiteIcon,
+            .downloadWebsiteIcon:
+            true
+        default: false
+        }
+    }
+
     var requiresMetadataContract: Bool {
         guard case .apply(let operation) = self else { return false }
         switch operation.mutation {
@@ -286,9 +295,11 @@ extension SyncHTTPAction {
         }
     }
     var requiredEnvelopeVersion: Int {
-        requiresExtractionQualityContract
-            ? 4
-            : (requiresGeneratedProcessingContract ? 3 : (requiresMetadataContract ? 2 : 1))
+        requiresWebsiteIconContract
+            ? 5
+            : requiresExtractionQualityContract
+                ? 4
+                : (requiresGeneratedProcessingContract ? 3 : (requiresMetadataContract ? 2 : 1))
     }
 
     var requiresExtractionQualityContract: Bool {
@@ -311,7 +322,8 @@ extension SyncHTTPReply {
     func checkRequiredCapabilities(for action: SyncHTTPAction) throws {
         guard action.requiredEnvelopeVersion == 1 || metadataContractVersion == 1,
             !action.requiresGeneratedProcessingContract || generatedProcessingContractVersion == 1,
-            !action.requiresExtractionQualityContract || extractionQualityContractVersion == 1
+            !action.requiresExtractionQualityContract || extractionQualityContractVersion == 1,
+            !action.requiresWebsiteIconContract || websiteIconContractVersion == 1
         else { throw SyncHTTPError.unsupportedVersion }
     }
 }

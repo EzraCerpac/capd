@@ -19,6 +19,7 @@ public struct MacSyncStatus: Codable, Equatable, Sendable {
     public var cursor: Int64
     public var noteConflicts: [MacNoteConflict] = []
     public var issue: String?
+    public var websiteIconIssue: String?
     /// True only when this returned sync cycle successfully drained the remote feed.
     public var pullSucceeded = false
     public static let localOnly = MacSyncStatus(
@@ -39,6 +40,7 @@ public actor MacSyncRuntime {
     private var polling: Task<Void, Never>?
     private var phase: MacSyncStatus.Phase = .idle
     private var issue: String?
+    private var websiteIconIssue: String?
 
     init(
         store: Store, configuration: MacSyncConfiguration,
@@ -54,7 +56,8 @@ public actor MacSyncRuntime {
     }
 
     public func status() -> MacSyncStatus {
-        Self.snapshot(store: store, phase: phase, issue: issue)
+        Self.snapshot(
+            store: store, phase: phase, issue: issue, websiteIconIssue: websiteIconIssue)
     }
 
     @discardableResult
@@ -96,7 +99,31 @@ public actor MacSyncRuntime {
                     if try client.cursor() == cursor { break }
                 }
                 try Task.checkCancellation()
-                return Self.snapshot(store: store, phase: .idle, pullSucceeded: true)
+                var iconIssue: String?
+                do {
+                    try await client.pushWebsiteIcons(to: transport, credential: credential)
+                    for _ in 0..<8 {
+                        try Task.checkCancellation()
+                        let cursor = try client.websiteIconCursor()
+                        try await client.pullWebsiteIcons(from: transport, credential: credential)
+                        if try client.websiteIconCursor() == cursor { break }
+                    }
+                } catch is CancellationError {
+                    throw CancellationError()
+                } catch {
+                    iconIssue =
+                        (error as? SyncHTTPError) == .unsupportedVersion
+                        ? "This server needs an update to sync website icons. Saved captures still sync."
+                        : "Website icons could not finish syncing. Cached icons remain available."
+                }
+                do {
+                    try store.refreshWebsiteIconsFromSync()
+                } catch {
+                    iconIssue = "A website icon could not be verified. Saved captures still sync."
+                }
+                try Task.checkCancellation()
+                return Self.snapshot(
+                    store: store, phase: .idle, pullSucceeded: true, websiteIconIssue: iconIssue)
             } catch is CancellationError {
                 return Self.snapshot(
                     store: store, phase: .paused,
@@ -169,6 +196,7 @@ public actor MacSyncRuntime {
         flight = nil
         phase = result.phase
         issue = result.issue
+        websiteIconIssue = result.websiteIconIssue
     }
 
     private func wait(_ running: Flight, waiterID: UUID) async -> MacSyncStatus {
@@ -189,7 +217,8 @@ public actor MacSyncRuntime {
     }
 
     static func snapshot(
-        store: Store, phase: MacSyncStatus.Phase, issue: String? = nil, pullSucceeded: Bool = false
+        store: Store, phase: MacSyncStatus.Phase, issue: String? = nil, pullSucceeded: Bool = false,
+        websiteIconIssue: String? = nil
     )
         -> MacSyncStatus
     {
@@ -209,6 +238,7 @@ public actor MacSyncRuntime {
                     ?? (rejected > 0 ? "Some saved changes were rejected and need attention." : nil)
             )
             result.pullSucceeded = pullSucceeded
+            result.websiteIconIssue = websiteIconIssue
             return result
         } catch {
             return MacSyncStatus(

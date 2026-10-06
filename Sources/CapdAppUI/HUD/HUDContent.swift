@@ -20,6 +20,7 @@ package struct HUDContent: Equatable, Sendable {
     var kind: CaptureKind? = nil
     var note: String? = nil
     var host: String? = nil
+    var sourceURL: URL? = nil
     var actionURL: URL? = nil
 
     var canAnnotate: Bool {
@@ -47,7 +48,8 @@ package struct HUDContent: Equatable, Sendable {
                 detail: joined(subject, fallbackNote),
                 kind: capture.kind,
                 note: capture.note,
-                host: capture.kind == .link ? capture.host : nil)
+                host: capture.kind == .link ? capture.host : nil,
+                sourceURL: capture.kind == .link ? capture.url.flatMap(URL.init(string:)) : nil)
         case .alreadyCaptured(_, let previousSeenAt):
             return HUDContent(
                 style: .duplicate,
@@ -56,7 +58,8 @@ package struct HUDContent: Equatable, Sendable {
                 detail: joined(subject, fallbackNote),
                 kind: capture.kind,
                 note: capture.note,
-                host: capture.kind == .link ? capture.host : nil)
+                host: capture.kind == .link ? capture.host : nil,
+                sourceURL: capture.kind == .link ? capture.url.flatMap(URL.init(string:)) : nil)
         }
     }
 
@@ -66,7 +69,8 @@ package struct HUDContent: Equatable, Sendable {
             headline: "Copied to clipboard",
             detail: subject(of: capture),
             kind: capture.kind,
-            host: capture.kind == .link ? capture.host : nil)
+            host: capture.kind == .link ? capture.host : nil,
+            sourceURL: capture.kind == .link ? capture.url.flatMap(URL.init(string:)) : nil)
     }
 
     package static func previouslySaved(_ capture: Capture, now: Date) -> HUDContent {
@@ -85,7 +89,8 @@ package struct HUDContent: Equatable, Sendable {
             headline: "Saved \(age)\(count)",
             detail: detail,
             kind: capture.kind,
-            host: capture.kind == .link ? capture.host : nil)
+            host: capture.kind == .link ? capture.host : nil,
+            sourceURL: capture.kind == .link ? capture.url.flatMap(URL.init(string:)) : nil)
     }
 
     package static func reminder(_ capture: Capture) -> HUDContent {
@@ -96,6 +101,7 @@ package struct HUDContent: Equatable, Sendable {
             detail: subject(of: capture),
             kind: capture.kind,
             host: capture.kind == .link ? capture.host : nil,
+            sourceURL: capture.kind == .link ? capture.url.flatMap(URL.init(string:)) : nil,
             actionURL: capture.url.flatMap(URL.init(string:)))
     }
 
@@ -105,7 +111,8 @@ package struct HUDContent: Equatable, Sendable {
             headline: "Reminder set",
             detail: date.formatted(date: .abbreviated, time: .shortened),
             kind: capture.kind,
-            host: capture.kind == .link ? capture.host : nil)
+            host: capture.kind == .link ? capture.host : nil,
+            sourceURL: capture.kind == .link ? capture.url.flatMap(URL.init(string:)) : nil)
     }
 
     package static func blocked() -> HUDContent {

@@ -121,13 +121,17 @@ public final class BlobStore: Sendable {
         return data
     }
 
-    public func receive(_ blob: BlobReference, offset: Int, chunk: Data, final: Bool) throws {
+    public func receive(
+        _ blob: BlobReference, offset: Int, chunk: Data, final: Bool,
+        validating: ((Data) throws -> Void)? = nil
+    ) throws {
         try lock.withLock {
             try blob.validate()
             let published = directory.appendingPathComponent(blob.digest)
             if FileManager.default.fileExists(atPath: published.path) {
                 do {
-                    _ = try verifiedRead(blob)
+                    let data = try verifiedRead(blob)
+                    try validating?(data)
                     return
                 } catch SyncError.invalidBlob {
                     // Keep the old path until a verified replacement is atomically published.
@@ -153,6 +157,10 @@ public final class BlobStore: Sendable {
                     // A poisoned partial cannot be repaired by retrying its final chunk.
                     try FileManager.default.removeItem(at: partial)
                     throw SyncError.invalidBlob
+                }
+                do { try validating?(data) } catch {
+                    try? FileManager.default.removeItem(at: partial)
+                    throw error
                 }
                 try data.write(to: published, options: .atomic)
                 try? FileManager.default.removeItem(at: partial)

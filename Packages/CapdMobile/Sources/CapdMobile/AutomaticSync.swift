@@ -14,6 +14,8 @@ public struct AutomaticSyncState: Equatable, Sendable {
     public var lastSuccessfulSync: Date?
     public var lastError: String?
     public var libraryRevision: MobileLibraryRevision?
+    public var websiteIconRevision: Int64 = 0
+    public var websiteIconIssue: WebsiteIconSyncIssue?
 
     public init() {}
 }
@@ -220,7 +222,7 @@ public actor AutomaticSyncController {
         case .success(.offline):
             state.phase = .offline
             await arm(after: policy.foregroundPullInterval, kind: .poll)
-        case .success(.sent):
+        case .success(.sent(_, _, let iconIssue)):
             state.lastSuccessfulSync = await clock.now()
             guard active, connected else {
                 state.phase = active ? .offline : .paused
@@ -228,6 +230,7 @@ public actor AutomaticSyncController {
                 return
             }
             state.lastError = nil
+            state.websiteIconIssue = iconIssue
             state.consecutiveFailures = 0
             state.phase = .idle
             publish()
@@ -273,6 +276,7 @@ public actor AutomaticSyncController {
                 previousRevision: lastSnapshotRevision,
                 previousConflictCount: lastSnapshotConflictCount)
             snapshot.libraryRevision = library.revision
+            snapshot.websiteIconRevision = try store.websiteIconRevision()
             snapshot.pendingChanges = library.revision.pendingChanges
             snapshot.conflictCount = library.conflictCount
             snapshot.rejectedChanges = library.revision.rejectedChanges

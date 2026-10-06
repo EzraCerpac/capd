@@ -376,7 +376,7 @@ struct SearchView: View {
                     } label: {
                         HStack(spacing: 9) {
                             FaviconTile(
-                                host: source.host,
+                                url: source.kind == .link ? source.url : nil,
                                 fallbackSymbol: sourceSymbol(source.kind),
                                 fallbackTint: sourceTint(source.kind),
                                 size: 20)
@@ -608,7 +608,9 @@ private struct SearchResultRow: View {
 
     var body: some View {
         HStack(spacing: 10) {
-            FaviconTile(host: content.host, fallbackSymbol: symbol, fallbackTint: tint, size: 22)
+            FaviconTile(
+                url: content.sourceURL?.absoluteString, fallbackSymbol: symbol, fallbackTint: tint,
+                size: 22)
             VStack(alignment: .leading, spacing: 1) {
                 HStack(alignment: .firstTextBaseline, spacing: 8) {
                     Text(content.title)

@@ -65,8 +65,17 @@ struct CapdAgent {
             let tagging = TagService(
                 store: store, tagger: FoundationModelTagger(),
                 generationGate: generationGate(session.runtime))
+            let icons = WebsiteIconQueue(service: WebsiteIconService(store: store))
 
             logger.info("capd-agent \(CapdKit.version, privacy: .public) started")
+
+            Task {
+                while !Task.isCancelled {
+                    await icons.drain(
+                        limit: DrainPolicy.width(onMainsPower: PowerStatus.isOnMainsPower()))
+                    do { try await Task.sleep(for: pollInterval) } catch { return }
+                }
+            }
 
             Task {
                 var taggingRetry = TagRetryPolicy()

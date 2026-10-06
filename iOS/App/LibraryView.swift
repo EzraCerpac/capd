@@ -50,15 +50,18 @@ struct LibraryView: View {
                     }
                     ForEach(model.captures) { capture in
                         NavigationLink(value: capture.id) {
-                            CapdSourceRow(
-                                title: capture.title,
+                            WebsiteCaptureRow(
+                                capture: capture,
                                 metadata: MobileCapturePresentation.metadata(for: capture),
-                                snippet: capture.selection,
-                                symbol: MobileCapturePresentation.symbol(for: capture),
-                                tint: capture.kind == .link
-                                    ? .blue : capture.kind == .image ? .purple : .orange,
-                                tags: capture.manualTags,
-                                status: capture.noteConflicts.isEmpty ? nil : "Notes to review")
+                                icons: model.websiteIcons,
+                                scopeToken: model.librarySession?.token,
+                                iconRevision: model.loadedWebsiteIconRevision,
+                                readRecord: { [model] url, token in
+                                    try await model.websiteIcon(for: url, token: token)
+                                },
+                                readData: { [model] record, token in
+                                    try await model.websiteIconData(record, scopeToken: token)
+                                })
 
                         }
                     }
@@ -118,7 +121,8 @@ struct LibraryView: View {
             .sheet(isPresented: $showingSyncSettings, onDismiss: consumeSystemAction) {
                 SyncSettingsView(
                     state: model.syncState, retry: { model.retrySync() },
-                    systemSearch: model.systemSearch, connection: model.connection)
+                    systemSearch: model.systemSearch, connection: model.connection,
+                    websiteIcons: model.websiteIcons)
             }
             .alert(
                 "Library message",

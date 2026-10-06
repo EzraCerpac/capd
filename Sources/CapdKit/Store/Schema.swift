@@ -4,6 +4,7 @@ public enum Schema {
     public static let captures = "captures"
     public static let capturesFTS = "captures_fts"
     public static let taxonomy = "taxonomy"
+    public static let websiteIconJobs = "website_icon_jobs"
 
     /// One list because the order is shared: FTS5 declares its columns in it, and `bm25()`
     /// reads its weight arguments in it. `url` is absent because a porter tokenizer shreds

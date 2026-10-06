@@ -12,16 +12,18 @@ public struct ContentSnapshotImport: Codable, Equatable, Sendable {
     public let targetBinding: SyncLibraryBinding
     public let sourceDeviceID: UUID
     public let captures: [SharedCapture]
+    public let websiteIcons: [WebsiteIconRecord]?
     public let countPolicy: ContentSnapshotCountPolicy
 
     public init(
         snapshotID: UUID, targetBinding: SyncLibraryBinding, sourceDeviceID: UUID,
-        captures: [SharedCapture]
+        captures: [SharedCapture], websiteIcons: [WebsiteIconRecord]? = nil
     ) {
-        version = 1
+        version = websiteIcons == nil ? 1 : 2
         self.snapshotID = snapshotID
         self.targetBinding = targetBinding
         self.sourceDeviceID = sourceDeviceID
+        self.websiteIcons = websiteIcons?.sorted { $0.id < $1.id }
         self.captures = captures.sorted { $0.id.uuidString < $1.id.uuidString }
         countPolicy = .maximumKnownLowerBound
     }
@@ -54,6 +56,27 @@ public struct ContentSnapshotImportPreview: Codable, Equatable, Sendable {
     public let feedRowsToExpire: Int
     public let countPolicy: ContentSnapshotCountPolicy
     public let items: [ContentSnapshotItemPreview]
+    public let websiteIcons: [WebsiteIconRecord]?
+    public let websiteIconCursor: Int64?
+    public init(
+        snapshotID: UUID, digest: String, targetBinding: SyncLibraryBinding, sourceDeviceID: UUID,
+        authorityCursor: Int64, authorityFloor: Int64, feedRowsToExpire: Int,
+        countPolicy: ContentSnapshotCountPolicy, items: [ContentSnapshotItemPreview],
+        websiteIcons: [WebsiteIconRecord]? = nil, websiteIconCursor: Int64? = nil
+    ) {
+        self.snapshotID = snapshotID
+        self.digest = digest
+        self.targetBinding = targetBinding
+        self.sourceDeviceID = sourceDeviceID
+        self.authorityCursor = authorityCursor
+        self.authorityFloor = authorityFloor
+        self.feedRowsToExpire = feedRowsToExpire
+        self.countPolicy = countPolicy
+        self.items = items
+        self.websiteIcons = websiteIcons
+        self.websiteIconCursor = websiteIconCursor
+    }
+
 }
 
 public struct ContentSnapshotImportedNote: Codable, Equatable, Sendable {
@@ -79,6 +102,26 @@ public struct ContentSnapshotImportReceipt: Codable, Equatable, Sendable {
     public let authorityCursor: Int64
     public let countPolicy: ContentSnapshotCountPolicy
     public let items: [ContentSnapshotItemReceipt]
+    public let websiteIcons: [WebsiteIconRecord]?
+    public let websiteIconCursor: Int64?
+    public init(
+        id: UUID, snapshotID: UUID, digest: String, targetBinding: SyncLibraryBinding,
+        sourceDeviceID: UUID, authorityCursor: Int64, countPolicy: ContentSnapshotCountPolicy,
+        items: [ContentSnapshotItemReceipt], websiteIcons: [WebsiteIconRecord]? = nil,
+        websiteIconCursor: Int64? = nil
+    ) {
+        self.id = id
+        self.snapshotID = snapshotID
+        self.digest = digest
+        self.targetBinding = targetBinding
+        self.sourceDeviceID = sourceDeviceID
+        self.authorityCursor = authorityCursor
+        self.countPolicy = countPolicy
+        self.items = items
+        self.websiteIcons = websiteIcons
+        self.websiteIconCursor = websiteIconCursor
+    }
+
 }
 
 public struct RetainedContentSnapshotImport: Codable, Equatable, Sendable {
@@ -165,7 +208,13 @@ enum SnapshotImport {
             authorityCursor: authorityCursor,
             authorityFloor: try Int64.fetchOne(db, sql: "SELECT floor FROM sync_meta WHERE id=1")!,
             feedRowsToExpire: try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM sync_feed")!,
-            countPolicy: snapshot.countPolicy, items: items)
+            countPolicy: snapshot.countPolicy, items: items,
+            websiteIcons: try WebsiteIconSnapshot.preview(
+                db, incoming: snapshot.websiteIcons, captures: records),
+            websiteIconCursor: snapshot.websiteIcons == nil
+                ? nil
+                : try WebsiteIconSnapshot.cursor(
+                    db, incoming: snapshot.websiteIcons, captures: records))
     }
 
     static func apply(
@@ -182,6 +231,9 @@ enum SnapshotImport {
         guard try Self.preview(db, snapshot: snapshot, binding: binding) == preview,
             preview.authorityCursor < Int64.max
         else { throw ContentSnapshotImportError.stalePreview }
+        for icon in snapshot.websiteIcons ?? [] {
+            if let content = icon.content { try WebsiteIconPNG.validate(blobs.read(content.blob)) }
+        }
         for capture in snapshot.captures {
             if let blob = capture.source.blob { _ = try blobs.read(blob) }
         }
@@ -217,7 +269,9 @@ enum SnapshotImport {
                 return NoteVariant(
                     operationID: id, value: variant.value, unknownFields: variant.unknownFields)
             }
-            if current != prepared { try SyncDatabase.save(db, prepared) }
+            if current != prepared {
+                try SyncDatabase.save(db, prepared, updateWebsiteIcons: false)
+            }
             if incoming.id != item.canonicalCaptureID {
                 try SyncDatabase.alias(db, incoming.id, to: item.canonicalCaptureID)
             }
@@ -234,10 +288,14 @@ enum SnapshotImport {
         try db.execute(sql: "DELETE FROM sync_feed")
         try db.execute(
             sql: "UPDATE sync_meta SET cursor=?,floor=? WHERE id=1", arguments: [cursor, cursor])
+        try WebsiteIconSnapshot.apply(
+            db, records: preview.websiteIcons, cursor: preview.websiteIconCursor,
+            captureIDs: preview.items.map(\.canonicalCaptureID))
         let receipt = ContentSnapshotImportReceipt(
             id: UUID(), snapshotID: snapshot.snapshotID, digest: preview.digest,
             targetBinding: snapshot.targetBinding, sourceDeviceID: snapshot.sourceDeviceID,
-            authorityCursor: cursor, countPolicy: snapshot.countPolicy, items: receipts)
+            authorityCursor: cursor, countPolicy: snapshot.countPolicy, items: receipts,
+            websiteIcons: preview.websiteIcons, websiteIconCursor: preview.websiteIconCursor)
         let retained = RetainedContentSnapshotImport(
             snapshot: snapshot, preview: preview, receipt: receipt)
         try db.execute(
@@ -306,7 +364,17 @@ enum SnapshotImport {
         throws
     {
         guard snapshot.targetBinding == binding else { throw SyncBindingError.mismatch }
-        guard snapshot.version == 1, !snapshot.captures.isEmpty,
+        guard
+            (snapshot.version == 1 && snapshot.websiteIcons == nil)
+                || (snapshot.version == 2 && snapshot.websiteIcons != nil)
+        else { throw ContentSnapshotImportError.invalidSnapshot }
+        if let icons = snapshot.websiteIcons {
+            guard icons.count <= 4096, Set(icons.map(\.id)).count == icons.count else {
+                throw ContentSnapshotImportError.invalidSnapshot
+            }
+            for icon in icons { try icon.validate() }
+        }
+        guard !snapshot.captures.isEmpty || snapshot.websiteIcons != nil,
             Set(snapshot.captures.map(\.id)).count == snapshot.captures.count,
             snapshot.countPolicy == .maximumKnownLowerBound
         else { throw ContentSnapshotImportError.invalidSnapshot }
