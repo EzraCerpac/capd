@@ -22,26 +22,19 @@ package final class FaviconStore {
     @ObservationIgnored private var resolved: Set<WebsiteIconIdentity> = []
     @ObservationIgnored private var tasks:
         [WebsiteIconIdentity: (id: UUID, task: Task<Void, Never>)] = [:]
-    @ObservationIgnored private var observation: Task<Void, Never>?
+    @ObservationIgnored private var refreshTask: Task<Void, Never>?
+    @ObservationIgnored private var refreshAttempt: UUID?
     @ObservationIgnored private var uses: [WebsiteIconIdentity: UInt64] = [:]
     @ObservationIgnored private var tick: UInt64 = 0
 
     package convenience init(store: Store, scope: String, generation: UUID = UUID()) {
+        let records = FaviconRecordReader(store: store)
         self.init(scope: scope, generation: generation) { record in
             try await Task.detached(priority: .utility) {
                 try store.verifiedWebsiteIconData(record)
             }.value
         }
-        observation = Task { [weak self] in
-            do {
-                for try await records in store.websiteIconRecords() {
-                    guard !Task.isCancelled else { return }
-                    self?.replaceRecords(records)
-                }
-            } catch {
-                self?.replaceRecords([])
-            }
-        }
+        startRefreshing(readRecords: { try await records.changedRecords() })
     }
 
     package init(
@@ -133,9 +126,87 @@ package final class FaviconStore {
         while let running = tasks.values.first { await running.task.value }
     }
 
+    @discardableResult
+    func startRefreshing(
+        readRecords: @escaping @Sendable () async throws -> [WebsiteIconRecord]?,
+        wait: @escaping @Sendable () async throws -> Void = {
+            try await Task.sleep(for: .seconds(1))
+        }
+    ) -> Task<Void, Never> {
+        refreshTask?.cancel()
+        let attempt = UUID()
+        refreshAttempt = attempt
+        let task = Task(priority: .utility) { [weak self] in
+            while !Task.isCancelled {
+                do {
+                    let records = try await readRecords()
+                    guard !Task.isCancelled, self?.refreshAttempt == attempt else { return }
+                    if let records { self?.replaceRecords(records) }
+                } catch {
+                    guard !Task.isCancelled, self?.refreshAttempt == attempt else { return }
+                    self?.replaceRecords([])
+                }
+                do { try await wait() } catch { return }
+            }
+        }
+        refreshTask = task
+        return task
+    }
+
     isolated deinit {
-        observation?.cancel()
+        refreshTask?.cancel()
         for running in tasks.values { running.task.cancel() }
+    }
+}
+
+actor FaviconRecordReader {
+    private let store: Store
+    private let file: FaviconDatabaseFile?
+    private let monitor: MacDiscoveryChangeMonitor
+    private var revision: MacDiscoveryChangeMonitor.Revision?
+
+    init(store: Store) {
+        self.store = store
+        file = try? FaviconDatabaseFile(url: store.paths.databaseURL)
+        monitor = MacDiscoveryChangeMonitor(paths: store.paths)
+    }
+
+    func changedRecords() throws -> [WebsiteIconRecord]? {
+        do {
+            try checkLibrary()
+            let current = try monitor.revision()
+            guard current != revision else { return nil }
+            let records = try store.storedWebsiteIcons()
+            try checkLibrary()
+            revision = current
+            return records
+        } catch {
+            revision = nil
+            throw error
+        }
+    }
+
+    private func checkLibrary() throws {
+        let configuration = try MacSyncConfiguration.load(paths: store.paths)
+        guard let file, try FaviconDatabaseFile(url: store.paths.databaseURL) == file,
+            configuration?.binding == store.syncClient?.binding,
+            configuration?.deviceID == store.syncClient?.deviceID
+        else { throw MacSyncError.configurationChanged }
+    }
+}
+
+private struct FaviconDatabaseFile: Equatable {
+    let system: UInt64
+    let number: UInt64
+
+    init(url: URL) throws {
+        let values = try FileManager.default.attributesOfItem(
+            atPath: url.resolvingSymlinksInPath().path)
+        guard let system = (values[.systemNumber] as? NSNumber)?.uint64Value,
+            let number = (values[.systemFileNumber] as? NSNumber)?.uint64Value
+        else { throw MacSyncError.configurationChanged }
+        self.system = system
+        self.number = number
     }
 }
 
