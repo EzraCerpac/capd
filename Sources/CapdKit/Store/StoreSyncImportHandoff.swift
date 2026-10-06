@@ -211,6 +211,10 @@ public struct StoreSyncImportHandoff: Sendable {
             for record in websiteIconBaseline.records {
                 try Store.projectWebsiteIcon(in: db, record: record)
             }
+        } else if !sourceWebsiteIcons.isEmpty {
+            _ = try SyncClient.seedDeferredWebsiteIcons(
+                in: db, records: sourceWebsiteIcons, binding: binding,
+                deviceID: deviceID, blobs: blobs)
         }
     }
 

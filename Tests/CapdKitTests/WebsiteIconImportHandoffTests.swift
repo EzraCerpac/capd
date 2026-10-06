@@ -30,6 +30,7 @@ struct WebsiteIconImportHandoffTests {
                 try await f.local.reader.read { try Capture.fetchOne($0, key: f.captureID) }
                     == capture)
             #expect(try MacSyncConfiguration.load(paths: f.paths) == nil)
+            #expect(try await f.local.reader.read { try !$0.tableExists("sync_website_icon_meta") })
             #expect(
                 !FileManager.default.fileExists(
                     atPath: f.paths.assetsDirectory.appendingPathComponent("sync").path))
@@ -42,11 +43,13 @@ struct WebsiteIconImportHandoffTests {
         #expect(
             try bound.store.verifiedWebsiteIconData(icon)
                 == (supportsIcons ? f.targetBytes : f.localBytes))
-        #expect(try bound.store.syncClient?.websiteIcons() == (supportsIcons ? [icon] : []))
-        #expect(try bound.store.syncClient?.pendingWebsiteIconOperations().isEmpty == true)
+        #expect(try bound.store.syncClient?.websiteIcons() == [icon])
+        #expect(
+            try bound.store.syncClient?.pendingWebsiteIconOperations().count
+                == (supportsIcons ? 0 : 1))
         if !supportsIcons {
             #expect(
-                try await bound.store.reader.read { try !$0.tableExists("sync_website_icon_meta") })
+                try await bound.store.reader.read { try $0.tableExists("sync_website_icon_meta") })
             let reopened = try MacLibrarySession.open(
                 paths: f.paths, credentials: f.credentials, transport: f.remote)
             #expect(try reopened.store.verifiedWebsiteIconData(icon) == f.localBytes)
@@ -63,6 +66,93 @@ struct WebsiteIconImportHandoffTests {
         _ = try bound.store.upsertCapture(
             Capture(kind: .text, selection: "New bound synthetic capture", createdAt: Date()))
         #expect(try bound.store.syncClient?.pendingOperations().map(\.sequence) == [1])
+    }
+
+    @Test(arguments: [false, true], [false, true])
+    func legacyHandoffPublishesPreservedIconsAfterUpgradeWithoutRefetch(
+        targetExisting: Bool, lostAcknowledgement: Bool
+    ) async throws {
+        let f = try IconHandoffFixture(supportsIcons: false, targetExisting: targetExisting)
+        defer { f.clean() }
+        let original = try #require(try f.local.websiteIcon(for: f.url))
+        let bound = try await MacLibrarySession.activate(
+            paths: f.paths, configuration: f.configuration, credentials: f.credentials,
+            transport: f.remote)
+        let client = try #require(bound.store.syncClient)
+        let pending = try client.pendingWebsiteIconOperations()
+        #expect(pending.count == 1)
+        #expect(pending.first?.sequence == 1 && pending.first?.baseRevision == 0)
+        #expect(pending.first?.mutation == .upsert(original.content!))
+        #expect(try client.websiteIconCursor() == 0)
+        #expect(try !bound.store.websiteIconsEnabled())
+        #expect(
+            try await bound.store.reader.read {
+                try String.fetchOne($0, sql: "SELECT state FROM website_icon_jobs")
+            } == "succeeded")
+        let fetches = DeferredImportFetchCounter()
+        let service = WebsiteIconService(
+            store: bound.store,
+            fetch: { _ in
+                fetches.increment()
+                throw SyncHTTPError.unavailable
+            })
+        #expect(try await !service.processNext())
+        #expect(fetches.value == 0)
+        await #expect(throws: SyncHTTPError.unsupportedVersion) {
+            try await client.pushWebsiteIcons(
+                to: f.remote, credential: { "synthetic-icon-handoff" })
+        }
+        #expect(try client.pendingWebsiteIconOperations() == pending)
+        #expect(try bound.store.claimNextWebsiteIcon() == nil)
+        _ = try CaptureService(store: bound.store).ingest(
+            CaptureRequest(text: "Retained offline capture"))
+        let capturePending = try client.pendingOperations()
+        let captureCursor = try client.cursor()
+        let reopened = try MacLibrarySession.open(
+            paths: f.paths, credentials: f.credentials, transport: f.remote)
+        let restarted = try #require(reopened.store.syncClient)
+        #expect(try restarted.pendingWebsiteIconOperations() == pending)
+        let upgraded = IconHandoffRemote(
+            binding: f.remote.binding, deviceID: f.remote.deviceID, server: f.remote.server,
+            supportsIcons: true)
+        if lostAcknowledgement, !pending.isEmpty {
+            let lost = LostIconHandoffAcknowledgement(base: upgraded)
+            await #expect(throws: SyncHTTPError.unavailable) {
+                try await restarted.pushWebsiteIcons(
+                    to: lost, credential: { "synthetic-icon-handoff" })
+            }
+            #expect(try restarted.pendingWebsiteIconOperations() == pending)
+        }
+        try await restarted.pushWebsiteIcons(to: upgraded, credential: { "synthetic-icon-handoff" })
+        #expect(try restarted.pendingWebsiteIconOperations().isEmpty)
+        #expect(try !reopened.store.websiteIconsEnabled())
+        #expect(fetches.value == 0)
+        #expect(try restarted.pendingOperations() == capturePending)
+        #expect(try restarted.cursor() == captureCursor)
+        #expect(try upgraded.server.baseline().deviceSequences[client.deviceID] == nil)
+        let received = try #require(try upgraded.server.websiteIconBaseline().records.first)
+        #expect(received.content == (targetExisting ? f.targetContent : original.content))
+        #expect(try upgraded.server.websiteIconBaseline().deviceSequences[client.deviceID] == 1)
+        try reopened.store.refreshWebsiteIconsFromSync()
+        #expect(try reopened.store.websiteIcon(for: f.url)?.content == received.content)
+        let peerID = UUID()
+        let peer = try SyncClient(
+            databaseURL: f.paths.root.appendingPathComponent("peer.sqlite"),
+            blobDirectory: f.paths.root.appendingPathComponent("peer-blobs"), deviceID: peerID,
+            binding: upgraded.binding)
+        let peerRemote = IconHandoffRemote(
+            binding: upgraded.binding, deviceID: peerID, server: upgraded.server,
+            supportsIcons: true)
+        try await peer.pullWebsiteIcons(from: peerRemote, credential: { "synthetic-icon-handoff" })
+        let offline = try #require(try peer.websiteIcon(originID: received.id))
+        #expect(offline == received)
+        #expect(
+            try peer.blobs.read(offline.content!.blob)
+                == (targetExisting ? f.targetBytes : f.localBytes))
+        #expect(
+            try Data(
+                contentsOf: f.paths.assetsDirectory.appendingPathComponent(
+                    "website-icons/\(BlobReference(data: f.localBytes).digest)")) == f.localBytes)
     }
 
     @Test func populatedUnboundSyncAssetsAreNotReboundDuringIconHandoff() async throws {
@@ -120,7 +210,7 @@ private struct IconHandoffFixture {
     let targetBytes: Data
     let targetContent: WebsiteIconContent
 
-    init(supportsIcons: Bool = true) throws {
+    init(supportsIcons: Bool = true, targetExisting: Bool = true) throws {
         paths = StoragePaths(
             root: FileManager.default.temporaryDirectory
                 .appendingPathComponent("capd-icon-handoff-\(UUID())").resolvingSymlinksInPath())
@@ -178,7 +268,8 @@ private struct IconHandoffFixture {
         let targetRecord = WebsiteIconRecord(origin: origin, revision: 0, content: targetContent)
         let snapshot = ContentSnapshotImport(
             snapshotID: UUID(), targetBinding: binding, sourceDeviceID: UUID(),
-            captures: [StoreSync.snapshot(capture, id: identity)], websiteIcons: [targetRecord])
+            captures: [StoreSync.snapshot(capture, id: identity)],
+            websiteIcons: targetExisting ? [targetRecord] : nil)
         _ = try server.importContentSnapshot(
             snapshot, preview: server.previewContentSnapshotImport(snapshot))
         remote = IconHandoffRemote(
@@ -212,4 +303,33 @@ private struct IconHandoffRemote: AsyncSyncTransport, SyncAuthorizer {
             status: response.status, headers: response.headers,
             body: try JSONSerialization.data(withJSONObject: json, options: .sortedKeys))
     }
+}
+
+private final class LostIconHandoffAcknowledgement: AsyncSyncTransport, @unchecked Sendable {
+    let base: IconHandoffRemote
+    private let lock = NSLock()
+    private var lost = false
+    var binding: SyncLibraryBinding { base.binding }
+    var deviceID: UUID { base.deviceID }
+    init(base: IconHandoffRemote) { self.base = base }
+    func send(_ request: SyncHTTPRequest) async throws -> SyncHTTPResponse {
+        let response = try await base.send(request)
+        let action = try JSONDecoder().decode(SyncHTTPEnvelope.self, from: request.body).action
+        if case .applyWebsiteIcon = action {
+            let drop = lock.withLock {
+                if lost { return false }
+                lost = true
+                return true
+            }
+            if drop { throw SyncHTTPError.unavailable }
+        }
+        return response
+    }
+}
+
+private final class DeferredImportFetchCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var count = 0
+    var value: Int { lock.withLock { count } }
+    func increment() { lock.withLock { count += 1 } }
 }
