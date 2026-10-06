@@ -114,7 +114,7 @@ See [website icon generation and sync](docs/designs/website-icons.md).
 Capd has no built-in account service, analytics, or telemetry. Optional library
 sync uses your configured server. Page fetching,
 favicon requests, update checks, OCR, and automatic tagging are documented in
-the [privacy guide](https://capd.jxd.dev/privacy), including which network
+the [privacy guide](docs/content/06-privacy.mdx), including which network
 features can be disabled.
 
 Capd is open source under the [MIT License](LICENSE).
