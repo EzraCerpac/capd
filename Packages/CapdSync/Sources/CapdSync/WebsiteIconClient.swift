@@ -61,6 +61,15 @@ extension SyncClient {
         try projectionGate.check()
         try SyncDatabase.checkBinding(db, binding)
         guard binding != nil else { throw SyncBindingError.bindingRequired }
+        return try Self.enqueueWebsiteIcon(
+            in: db, origin: origin, mutation: mutation, baseRevision: baseRevision,
+            deviceID: deviceID, blobs: blobs)
+    }
+
+    private static func enqueueWebsiteIcon(
+        in db: Database, origin: WebsiteIconOrigin, mutation: WebsiteIconMutation,
+        baseRevision: Int64?, deviceID: UUID, blobs: BlobStore, rebuild: Bool = true
+    ) throws -> WebsiteIconOperation {
         if case .upsert(let content) = mutation {
             try content.validate()
             try WebsiteIconPNG.validate(blobs.read(content.blob))
@@ -88,8 +97,68 @@ extension SyncClient {
             ])
         try db.execute(
             sql: "UPDATE sync_website_icon_meta SET sequence=?", arguments: [operation.sequence])
-        try WebsiteIconDatabase.rebuild(db)
+        if rebuild { try WebsiteIconDatabase.rebuild(db) }
         return operation
+    }
+
+    /// Queues verified local icons during initial enrollment without claiming authority history.
+    /// The savepoint also rolls back the entire batch if the caller catches an error.
+    @discardableResult
+    public static func seedDeferredWebsiteIcons(
+        in db: Database, records: [WebsiteIconRecord], binding: SyncLibraryBinding,
+        deviceID: UUID, blobs: BlobStore
+    ) throws -> [WebsiteIconOperation] {
+        guard db.isInsideTransaction else { throw SyncTransactionError.requiresTransaction }
+        try SyncDatabase.checkBinding(db, binding)
+        guard blobs.binding == binding,
+            try String.fetchOne(db, sql: "SELECT role FROM sync_meta") == "client",
+            try String.fetchOne(db, sql: "SELECT device FROM sync_meta") == deviceID.uuidString
+        else { throw SyncError.wrongDevice }
+        guard records.count <= 4_096, Set(records.map(\.id)).count == records.count,
+            try SyncDatabase.encode(records).count <= SyncHTTPHandler.maximumBodyBytes / 2
+        else { throw SyncHTTPError.resourceLimit }
+        for record in records {
+            try record.validate()
+            guard !record.deleted, let content = record.content else {
+                throw SyncError.invalidOperation
+            }
+            try WebsiteIconPNG.validate(blobs.read(content.blob))
+        }
+        var operations: [WebsiteIconOperation] = []
+        try db.inSavepoint {
+            try WebsiteIconDatabase.prepare(db)
+            for table in [
+                "records", "visible", "receipts", "devices", "feed", "outbox", "observed",
+                "origins",
+            ] {
+                if try Bool.fetchOne(
+                    db,
+                    sql: "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?)",
+                    arguments: ["sync_website_icon_" + table]) == true
+                {
+                    guard
+                        try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM sync_website_icon_" + table)
+                            == 0
+                    else { throw SyncError.invalidOperation }
+                }
+            }
+            guard
+                try Int.fetchOne(
+                    db,
+                    sql:
+                        "SELECT COUNT(*) FROM sync_website_icon_meta WHERE sequence<>0 OR cursor<>0 OR floor<>0 OR observed_sequence<>0 OR presentation_revision<>0"
+                ) == 0
+            else { throw SyncError.invalidOperation }
+            for record in records {
+                operations.append(
+                    try enqueueWebsiteIcon(
+                        in: db, origin: record.origin, mutation: .upsert(record.content!),
+                        baseRevision: 0, deviceID: deviceID, blobs: blobs, rebuild: false))
+            }
+            try WebsiteIconDatabase.rebuild(db)
+            return .commit
+        }
+        return operations
     }
 
     public static func seedWebsiteIconBaseline(

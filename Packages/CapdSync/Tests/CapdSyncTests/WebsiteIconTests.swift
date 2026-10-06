@@ -6,6 +6,155 @@ import Testing
 
 @Suite("Independent website icon sync")
 struct WebsiteIconTests {
+    @Test(arguments: [false, true])
+    func deferredBootstrapSurvivesLegacyHostReopenAndExactDelivery(targetExists: Bool) throws {
+        let f = try IconFixture()
+        defer { f.clean() }
+        let capture = f.capture()
+        _ = try f.server.apply(
+            SyncOperation(
+                deviceID: f.b, sequence: 1, captureID: capture.id, baseRevision: 0,
+                mutation: .create(capture)))
+        let content = WebsiteIconContent(
+            blob: BlobReference(data: iconPNG), fetchedAt: Date(timeIntervalSince1970: 123))
+        let source = WebsiteIconRecord(origin: f.origin, revision: 17, content: content)
+        if targetExists {
+            try f.server.uploadWebsiteIcon(content.blob, offset: 0, chunk: iconPNG, final: true)
+            _ = try f.server.applyWebsiteIcon(
+                WebsiteIconOperation(
+                    deviceID: f.b, sequence: 1, origin: f.origin, baseRevision: 0,
+                    mutation: .upsert(
+                        WebsiteIconContent(
+                            blob: content.blob, fetchedAt: Date(timeIntervalSince1970: 456)))))
+        }
+        let authority = try f.server.websiteIconBaseline()
+        let captureAuthority = try f.server.baseline()
+        let writer = try DatabaseQueue(path: f.root.appendingPathComponent("deferred.sqlite").path)
+        let blobs = try BlobStore(
+            directory: f.root.appendingPathComponent("deferred-assets"), binding: f.binding)
+        let client = try SyncClient(
+            writer: writer, blobs: blobs, deviceID: f.a, binding: f.binding,
+            prepareProjection: { db in
+                _ = try blobs.put(iconPNG)
+                try SyncClient.seedDeferredWebsiteIcons(
+                    in: db, records: [source], binding: f.binding, deviceID: f.a, blobs: blobs)
+            })
+        let operation = try #require(client.pendingWebsiteIconOperations().first)
+        #expect(operation.sequence == 1 && operation.baseRevision == 0)
+        #expect(operation.mutation == .upsert(content))
+        #expect(try client.websiteIcon(originID: source.id)?.revision == 0)
+        #expect(
+            try writer.read {
+                try Int.fetchOne($0, sql: "SELECT COUNT(*) FROM sync_website_icon_records")
+            } == 0)
+        #expect(
+            try writer.read { try Int64.fetchOne($0, sql: "SELECT sequence FROM sync_meta") } == 0)
+        let calls = IconCounter()
+        let legacy = SyncHTTPTransport(
+            binding: f.binding, deviceID: f.a, credential: { f.a.uuidString },
+            execute: { request in
+                let action = try SyncDatabase.decode(SyncHTTPEnvelope.self, request.body).action
+                if action.requiresWebsiteIconContract { calls.increment() }
+                let response = f.handler(f.a).handle(request)
+                let reply = try SyncDatabase.decode(SyncHTTPReply.self, response.body)
+                return SyncHTTPResponse(
+                    status: response.status, headers: response.headers,
+                    body: try SyncDatabase.encode(
+                        SyncHTTPReply(
+                            version: reply.version, principal: reply.principal, result: reply.result
+                        )))
+            })
+        #expect(throws: SyncHTTPError.unsupportedVersion) {
+            try client.pushWebsiteIcons(to: legacy)
+        }
+        #expect(calls.value == 0)
+        #expect(try client.pendingWebsiteIconOperations() == [operation])
+        let reopened = try SyncClient(
+            databaseURL: f.root.appendingPathComponent("deferred.sqlite"),
+            blobDirectory: blobs.directory, deviceID: f.a, binding: f.binding)
+        #expect(try reopened.pendingWebsiteIconOperations() == [operation])
+        try f.transport(f.a).uploadWebsiteIcon(content.blob, offset: 0, chunk: iconPNG, final: true)
+        let lostACK = try f.transport(f.a).applyWebsiteIcon(operation)
+        #expect(lostACK.outcome == (targetExists ? .stale : .accepted))
+        try reopened.pushWebsiteIcons(to: f.transport(f.a))
+        #expect(try reopened.pendingWebsiteIconOperations().isEmpty)
+        #expect(try f.transport(f.a).applyWebsiteIcon(operation) == lostACK)
+        #expect(try reopened.websiteIcon(originID: source.id) == lostACK.record)
+        #expect(try f.server.baseline() == captureAuthority)
+        if targetExists { #expect(try f.server.websiteIconBaseline().records == authority.records) }
+    }
+
+    @Test(arguments: [
+        "blob", "deleted", "duplicate", "limit", "device", "binding", "history", "transaction",
+        "late-write",
+    ])
+    func deferredBootstrapRefusalsAreAtomic(kind: String) throws {
+        let f = try IconFixture()
+        defer { f.clean() }
+        let client = try f.client("a", device: f.a)
+        let blob = try client.blobs.put(iconPNG)
+        let first = WebsiteIconRecord(
+            origin: f.origin, revision: 0, content: WebsiteIconContent(blob: blob))
+        let other = WebsiteIconRecord(
+            origin: WebsiteIconOrigin(url: "https://other.capd.dev")!, revision: 0,
+            content: WebsiteIconContent(blob: blob))
+        var records = [first, other]
+        if kind == "blob" {
+            records[1] = WebsiteIconRecord(
+                origin: other.origin, revision: 0,
+                content: WebsiteIconContent(blob: BlobReference(data: Data("missing".utf8))))
+        }
+        if kind == "deleted" {
+            records[1] = WebsiteIconRecord(
+                origin: other.origin, revision: 0, deleted: true, content: nil)
+        }
+        if kind == "duplicate" { records = [first, first] }
+        if kind == "limit" { records = Array(repeating: first, count: 4_097) }
+        if kind == "history" {
+            try client.enqueueWebsiteIcon(origin: f.origin, mutation: .upsert(first.content!))
+        }
+        if kind == "late-write" {
+            try client.writer.write { db in
+                try WebsiteIconDatabase.prepare(db)
+                try db.execute(
+                    sql:
+                        "CREATE TRIGGER refuse_second_deferred BEFORE INSERT ON sync_website_icon_outbox WHEN NEW.sequence=2 BEGIN SELECT RAISE(ABORT,'synthetic rejection'); END"
+                )
+            }
+        }
+        let before = try client.pendingWebsiteIconOperations()
+        let epoch = try client.websiteIconRevision()
+        let inputs = records
+        let attempt: @Sendable (Database) -> Void = { db in
+            #expect(throws: (any Error).self) {
+                try SyncClient.seedDeferredWebsiteIcons(
+                    in: db, records: inputs,
+                    binding: kind == "binding"
+                        ? SyncLibraryBinding(libraryID: UUID(), serviceID: UUID()) : f.binding,
+                    deviceID: kind == "device" ? f.b : f.a, blobs: client.blobs)
+            }
+        }
+        if kind == "transaction" {
+            client.writer.writeWithoutTransaction(attempt)
+        } else {
+            try client.writer.write(attempt)
+        }
+        #expect(try client.pendingWebsiteIconOperations() == before)
+        #expect(try client.websiteIconRevision() == epoch)
+        #expect(
+            try client.writer.read { try Int64.fetchOne($0, sql: "SELECT sequence FROM sync_meta") }
+                == 0)
+        if before.isEmpty {
+            try client.writer.write { db in
+                try db.execute(sql: "DROP TRIGGER IF EXISTS refuse_second_deferred")
+                let operations = try SyncClient.seedDeferredWebsiteIcons(
+                    in: db, records: [first, other], binding: f.binding, deviceID: f.a,
+                    blobs: client.blobs)
+                #expect(operations.map(\.sequence) == [1, 2])
+            }
+        }
+    }
+
     @Test(arguments: [
         "https://www.capd.dev/path?a=b#c", "HTTPS://WWW.CAPD.DEV:443/", "https://www.capd.dev",
     ])
