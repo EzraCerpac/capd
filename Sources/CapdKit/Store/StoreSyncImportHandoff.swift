@@ -13,6 +13,11 @@ public struct StoreSyncImportHandoff: Sendable {
     private let websiteIconBaseline: WebsiteIconBaseline?
     private let websiteIconAssets: ImportWebsiteIconAssets?
 
+    private var missingWebsiteIcons: [WebsiteIconRecord] {
+        let targetIDs = Set(websiteIconBaseline?.records.map(\.id) ?? [])
+        return sourceWebsiteIcons.filter { !targetIDs.contains($0.id) }
+    }
+
     public init(store: Store, transport: any BoundSyncTransport) throws {
         guard store.syncClient == nil else { throw SyncError.invalidOperation }
         let baseline = try transport.baseline()
@@ -135,11 +140,24 @@ public struct StoreSyncImportHandoff: Sendable {
                 uniqueKeysWithValues: websiteIconBaseline.records.map { ($0.id, $0) })
             for source in sourceWebsiteIcons {
                 try source.validate()
-                guard target[source.id]?.origin == source.origin else {
+                if let existing = target[source.id], existing.origin != source.origin {
                     throw SyncError.invalidOperation
                 }
             }
         }
+        var assets: [String: BlobReference] = [:]
+        for reference in baseline.captures.compactMap(\.source.blob)
+            + (websiteIconBaseline?.records ?? []).compactMap(\.content?.blob)
+            + missingWebsiteIcons.compactMap(\.content?.blob)
+        {
+            guard assets[reference.digest] == nil || assets[reference.digest] == reference else {
+                throw SyncError.invalidBlob
+            }
+            assets[reference.digest] = reference
+        }
+        guard assets.count <= 4_096,
+            assets.values.reduce(Int64(0), { $0 + Int64($1.byteCount) }) <= 1_073_741_824
+        else { throw SyncHTTPError.resourceLimit }
         let records = Dictionary(uniqueKeysWithValues: baseline.captures.map { ($0.id, $0) })
         for capture in captures {
             guard let id = capture.id, let uuid = identities[id], let record = records[uuid],
@@ -162,24 +180,11 @@ public struct StoreSyncImportHandoff: Sendable {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]
         let records = Dictionary(uniqueKeysWithValues: baseline.captures.map { ($0.id, $0) })
-        if websiteIconBaseline == nil, !sourceWebsiteIcons.isEmpty {
+        if !missingWebsiteIcons.isEmpty {
             let source = try BlobStore(
                 directory: paths.assetsDirectory.standardizedFileURL
                     .resolvingSymlinksInPath().appendingPathComponent("website-icons"))
-            var assets: [String: BlobReference] = [:]
-            for reference in baseline.captures.compactMap(\.source.blob)
-                + sourceWebsiteIcons.compactMap(\.content?.blob)
-            {
-                guard assets[reference.digest] == nil || assets[reference.digest] == reference
-                else {
-                    throw SyncError.invalidBlob
-                }
-                assets[reference.digest] = reference
-            }
-            guard assets.count <= 4_096,
-                assets.values.reduce(Int64(0), { $0 + Int64($1.byteCount) }) <= 1_073_741_824
-            else { throw SyncHTTPError.resourceLimit }
-            for icon in sourceWebsiteIcons {
+            for icon in missingWebsiteIcons {
                 guard let content = icon.content else { throw SyncError.invalidBlob }
                 let bytes = try source.read(content.blob)
                 try WebsiteIconService.validatePNG(bytes)
@@ -207,7 +212,7 @@ public struct StoreSyncImportHandoff: Sendable {
             try websiteIconAssets.copy(into: blobs)
             try SyncClient.seedWebsiteIconBaseline(
                 in: db, baseline: websiteIconBaseline, binding: binding,
-                deviceID: deviceID, blobs: blobs)
+                deviceID: deviceID, blobs: blobs, deferredRecords: missingWebsiteIcons)
             for record in websiteIconBaseline.records {
                 try Store.projectWebsiteIcon(in: db, record: record)
             }
