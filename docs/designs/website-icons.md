@@ -21,6 +21,9 @@ returned binary address, then connects to a validated numeric address. TLS
 uses the original hostname and default system anchors. The fixed favicon GET
 follows successful trust evaluation. There are no cookies, client certificates,
 redirects, proxy fallback or ancillary trust-network requests.
+The HTTP parser validates and discards unrelated response fields, including
+repeated fields. Content-Length, Transfer-Encoding and Content-Encoding remain
+strictly checked, including duplicate refusal.
 
 The absolute five-second network deadline and two-worker admission limit bound
 active work. The 256 KiB encrypted-stream allowance includes the TLS handshake
@@ -79,18 +82,20 @@ active-worker slot until it returns. The iPhone preference controls display;
 generation remains owned by the Mac Agent.
 
 Content snapshots use version 2 when icon records are present. Version 1
-omission preserves target icons. Existing valid target icons win, and all
+omission preserves target icons whose origins remain referenced by the final
+capture batch. Existing valid target icons win, and all
 assets, identities and admission budgets are verified before publication.
 Enrollment stages icon assets on disk and pins the icon baseline to its capture
 cursor. Unbound Mac icons live in a separate `assets/website-icons` namespace;
 the handoff copies verified reachable assets into a fresh bound namespace with
 rollback. A populated unbound sync blob namespace is never silently rebound.
 
-Enrollment against an older server queues preserved icons as durable pending
-upserts in the same transaction as the capture baseline. They retain their
-verified bytes and retry after the server gains icon support, without changing
-the generation setting or fetching the origin again. A newer icon already on
-the server wins through the normal revision check.
+Enrollment installs the verified target baseline and queues local icons missing
+from it as durable pending upserts in the same transaction as the capture
+baseline. Existing target icons and tombstones remain authoritative. Against
+an older server, all preserved icons remain queued until it gains icon support.
+They retain their verified bytes without changing the generation setting or
+fetching the origin again.
 
 Legacy pending enrollment fingerprints remain valid only when the known icon
 namespace is wholly empty, including its history and counters. Real icon state
