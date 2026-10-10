@@ -50,6 +50,29 @@ extension Store {
         try reader.read(Self.websiteIconRecords(in:))
     }
 
+    /// Live origins with no icon authority yet; tombstones and pending synced replacements block fallback.
+    public func legacyWebsiteIconOrigins() throws -> [WebsiteIconOrigin] {
+        try reader.read { db in
+            let hasIcons = try db.tableExists("sync_website_icon_records")
+            let blocked =
+                hasIcons
+                ? try String.fetchSet(
+                    db,
+                    sql:
+                        "SELECT id FROM sync_website_icon_records UNION SELECT id FROM sync_website_icon_visible"
+                )
+                : []
+            return try Row.fetchAll(
+                db,
+                sql:
+                    "SELECT id,origin FROM website_icon_jobs WHERE content IS NULL AND revision=0 AND EXISTS(SELECT 1 FROM capture_icon_origins WHERE origin_id=website_icon_jobs.id) ORDER BY id"
+            ).compactMap { row in
+                guard !blocked.contains(row["id"]) else { return nil }
+                return WebsiteIconOrigin(url: row["origin"])
+            }
+        }
+    }
+
     static func websiteIconRecords(in db: Database) throws -> [WebsiteIconRecord] {
         try Row.fetchAll(
             db,

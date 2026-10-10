@@ -10,6 +10,16 @@ library binding, device identity and the claim token.
 
 ## Origins and fetching
 
+Retained Mac favicon PNGs remain available as an offline presentation fallback
+for live link origins without any icon authority. Synced artwork, tombstones,
+unsupported records and read failures prevent legacy fallback. Files are bounded,
+decoded and normalized in memory; originals and sync history are unchanged.
+The phone's older global cache additionally requires an installation-verified
+`Library/legacy-website-icons-library.json` owner matching the complete selected
+library configuration and generation. The app does not infer or reassign ownership;
+missing, invalid or mismatched ownership fails closed. Ownership metadata lives
+outside the purgeable cache. Library transitions and late loads remain fenced.
+
 `WebsiteIconOrigin` accepts HTTPS DNS hosts on port 443. It rejects credentials,
 IP literals and local or reserved names, retains `www`, and removes the path,
 query and fragment. Unicode and punycode host spellings share a canonical ASCII

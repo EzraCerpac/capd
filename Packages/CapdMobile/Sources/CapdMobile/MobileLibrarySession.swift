@@ -1,4 +1,5 @@
 import CapdSync
+import Darwin
 import Foundation
 
 public struct MobileLibrarySessionToken: Equatable, Sendable {
@@ -91,6 +92,55 @@ public final class MobileLibrarySession: Sendable {
         let lease = try access.lease()
         defer { withExtendedLifetime(lease) {} }
         return try store.websiteIconData(record)
+    }
+
+    public func websiteIconRecord(for url: String, token: MobileLibrarySessionToken) throws
+        -> WebsiteIconRecord?
+    {
+        guard token == self.token else { throw MobileActivationError.sessionReplaced }
+        let lease = try access.lease()
+        defer { withExtendedLifetime(lease) {} }
+        return try store.websiteIconRecord(for: url)
+    }
+
+    /// Retained global cache is usable only with a verified, durable owner for this selected library.
+    public func legacyWebsiteIconDirectory(for url: String, token: MobileLibrarySessionToken) throws
+        -> URL?
+    {
+        guard token == self.token else { throw MobileActivationError.sessionReplaced }
+        let lease = try access.lease()
+        defer { withExtendedLifetime(lease) {} }
+        guard let origin = WebsiteIconOrigin(url: url),
+            try store.websiteIconRecord(for: url) == nil,
+            try store.hasWebsiteIconOrigin(origin)
+        else { return nil }
+        let marker = access.root.appendingPathComponent("Library/legacy-website-icons-library.json")
+        guard marker == marker.resolvingSymlinksInPath(),
+            let values = try? marker.resourceValues(forKeys: [
+                .isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey,
+            ]),
+            values.isRegularFile == true, values.isSymbolicLink != true,
+            let size = values.fileSize, (1...8192).contains(size),
+            let bytes = try? Self.readLegacyOwner(marker, size: size), bytes.count == size,
+            let owner = try? JSONDecoder().decode(MobileLibraryConfiguration.self, from: bytes),
+            owner == configuration
+        else { return nil }
+        let directory = access.root.appendingPathComponent(
+            "Library/Caches/WebsiteIcons", isDirectory: true)
+        guard directory == directory.resolvingSymlinksInPath() else { return nil }
+        return directory
+    }
+
+    private static func readLegacyOwner(_ file: URL, size: Int) throws -> Data {
+        let descriptor = Darwin.open(file.path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
+        guard descriptor >= 0 else { throw MobileActivationError.invalidConfiguration }
+        let handle = FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
+        defer { try? handle.close() }
+        var status = stat()
+        guard fstat(descriptor, &status) == 0, status.st_mode & S_IFMT == S_IFREG,
+            status.st_size == size
+        else { throw MobileActivationError.invalidConfiguration }
+        return try handle.read(upToCount: 8193) ?? Data()
     }
 
     /// App index updates and extension donation/repair use the same cross-process lock.

@@ -30,9 +30,7 @@ package final class FaviconStore {
     package convenience init(store: Store, scope: String, generation: UUID = UUID()) {
         let records = FaviconRecordReader(store: store)
         self.init(scope: scope, generation: generation) { record in
-            try await Task.detached(priority: .utility) {
-                try store.verifiedWebsiteIconData(record)
-            }.value
+            try await records.data(for: record)
         }
         startRefreshing(readRecords: { try await records.changedRecords() })
     }
@@ -176,7 +174,18 @@ actor FaviconRecordReader {
             try checkLibrary()
             let current = try monitor.revision()
             guard current != revision else { return nil }
-            let records = try store.storedWebsiteIcons()
+            var records = try store.storedWebsiteIcons()
+            for origin in try store.legacyWebsiteIconOrigins() {
+                guard
+                    let bytes = try? LegacyWebsiteIconPNG.read(
+                        at: store.paths.faviconURL(forHost: origin.host))
+                else { continue }
+                records.append(
+                    WebsiteIconRecord(
+                        origin: origin, revision: 0,
+                        content: WebsiteIconContent(
+                            blob: BlobReference(data: bytes), fetchedAt: .distantPast)))
+            }
             try checkLibrary()
             revision = current
             return records
@@ -184,6 +193,23 @@ actor FaviconRecordReader {
             revision = nil
             throw error
         }
+    }
+
+    func data(for record: WebsiteIconRecord) throws -> Data? {
+        try checkLibrary()
+        let bytes: Data?
+        if try store.websiteIcon(for: record.origin.canonicalHTTPSOrigin) == record {
+            bytes = try store.verifiedWebsiteIconData(record)
+        } else {
+            guard record.revision == 0,
+                try store.legacyWebsiteIconOrigins().contains(record.origin)
+            else { return nil }
+            bytes = try LegacyWebsiteIconPNG.read(
+                at: store.paths.faviconURL(forHost: record.origin.host))
+            guard try store.legacyWebsiteIconOrigins().contains(record.origin) else { return nil }
+        }
+        try checkLibrary()
+        return bytes
     }
 
     private func checkLibrary() throws {
