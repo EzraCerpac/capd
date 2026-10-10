@@ -61,6 +61,10 @@ struct LibraryView: View {
                                 },
                                 readData: { [model] record, token in
                                     try await model.websiteIconData(record, scopeToken: token)
+                                },
+                                readLegacyData: { [model] url, token in
+                                    try await model.legacyWebsiteIconData(
+                                        for: url, scopeToken: token)
                                 })
 
                         }

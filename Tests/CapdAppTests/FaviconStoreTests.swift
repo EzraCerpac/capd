@@ -2,7 +2,10 @@ import AppKit
 import CapdSync
 import Foundation
 import GRDB
+import ImageIO
+import SwiftUI
 import Testing
+import UniformTypeIdentifiers
 
 @testable import CapdAppUI
 @testable import CapdKit
@@ -10,6 +13,86 @@ import Testing
 @MainActor
 @Suite("Offline favicon store")
 struct FaviconStoreTests {
+    @Test func retainedCacheWorksOfflineWithoutGenerationOrSyncWrites() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let paths = StoragePaths(root: root)
+        let store = try Store(paths: paths)
+        let capture = try CaptureService(store: store).ingest(
+            CaptureRequest(url: "https://www.sqlite.org/first", fetchBody: false))
+        let original = try png(.black)
+        let file = paths.faviconURL(forHost: "www.sqlite.org")
+        try original.write(to: file)
+        let reader = FaviconRecordReader(store: store)
+        let records = try #require(try await reader.changedRecords())
+        #expect(records.count == 1 && records.first?.revision == 0)
+        let consumer = FaviconStore(store: store, scope: paths.databaseURL.path)
+        #expect(try await eventually { consumer.favicon(forURL: "https://www.sqlite.org") != nil })
+        let renderer = ImageRenderer(
+            content: FaviconTile(
+                url: "https://www.sqlite.org", fallbackSymbol: "link",
+                fallbackTint: .blue, size: 96
+            ).environment(\.faviconStore, consumer))
+        let rendered = try #require(renderer.cgImage)
+        let center = try #require(
+            CGContext(
+                data: nil, width: 1, height: 1, bitsPerComponent: 8, bytesPerRow: 4,
+                space: CGColorSpaceCreateDeviceRGB(),
+                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
+        center.draw(rendered, in: CGRect(x: -48, y: -48, width: 96, height: 96))
+        let pixel = try #require(center.data).assumingMemoryBound(to: UInt8.self)
+        #expect(pixel[0] < 20 && pixel[1] < 20 && pixel[2] < 20)
+        if let path = ProcessInfo.processInfo.environment["CAPD_ICON_RENDER_PATH"] {
+            let output = NSMutableData()
+            let destination = try #require(
+                CGImageDestinationCreateWithData(
+                    output,
+                    UTType.png.identifier as CFString, 1, nil))
+            CGImageDestinationAddImage(destination, rendered, nil)
+            #expect(CGImageDestinationFinalize(destination))
+            try (output as Data).write(to: URL(fileURLWithPath: path))
+        }
+        #expect(try store.websiteIconsEnabled() == false)
+        #expect(try store.storedWebsiteIcons().isEmpty)
+        #expect(try Data(contentsOf: file) == original)
+        _ = try store.deleteCaptures(ids: [try #require(capture.capture.id)])
+        #expect(try await reader.changedRecords()?.isEmpty == true)
+        #expect(try await reader.data(for: #require(records.first)) == nil)
+        #expect(try Data(contentsOf: file) == original)
+    }
+
+    @Test(arguments: [false, true])
+    func authoritativeArtworkOrTombstoneBlocksRetainedCache(deleted: Bool) async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let paths = StoragePaths(root: root)
+        let store = try Store(paths: paths)
+        _ = try CaptureService(store: store).ingest(
+            CaptureRequest(url: "https://sqlite.org/first", fetchBody: false))
+        try png(.black).write(to: paths.faviconURL(forHost: "sqlite.org"))
+        let reader = FaviconRecordReader(store: store)
+        let old = try #require(try await reader.changedRecords()?.first)
+        let bytes = try normalizedPNG(.white)
+        let record = WebsiteIconRecord(
+            origin: old.origin, revision: 1, deleted: deleted,
+            content: deleted ? nil : WebsiteIconContent(blob: BlobReference(data: bytes)))
+        try store.write { try Store.projectWebsiteIcon(in: $0, record: record) }
+        #expect(try store.legacyWebsiteIconOrigins().isEmpty)
+        #expect(try await reader.data(for: old) == nil)
+        let fresh = try #require(try await reader.changedRecords())
+        #expect(deleted ? fresh.isEmpty : fresh == [record])
+    }
+
+    @Test func legacyEligibilityDoesNotDropTheLastOriginInALargeLibrary() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = try Store(paths: StoragePaths(root: root))
+        for index in 0..<129 {
+            _ = try CaptureService(store: store).ingest(
+                CaptureRequest(url: "https://site\(index).example.org/article", fetchBody: false))
+        }
+        #expect(try store.legacyWebsiteIconOrigins().count == 129)
+    }
     @Test(arguments: ["replacement", "new", "removed"])
     func anotherStoreRefreshesAnExistingConsumer(change: String) async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)

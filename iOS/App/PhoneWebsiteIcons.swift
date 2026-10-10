@@ -9,6 +9,7 @@ final class PhoneWebsiteIcons {
     private let defaults: UserDefaults
     private(set) var displayEnabled: Bool
     let cache = WebsiteIconCache()
+    let legacyReader = LegacyWebsiteIconReader()
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults

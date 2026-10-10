@@ -21,7 +21,9 @@ struct WebsiteCaptureRow: View {
     let iconRevision: Int64
     let readRecord: @Sendable (String, MobileLibrarySessionToken) async throws -> WebsiteIconRecord?
     let readData: @Sendable (WebsiteIconRecord, MobileLibrarySessionToken) async throws -> Data?
+    let readLegacyData: @Sendable (String, MobileLibrarySessionToken) async throws -> Data?
     @State private var record: WebsiteIconRecord?
+    @State private var usesLegacyCache = false
     @State private var loadedRequest: Request?
 
     private var request: Request {
@@ -45,6 +47,10 @@ struct WebsiteCaptureRow: View {
 
     private var load: WebsiteIconCache.Loader? {
         guard let record, let token = scopeToken else { return nil }
+        if usesLegacyCache, let url = capture.url {
+            let read = readLegacyData
+            return { _ in try await read(url, token) }
+        }
         let read = readData
         return { _ in try await read(record, token) }
     }
@@ -64,15 +70,34 @@ struct WebsiteCaptureRow: View {
         .task(id: request) {
             let expected = request
             record = nil
+            usesLegacyCache = false
             loadedRequest = nil
             guard expected.display, let url = expected.url, let token = scopeToken,
-                let origin = WebsiteIconOrigin(url: url),
-                let found = try? await readRecord(url, token), !Task.isCancelled,
-                request == expected,
-                found.origin == origin, !found.deleted, (try? found.validate()) != nil
+                let origin = WebsiteIconOrigin(url: url)
             else { return }
-            record = found
-            loadedRequest = expected
+            do {
+                let found: WebsiteIconRecord
+                let legacy: Bool
+                if let authoritative = try await readRecord(url, token) {
+                    found = authoritative
+                    legacy = false
+                } else {
+                    guard let bytes = try await readLegacyData(url, token),
+                        try await readRecord(url, token) == nil
+                    else { return }
+                    found = WebsiteIconRecord(
+                        origin: origin, revision: 0,
+                        content: WebsiteIconContent(
+                            blob: BlobReference(data: bytes), fetchedAt: .distantPast))
+                    legacy = true
+                }
+                guard !Task.isCancelled, request == expected,
+                    found.origin == origin, !found.deleted, (try? found.validate()) != nil
+                else { return }
+                record = found
+                usesLegacyCache = legacy
+                loadedRequest = expected
+            } catch { return }
         }
     }
 }

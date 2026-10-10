@@ -2,6 +2,7 @@ import AppIntents
 import CapdMobile
 import CapdSync
 import CapdSystemIntegration
+import CapdWebsiteIcons
 import CoreSpotlight
 import SwiftUI
 
@@ -189,7 +190,7 @@ final class LibraryModel {
         }
         let record = try await Task.detached(priority: .utility) {
             try Task.checkCancellation()
-            return try session.websiteIcon(for: url, token: token)
+            return try session.websiteIconRecord(for: url, token: token)
         }.value
         try Task.checkCancellation()
         guard !changingLibrary, librarySession?.token == token, session.isCurrent(token) else {
@@ -212,6 +213,32 @@ final class LibraryModel {
         guard !changingLibrary, librarySession?.token == scopeToken,
             session.isCurrent(scopeToken)
         else { throw MobileActivationError.sessionReplaced }
+        return bytes
+    }
+
+    func legacyWebsiteIconData(for url: String, scopeToken: MobileLibrarySessionToken) async throws
+        -> Data?
+    {
+        guard !changingLibrary, let session = librarySession, session.token == scopeToken else {
+            throw MobileActivationError.sessionReplaced
+        }
+        let reader = websiteIcons.legacyReader
+        let bytes = try await Task.detached(priority: .utility) {
+            guard let origin = WebsiteIconOrigin(url: url),
+                let directory = try session.legacyWebsiteIconDirectory(for: url, token: scopeToken)
+            else { return nil as Data? }
+            let file = directory.appendingPathComponent(
+                BlobReference(data: Data(origin.host.utf8)).digest + ".png")
+            let bytes = try await reader.read(at: file)
+            guard try session.legacyWebsiteIconDirectory(for: url, token: scopeToken) == directory
+            else { return nil }
+            return bytes
+        }.value
+        try Task.checkCancellation()
+        guard !changingLibrary, librarySession?.token == scopeToken, session.isCurrent(scopeToken)
+        else {
+            throw MobileActivationError.sessionReplaced
+        }
         return bytes
     }
 

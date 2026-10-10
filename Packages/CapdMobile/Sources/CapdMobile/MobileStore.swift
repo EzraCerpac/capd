@@ -422,13 +422,18 @@ public final class MobileStore: Sendable {
     }
 
     public func websiteIcon(for url: String) throws -> WebsiteIconRecord? {
-        let lease = try access?.lease()
-        defer { withExtendedLifetime(lease) {} }
-        guard let origin = WebsiteIconOrigin(url: url),
-            let record = try client.websiteIcon(originID: origin.id),
+        guard let record = try websiteIconRecord(for: url),
             !record.deleted, record.content?.normalizerVersion == 1
         else { return nil }
         return record
+    }
+
+    /// Includes tombstones so presentation can distinguish absent authority from deleted artwork.
+    public func websiteIconRecord(for url: String) throws -> WebsiteIconRecord? {
+        let lease = try access?.lease()
+        defer { withExtendedLifetime(lease) {} }
+        guard let origin = WebsiteIconOrigin(url: url) else { return nil }
+        return try client.websiteIcon(originID: origin.id)
     }
 
     public func websiteIconData(_ record: WebsiteIconRecord) throws -> Data? {
@@ -440,6 +445,17 @@ public final class MobileStore: Sendable {
             try client.websiteIcon(originID: record.origin.id) == record
         else { return nil }
         return try client.blobs.read(content.blob)
+    }
+
+    func hasWebsiteIconOrigin(_ origin: WebsiteIconOrigin) throws -> Bool {
+        try database.read { db in
+            let urls = try String.fetchCursor(
+                db, sql: "SELECT url FROM mobile_captures WHERE kind='link' AND url IS NOT NULL")
+            while let url = try urls.next() {
+                if WebsiteIconOrigin(url: url) == origin { return true }
+            }
+            return false
+        }
     }
 
     public func websiteIconRevision() throws -> Int64 {
