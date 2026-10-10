@@ -145,12 +145,18 @@ enum StoreSync {
             case .text:
                 capture.enrichmentState = .ok
             case .link where record.generated.body != nil:
-                let isThin = record.generated.body!.isEmpty || record.generated.bodyIsThin == true
+                let boilerplate = BodyClassifier.isBoilerplate(record.generated.body!)
+                let isThin =
+                    record.generated.body!.isEmpty || record.generated.bodyIsThin == true
+                    || boilerplate
                 let status: BodyStatus = isThin ? .thin : .ok
                 let keepPending =
                     capture.enrichmentState == .pending
                     && original?.body == record.generated.body && capture.bodyStatus == status
-                capture.enrichmentState = keepPending ? .pending : isThin ? .thin : .ok
+                let retryBoilerplate =
+                    boilerplate && capture.attemptCount < EnrichmentService.maxAttempts
+                capture.enrichmentState =
+                    keepPending || retryBoilerplate ? .pending : isThin ? .thin : .ok
                 capture.bodyStatus = isThin ? .thin : .ok
             case .image where record.generated.ocrText != nil:
                 let keepPending =

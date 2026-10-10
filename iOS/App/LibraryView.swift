@@ -281,8 +281,6 @@ struct CaptureDetailView: View {
                 Section("Source") {
                     if let raw = capture.url, let url = URL(string: raw) {
                         Link(raw, destination: url)
-                        Text("URL capture. No webpage body has been fetched.").font(.footnote)
-                            .foregroundStyle(palette.textSecondary)
                     }
                     if !capture.selection.isEmpty {
                         Text(capture.selection).textSelection(.enabled)

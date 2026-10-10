@@ -6,7 +6,7 @@ import Foundation
 /// The service, not the steps, owns the state machine — there is no legal path from
 /// `pending` straight to `ok`, and steps stay pure so they never need write access.
 public struct EnrichmentService: Sendable {
-    /// Claims a capture gets before a reclaim declares it failed.
+    /// Bounds both automatic body retries and abandoned claims.
     public static let maxAttempts = 3
 
     /// How long a `fetching` claim may sit before another process may presume its owner
@@ -64,6 +64,12 @@ public struct EnrichmentService: Sendable {
         try store.pendingEnrichmentCount()
     }
 
+    /// Requeues legacy consent bodies within their existing attempt budget, retaining their text.
+    @discardableResult
+    public func recoverBoilerplateBodies() throws -> Int {
+        try store.requeueBoilerplateBodies(maxAttempts: Self.maxAttempts)
+    }
+
     private func enrich(_ claimed: Capture, id: Int64, revision: Int64?) async throws -> Capture {
         let context = ProcessingContext(paths: store.paths)
         var merged = StepResult()
@@ -87,8 +93,14 @@ public struct EnrichmentService: Sendable {
 
         try await validateCompletion(claimed, id: id, revision: revision)
 
+        let retryBody =
+            merged.bodyExtraction.map {
+                ($0.status == .thin || $0.status == .failed)
+                    && claimed.attemptCount < Self.maxAttempts
+            } ?? false
         let completed = try store.completeEnrichment(
-            id: id, result: merged, state: merged.enrichmentState, expectedClaim: claimed)
+            id: id, result: merged, state: retryBody ? .pending : merged.enrichmentState,
+            expectedClaim: claimed)
         Log.pipeline.info(
             "capture \(id) enriched: \(completed.enrichmentState.rawValue, privacy: .public)")
         return completed

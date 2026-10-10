@@ -90,13 +90,26 @@ extension Store {
             let preserveOCR =
                 syncClient != nil && expectedClaim != nil
                 && current.ocrText != expectedClaim!.ocrText
+            let retainSavedBody =
+                result.bodyExtraction.map { extraction in
+                    guard current.body?.split(whereSeparator: \.isWhitespace).isEmpty == false
+                    else {
+                        return false
+                    }
+                    let saved = BodyExtractionResult(
+                        body: current.body, status: current.bodyStatus,
+                        source: current.bodySource ?? .fetch)
+                    return saved.preferring(extraction) == saved
+                } ?? false
             if let ocrText = result.ocrText, !preserveOCR {
                 updated.ocrText = ocrText
             }
-            if let extraction = result.bodyExtraction, !preserveBody {
+            if let extraction = result.bodyExtraction, !preserveBody, !retainSavedBody {
                 updated.body = extraction.body
                 updated.bodyStatus = extraction.status
                 updated.bodySource = extraction.source
+            }
+            if let extraction = result.bodyExtraction, !preserveBody {
                 // Fills a hole, never overwrites: a title from capture time or the user
                 // beats one scraped out of the page.
                 if updated.title == nil {
@@ -105,11 +118,22 @@ extension Store {
             }
             updated.enrichmentState = state
             if preserveBody && updated.kind == .link {
-                let isThin = updated.body?.isEmpty == true || shared?.generated.bodyIsThin == true
+                let boilerplate = updated.body.map(BodyClassifier.isBoilerplate) ?? false
+                let isThin =
+                    updated.body?.isEmpty == true || shared?.generated.bodyIsThin == true
+                    || boilerplate
+                let retryBoilerplate =
+                    boilerplate && updated.attemptCount < EnrichmentService.maxAttempts
                 updated.enrichmentState =
-                    updated.body == nil ? .pending : isThin ? .thin : .ok
+                    updated.body == nil || retryBoilerplate ? .pending : isThin ? .thin : .ok
                 updated.bodyStatus =
                     updated.body == nil ? .none : isThin ? .thin : .ok
+            } else if retainSavedBody && updated.kind == .link {
+                if let body = updated.body, BodyClassifier.isBoilerplate(body) {
+                    updated.bodyStatus = .thin
+                }
+                updated.enrichmentState =
+                    updated.bodyStatus == .ok ? .ok : state == .pending ? .pending : .thin
             } else if preserveOCR && updated.kind == .image {
                 updated.enrichmentState = updated.ocrText == nil ? .pending : .ok
             }
@@ -122,6 +146,26 @@ extension Store {
                 try enqueueChanges(from: current, to: updated, in: db)
             }
             return updated
+        }
+    }
+
+    func requeueBoilerplateBodies(maxAttempts: Int) throws -> Int {
+        try write { db in
+            let candidates = try Capture.fetchAll(
+                db,
+                sql: """
+                    SELECT * FROM \(Schema.captures)
+                    WHERE kind = 'link' AND enrichment_state IN ('ok', 'thin')
+                        AND attempt_count < ? AND body LIKE '%cookie%'
+                    """, arguments: [maxAttempts])
+            var count = 0
+            for var capture in candidates {
+                guard let body = capture.body, BodyClassifier.isBoilerplate(body) else { continue }
+                capture.enrichmentState = .pending
+                try capture.update(db)
+                count += 1
+            }
+            return count
         }
     }
 

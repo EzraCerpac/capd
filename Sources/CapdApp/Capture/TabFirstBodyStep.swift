@@ -24,9 +24,10 @@ struct TabFirstBodyStep: ProcessingStep {
             let tabHTML = try? TabExtractor().extractHTML(fromBrowserWithBundleID: bundleID)
         {
             let fromTab = await pipeline.extract(tabHTML: tabHTML, url: url)
-            if fromTab.status != .failed {
+            if fromTab.status == .ok {
                 return fromTab
             }
+            return fromTab.preferring(await pipeline.extract(url: url))
         }
         return await pipeline.extract(url: url)
     }

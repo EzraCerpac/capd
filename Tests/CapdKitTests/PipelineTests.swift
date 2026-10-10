@@ -178,11 +178,11 @@ struct PipelineTests {
     }
 
     @Test(
-        "A body step's status decides the enrichment state",
+        "Weak body results remain queued for a bounded retry",
         arguments: [
             (BodyStatus.ok, EnrichmentState.ok),
-            (BodyStatus.thin, EnrichmentState.thin),
-            (BodyStatus.failed, EnrichmentState.failed),
+            (BodyStatus.thin, EnrichmentState.pending),
+            (BodyStatus.failed, EnrichmentState.pending),
         ])
     func runnerLandsBodyStatusOnTheRow(status: BodyStatus, expected: EnrichmentState) async throws {
         try await withTemporaryPaths { paths in

@@ -28,8 +28,7 @@ public struct BodyExtractionResult: Sendable, Equatable, Codable {
         self.title = title
     }
 
-    /// A thin body is stored anyway — the user did see those words, and a refetch replaces
-    /// them. A failed extraction stores nothing.
+    /// A thin body is retained until a better extraction is available.
     public init(classifying extracted: ExtractedBody?, source: BodySource) {
         let status = BodyClassifier.classify(extracted)
         self.init(
@@ -50,6 +49,20 @@ public struct BodyExtractionResult: Sendable, Equatable, Codable {
             .failed
         }
     }
+
+    /// Keeps useful text over boilerplate and retains the original when quality is equal.
+    public func preferring(_ candidate: BodyExtractionResult) -> BodyExtractionResult {
+        if candidate.quality > quality {
+            return candidate
+        }
+        return self
+    }
+
+    private var quality: Int {
+        guard let body, !body.split(whereSeparator: \.isWhitespace).isEmpty else { return 0 }
+        if BodyClassifier.isBoilerplate(body) { return 1 }
+        return status == .ok ? 3 : 2
+    }
 }
 
 /// Runs extraction end to end for one capture: Readability first, SwiftSoup as salvage,
@@ -65,8 +78,7 @@ public struct BodyExtractionPipeline: Sendable {
         }
         let fetcher = try? ReadabilityFetcher()
         let readable = await fetcher?.extractReadable(fromHTML: tabHTML, baseURL: url)
-        let extracted = readable ?? SoupExtractor.extract(html: tabHTML, url: url)
-        return BodyExtractionResult(classifying: extracted, source: .tab)
+        return Self.select(readable: readable, html: tabHTML, url: url, source: .tab)
     }
 
     /// Fetches the page itself, under `FetchPolicy`'s hardening.
@@ -76,14 +88,24 @@ public struct BodyExtractionPipeline: Sendable {
             return BodyExtractionResult(classifying: nil, source: .fetch)
         }
         switch await fetcher.fetchAndExtract(url) {
-        case .extracted(let extracted):
-            return BodyExtractionResult(classifying: extracted, source: .fetch)
+        case .extracted(let extracted, let html):
+            return Self.select(readable: extracted, html: html, url: url, source: .fetch)
         case .snapshot(let html):
             let salvaged = SoupExtractor.extract(html: html, url: url)
             return BodyExtractionResult(classifying: salvaged, source: .fetch)
         case .failed:
             return BodyExtractionResult(classifying: nil, source: .fetch)
         }
+    }
+
+    static func select(readable: ExtractedBody?, html: String, url: URL, source: BodySource)
+        -> BodyExtractionResult
+    {
+        let primary = BodyExtractionResult(classifying: readable, source: source)
+        guard primary.status != .ok else { return primary }
+        return primary.preferring(
+            BodyExtractionResult(
+                classifying: SoupExtractor.extract(html: html, url: url), source: source))
     }
 }
 
@@ -111,12 +133,45 @@ public enum BodyClassifier {
         "access denied",
     ]
 
+    private static let cookieChoices = [
+        "accept all cookies", "reject all cookies", "cookie settings", "cookie preferences",
+        "manage consent", "consent preferences", "privacy preferences",
+    ]
+    private static let cookiePolicies = [
+        "we use cookies", "uses cookies", "cookies and similar technologies",
+        "necessary cookies", "functional cookies", "performance cookies",
+        "advertising cookies", "personalised ads", "personalized ads",
+    ]
+
+    static func isBoilerplate(_ text: String) -> Bool {
+        let lowered = text.lowercased()
+        guard cookieChoices.contains(where: lowered.contains),
+            cookiePolicies.count(where: lowered.contains) >= 2
+        else { return false }
+        let words = lowered.split(whereSeparator: { !$0.isLetter && !$0.isNumber })
+        var policyWords = Set<Int>()
+        for signal in cookieChoices + cookiePolicies {
+            let phrase = signal.split(separator: " ")
+            guard words.count >= phrase.count else { continue }
+            for start in 0...(words.count - phrase.count) {
+                guard zip(words[start...], phrase).allSatisfy({ $0 == $1 }) else { continue }
+                let lower = max(0, start - 8)
+                let upper = min(words.count, start + phrase.count + 8)
+                policyWords.formUnion(lower..<upper)
+            }
+        }
+        return policyWords.count * 5 >= words.count * 3
+    }
+
     public static func classify(_ extracted: ExtractedBody?) -> BodyStatus {
         guard let extracted else { return .failed }
 
         let wordCount = extracted.text.split(whereSeparator: \.isWhitespace).count
         if wordCount == 0 {
             return .failed
+        }
+        if isBoilerplate(extracted.text) {
+            return .thin
         }
         if wordCount < thinWordCount {
             return .thin
