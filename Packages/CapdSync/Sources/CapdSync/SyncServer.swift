@@ -132,7 +132,19 @@ public final class SyncServer: SyncTransport, Sendable {
                 arguments: [operation.id.uuidString])
             {
                 let data: Data = row["operation"]
-                guard try SyncDatabase.decode(SyncOperation.self, data) == operation else {
+                let original = try SyncDatabase.decode(SyncOperation.self, data)
+                let retry: SyncOperation
+                // Older service receipts have no request fingerprint; their full operation remains the retry key.
+                if servicePrincipalID != nil, original.requestIdentity == nil {
+                    retry = SyncOperation(
+                        id: operation.id, deviceID: operation.deviceID,
+                        sequence: operation.sequence, captureID: operation.captureID,
+                        baseRevision: operation.baseRevision,
+                        predecessorID: operation.predecessorID, mutation: operation.mutation)
+                } else {
+                    retry = operation
+                }
+                guard original == retry else {
                     throw SyncError.operationIDReused
                 }
                 let receipt = try SyncDatabase.decode(SyncReceipt.self, row["receipt"])
