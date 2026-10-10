@@ -80,6 +80,7 @@ struct CapdAgent {
             Task {
                 var taggingRetry = TagRetryPolicy()
                 guard await startSync(session.runtime) else { return }
+                _ = try? enrichment.recoverBoilerplateBodies()
                 await sweep(
                     enrichment: enrichment,
                     olderThan: session.runtime == nil ? nil : EnrichmentService.staleClaimAge)

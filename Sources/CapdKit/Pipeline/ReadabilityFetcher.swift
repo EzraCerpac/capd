@@ -6,7 +6,7 @@ import WebKit
 @MainActor
 public final class ReadabilityFetcher {
     public enum FetchOutcome {
-        case extracted(ExtractedBody)
+        case extracted(ExtractedBody, html: String)
         /// Readability produced nothing usable; the caller salvages this HTML instead.
         case snapshot(html: String)
         case failed
@@ -57,7 +57,7 @@ public final class ReadabilityFetcher {
                 return .failed
             }
             if let extracted = await runReadability(in: webView, runner: Self.pageRunner) {
-                return .extracted(extracted)
+                return .extracted(extracted, html: html)
             }
             return .snapshot(html: html)
 
