@@ -25,20 +25,22 @@ enum AXBrowserTabReader {
         let title = resolvedTitle(
             string(of: webArea, kAXTitleAttribute),
             accessibilityDescription: useDescriptionForTitle
-                ? string(of: webArea, kAXDescriptionAttribute) : nil,
-            useDescriptionForTitle: useDescriptionForTitle)
+                ? string(of: webArea, kAXDescriptionAttribute) : nil)
         return BrowserTab(url: url, title: title)
     }
 
     static func resolvedTitle(
-        _ title: String?, accessibilityDescription: String?, useDescriptionForTitle: Bool = false
+        _ title: String?, accessibilityDescription: String?
     ) -> String? {
-        for value in [title, useDescriptionForTitle ? accessibilityDescription : nil] {
-            guard let value else { continue }
-            let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
-            if !trimmed.isEmpty { return trimmed }
+        if let title = title?.trimmingCharacters(in: .whitespacesAndNewlines), !title.isEmpty {
+            return title
         }
-        return nil
+        guard
+            let description = accessibilityDescription?.trimmingCharacters(
+                in: .whitespacesAndNewlines),
+            !description.isEmpty
+        else { return nil }
+        return description
     }
 
     /// Bounds the walk so a pathological window cannot stall the hotkey path.

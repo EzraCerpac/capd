@@ -14,6 +14,9 @@ package enum Browser: String, CaseIterable {
         self.init(rawValue: bundleID)
     }
 
+    /// Gecko browsers and Search expose the active page through Accessibility rather
+    /// than Apple Events. Their page bodies are fetched over the network because
+    /// they do not support extracting rendered HTML from the live tab.
     package var usesAccessibilityTabReader: Bool {
         switch self {
         case .safari, .chrome, .arc: false
