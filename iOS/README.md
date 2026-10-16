@@ -196,6 +196,10 @@ swift test --disable-sandbox --package-path Packages/CapdSync --jobs 6
 node --test iOS/SafariTests/CapturePopupTests.mjs
 ```
 
+The existing CI library-helper discovery runs the Safari popup suite through
+`Scripts/test_safari_library_capture.py`. It requires Node.js 20 or newer and fails
+if the runtime is absent or any popup, permission, or icon check fails.
+
 `SyncIntegrationUITests` drives the actual app, a separate loopback authority, and a
 separate portable Mac fixture process. It requires `CAPD_REFERENCE_PORT` and
 `CAPD_MAC_FIXTURE_PORT` in its test-run environment; it explicitly skips when absent.
