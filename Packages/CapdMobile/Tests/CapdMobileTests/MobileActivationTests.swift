@@ -236,9 +236,10 @@ private struct ActivationFixture {
     _ = try await coordinator.sync()
     #expect(try app.store.pending().isEmpty)
     #expect(try server.baseline().deviceSequences[prep.enrollment.deviceID] == 1)
-    #expect(try server.baseline().captures.contains {
-        $0.source.url == safariRequest.capture.url && $0.source.title == "Safari after cutover"
-    })
+    #expect(
+        try server.baseline().captures.contains {
+            $0.source.url == safariRequest.capture.url && $0.source.title == "Safari after cutover"
+        })
     #expect(try archive.pending() == pending)  // Administrative receipts never ACK the old outbox.
 }
 
