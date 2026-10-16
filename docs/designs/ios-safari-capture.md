@@ -31,6 +31,9 @@ are suppressed and successful Save disables further submission in that popup.
 If a reply is lost, the draft remains and the user is told to check capd before
 trying again; transport failure does not prove the local transaction failed.
 
+Extension and toolbar PNG sizes derive from the existing Capd SVG. Their folder
+resource preserves standard PNG bytes instead of iOS-specific image optimization.
+
 The new bundle needs its own provisioning profile and approval to join the
 existing `group.dev.jxd.capd.iphone.prototype` App Group. No new Keychain group or
 service credential is needed. It reuses `Shared/CapdPhone.entitlements`; the

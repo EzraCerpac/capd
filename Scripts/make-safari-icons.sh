@@ -9,7 +9,8 @@ command -v rsvg-convert >/dev/null || {
 
 CAPD_ICON_SCRATCH=$(mktemp -d)
 trap 'rm -rf "$CAPD_ICON_SCRATCH"' EXIT HUP INT TERM
-CAPD_ICON_OUTPUT=iOS/SafariExtension/Resources
+CAPD_ICON_OUTPUT=iOS/SafariExtension/Resources/icons
+mkdir -p "$CAPD_ICON_OUTPUT"
 
 # Safari tints the toolbar image's alpha; omit the app tile behind the glyph.
 python3 - "$CAPD_ICON_SCRATCH/toolbar.svg" <<'PY'

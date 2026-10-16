@@ -106,7 +106,7 @@ test("Safari extension and toolbar icons provide every required PNG size", async
     assert.deepEqual(Object.keys(icons).map(Number).toSorted((a, b) => a - b), sizes);
     for (const size of sizes) {
       const filename = icons[String(size)];
-      assert.match(filename, /^(icon|toolbar)-\d+\.png$/);
+      assert.match(filename, /^icons\/(icon|toolbar)-\d+\.png$/);
       const png = await readFile(new URL(`../SafariExtension/Resources/${filename}`, import.meta.url));
       assert.equal(png.subarray(0, 8).toString("hex"), "89504e470d0a1a0a");
       assert.equal(png.subarray(12, 16).toString(), "IHDR");

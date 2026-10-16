@@ -4,21 +4,24 @@
   "description": "Review and save the current page to your capd library.",
   "version": "1.0",
   "icons": {
-    "48": "icon-48.png",
-    "64": "icon-64.png",
-    "96": "icon-96.png",
-    "128": "icon-128.png",
-    "256": "icon-256.png",
-    "512": "icon-512.png"
+    "48": "icons/icon-48.png",
+    "64": "icons/icon-64.png",
+    "96": "icons/icon-96.png",
+    "128": "icons/icon-128.png",
+    "256": "icons/icon-256.png",
+    "512": "icons/icon-512.png"
   },
-  "permissions": ["activeTab", "nativeMessaging"],
+  "permissions": [
+    "activeTab",
+    "nativeMessaging"
+  ],
   "action": {
     "default_title": "Save to capd",
     "default_icon": {
-      "16": "toolbar-16.png",
-      "19": "toolbar-19.png",
-      "32": "toolbar-32.png",
-      "38": "toolbar-38.png"
+      "16": "icons/toolbar-16.png",
+      "19": "icons/toolbar-19.png",
+      "32": "icons/toolbar-32.png",
+      "38": "icons/toolbar-38.png"
     },
     "default_popup": "popup.html"
   },

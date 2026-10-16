@@ -10,7 +10,6 @@
 		01540605EBE382F0CCB1B14C /* PhoneLibraryConnection.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9AE246EDC86BA766E1C08396 /* PhoneLibraryConnection.swift */; };
 		066939C79A7874CC77D8FA76 /* LibraryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 865B8CBF2E7C2E49FCF78738 /* LibraryView.swift */; };
 		0843E848622C66B7BE5147E0 /* CapdSync in Frameworks */ = {isa = PBXBuildFile; productRef = 32016C2DDDA9044286CE62B1 /* CapdSync */; };
-		08EB2535BB9AA6BF2C99CC68 /* toolbar-16.png in Resources */ = {isa = PBXBuildFile; fileRef = 84299CE79E03209E2982CDF9 /* toolbar-16.png */; };
 		0EDBD434B03F79D78A90AF1C /* popup.js in Resources */ = {isa = PBXBuildFile; fileRef = D907FB1EB2917ED6A527CA7A /* popup.js */; };
 		16A796D969FFE87A9155196F /* WebsiteCaptureRow.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8550204F6892D1E3529E10AA /* WebsiteCaptureRow.swift */; };
 		1C0F9B363439A901FE32EFF8 /* capture-popup.mjs in Resources */ = {isa = PBXBuildFile; fileRef = 19B123A4B4449144C6ED67D6 /* capture-popup.mjs */; };
@@ -21,7 +20,6 @@
 		41286F9003765ADB9880DC81 /* ShareViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3117EC257394B3A35E8761D2 /* ShareViewController.swift */; };
 		47D3F5664A8756FF8965B622 /* manifest.json in Resources */ = {isa = PBXBuildFile; fileRef = 4E00140ACB070DAEA7B03F46 /* manifest.json */; };
 		4DD9983B9D5FE019AD48BD1A /* PhoneWebsiteIcons.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6DBB55ED5E3AD8A129207FF7 /* PhoneWebsiteIcons.swift */; };
-		5260CABE88CC2901E42C2EAC /* toolbar-19.png in Resources */ = {isa = PBXBuildFile; fileRef = C4EF27263271BD5350C9538B /* toolbar-19.png */; };
 		55B5BC98FAAB1F3D0D65981D /* StylingUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0E857836222DA75C81B45803 /* StylingUITests.swift */; };
 		57B0E61CE8AC21294B29B314 /* CapdSystemIntegration in Frameworks */ = {isa = PBXBuildFile; productRef = 95C623CA3AF9279972352F83 /* CapdSystemIntegration */; };
 		583A60BA24ECF7F32D512D78 /* PhoneSearchProjection.swift in Sources */ = {isa = PBXBuildFile; fileRef = 64DABB156BB9B6935DAB07EF /* PhoneSearchProjection.swift */; };
@@ -29,27 +27,20 @@
 		5A38E51A45A38F0AEF28B0EA /* popup.css in Resources */ = {isa = PBXBuildFile; fileRef = 96D0DD4D9F5DAE7FA6331A4D /* popup.css */; };
 		5BE511C34C2E608B99079921 /* MobileEnvironment.swift in Sources */ = {isa = PBXBuildFile; fileRef = 13F4FF7B0C75828DD365DEC9 /* MobileEnvironment.swift */; };
 		5E6BD9064E40A2CF31DEA100 /* CapdPhoneSafari.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = CB0D1AB8D2E3A8E421FB50AB /* CapdPhoneSafari.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
-		620E25522D4A513FE0B05485 /* icon-512.png in Resources */ = {isa = PBXBuildFile; fileRef = 76794E509F4031FA54455F60 /* icon-512.png */; };
 		664358DA0C16D562FEF5674F /* LibraryConnectionUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2EB24A1344CA7429A48C3120 /* LibraryConnectionUITests.swift */; };
+		6ACF07EF859A58299F77AF81 /* icons in Resources */ = {isa = PBXBuildFile; fileRef = DC8DFC4F4704374F010D64A8 /* icons */; };
 		6BD45A48619F330B688D48D7 /* SyncConnectivity.swift in Sources */ = {isa = PBXBuildFile; fileRef = AEB2701B5EA7C64824A3E94B /* SyncConnectivity.swift */; };
 		6D4EFE435E074F287D0BDD98 /* CapdAnswers in Frameworks */ = {isa = PBXBuildFile; productRef = 268DFFA386157C3FD1CCE14B /* CapdAnswers */; };
-		763779C77A81909A0BBC90CC /* toolbar-38.png in Resources */ = {isa = PBXBuildFile; fileRef = FDED563811D3C36270C9CEC1 /* toolbar-38.png */; };
-		7F66ECCB57FF5974677A685A /* icon-128.png in Resources */ = {isa = PBXBuildFile; fileRef = 478D86719203C5AD263FEDB6 /* icon-128.png */; };
-		7FB60CA0B1368233C3609AE0 /* icon-96.png in Resources */ = {isa = PBXBuildFile; fileRef = 7121B6956704846732780D0F /* icon-96.png */; };
 		813F4C5E40AF32DC4095D437 /* PhoneSearchProjection.swift in Sources */ = {isa = PBXBuildFile; fileRef = 64DABB156BB9B6935DAB07EF /* PhoneSearchProjection.swift */; };
-		820AC2B4F1013404ABBA6C83 /* icon-64.png in Resources */ = {isa = PBXBuildFile; fileRef = 56A257A103341E8B2EE4158E /* icon-64.png */; };
 		831EB88669E114DB32D11292 /* CapdSystemIntegration in Frameworks */ = {isa = PBXBuildFile; productRef = 952DB3BFDD93736F45D22FB2 /* CapdSystemIntegration */; };
 		857B4C557D98AD42C4A571DE /* FixtureApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1FDFF150E743ED04B890284D /* FixtureApp.swift */; };
 		8DD132EE0D57E0BD15EE54DC /* MobileEnvironment.swift in Sources */ = {isa = PBXBuildFile; fileRef = 13F4FF7B0C75828DD365DEC9 /* MobileEnvironment.swift */; };
-		9449FC1E9C8720A551D160CE /* toolbar-32.png in Resources */ = {isa = PBXBuildFile; fileRef = B43070649716EDAABCE4CFAD /* toolbar-32.png */; };
 		957ECC1F55D85F060FE3D5CB /* MobileEnvironment.swift in Sources */ = {isa = PBXBuildFile; fileRef = 13F4FF7B0C75828DD365DEC9 /* MobileEnvironment.swift */; };
-		97A24273BE55BF7C7F781F91 /* icon-256.png in Resources */ = {isa = PBXBuildFile; fileRef = B63C4653B8C067B543D0C431 /* icon-256.png */; };
 		A72820FC04EAAEC2824C1670 /* CapdPhoneApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1F0C6E75A20B69503EC36647 /* CapdPhoneApp.swift */; };
 		A8AF32E151A2E041CF58FF47 /* CapdMobile in Frameworks */ = {isa = PBXBuildFile; productRef = BF7A41DAA9F141D8653E525D /* CapdMobile */; };
 		A9C1113E9F0934DC3DE3AC9E /* CaptureUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C8859FFD24300A1B57DABA40 /* CaptureUITests.swift */; };
 		AD0D2BA687DA2A92D9E71A5F /* AutomaticSyncUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9D8EC38C1A1EB29623CFB32C /* AutomaticSyncUITests.swift */; };
 		BDA800B44E7F55D2FA67DEC3 /* CapdWebsiteIcons in Frameworks */ = {isa = PBXBuildFile; productRef = B10D59641A94B92D36F0302C /* CapdWebsiteIcons */; };
-		C221B3BD6096677EF38270E5 /* icon-48.png in Resources */ = {isa = PBXBuildFile; fileRef = 6EE6D0454285CBA6502D0A4F /* icon-48.png */; };
 		C5AE819A65A93997BD981353 /* PhoneSystemSearch.swift in Sources */ = {isa = PBXBuildFile; fileRef = FA93C87BCEDC3B3F0CB199DB /* PhoneSystemSearch.swift */; };
 		C5CFCBD3555975EA9E718F59 /* CapdMobile in Frameworks */ = {isa = PBXBuildFile; productRef = DB011C7FBFC3143AA26115A6 /* CapdMobile */; };
 		C5D6D7EA4C28E25A97B1091B /* AskLibraryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 32762262D1FFE01581CD631F /* AskLibraryView.swift */; };
@@ -119,21 +110,15 @@
 		2EB24A1344CA7429A48C3120 /* LibraryConnectionUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LibraryConnectionUITests.swift; sourceTree = "<group>"; };
 		3117EC257394B3A35E8761D2 /* ShareViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShareViewController.swift; sourceTree = "<group>"; };
 		32762262D1FFE01581CD631F /* AskLibraryView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AskLibraryView.swift; sourceTree = "<group>"; };
-		478D86719203C5AD263FEDB6 /* icon-128.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = "icon-128.png"; sourceTree = "<group>"; };
 		4E00140ACB070DAEA7B03F46 /* manifest.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = manifest.json; sourceTree = "<group>"; };
 		50E3689DFBCCEA2A86FBD62A /* AppIcon.icon */ = {isa = PBXFileReference; lastKnownFileType = wrapper.icon; path = AppIcon.icon; sourceTree = "<group>"; };
-		56A257A103341E8B2EE4158E /* icon-64.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = "icon-64.png"; sourceTree = "<group>"; };
 		5C57E4197CB2EFB87AA2E7EE /* QuietUXUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QuietUXUITests.swift; sourceTree = "<group>"; };
 		61E4499B1B2CF30036051DE9 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		634F7E21C9E42B09D6A75F74 /* PhoneAppShortcuts.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhoneAppShortcuts.swift; sourceTree = "<group>"; };
 		64DABB156BB9B6935DAB07EF /* PhoneSearchProjection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhoneSearchProjection.swift; sourceTree = "<group>"; };
 		6D302F4847AA73EF8D4EA0B0 /* popup.html */ = {isa = PBXFileReference; lastKnownFileType = text.html; path = popup.html; sourceTree = "<group>"; };
 		6DBB55ED5E3AD8A129207FF7 /* PhoneWebsiteIcons.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhoneWebsiteIcons.swift; sourceTree = "<group>"; };
-		6EE6D0454285CBA6502D0A4F /* icon-48.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = "icon-48.png"; sourceTree = "<group>"; };
-		7121B6956704846732780D0F /* icon-96.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = "icon-96.png"; sourceTree = "<group>"; };
 		72541B549B40FFD6D1335B7F /* SyncPresentationView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SyncPresentationView.swift; sourceTree = "<group>"; };
-		76794E509F4031FA54455F60 /* icon-512.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = "icon-512.png"; sourceTree = "<group>"; };
-		84299CE79E03209E2982CDF9 /* toolbar-16.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = "toolbar-16.png"; sourceTree = "<group>"; };
 		8550204F6892D1E3529E10AA /* WebsiteCaptureRow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebsiteCaptureRow.swift; sourceTree = "<group>"; };
 		865B8CBF2E7C2E49FCF78738 /* LibraryView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LibraryView.swift; sourceTree = "<group>"; };
 		886403389B01B6535D930DC5 /* IPadDiscoveryUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IPadDiscoveryUITests.swift; sourceTree = "<group>"; };
@@ -148,11 +133,8 @@
 		A7086654B1FD09868982EE7B /* CapdAnswers */ = {isa = PBXFileReference; lastKnownFileType = folder; name = CapdAnswers; path = ../Packages/CapdAnswers; sourceTree = SOURCE_ROOT; };
 		A9047651774574E9A669A90A /* SafariServices.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = SafariServices.framework; path = System/Library/Frameworks/SafariServices.framework; sourceTree = SDKROOT; };
 		AEB2701B5EA7C64824A3E94B /* SyncConnectivity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SyncConnectivity.swift; sourceTree = "<group>"; };
-		B43070649716EDAABCE4CFAD /* toolbar-32.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = "toolbar-32.png"; sourceTree = "<group>"; };
 		B4CA6B13AB69199D6F88B8B0 /* CapdPhone.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = CapdPhone.app; sourceTree = BUILT_PRODUCTS_DIR; };
-		B63C4653B8C067B543D0C431 /* icon-256.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = "icon-256.png"; sourceTree = "<group>"; };
 		B8BE02CD8D40A4250EDB9745 /* CapdPhoneFixtureHost.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = CapdPhoneFixtureHost.app; sourceTree = BUILT_PRODUCTS_DIR; };
-		C4EF27263271BD5350C9538B /* toolbar-19.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = "toolbar-19.png"; sourceTree = "<group>"; };
 		C80BDCC1A3482229B71C1EE9 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		C8859FFD24300A1B57DABA40 /* CaptureUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CaptureUITests.swift; sourceTree = "<group>"; };
 		CB0D1AB8D2E3A8E421FB50AB /* CapdPhoneSafari.appex */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = "wrapper.app-extension"; path = CapdPhoneSafari.appex; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -160,10 +142,10 @@
 		D907FB1EB2917ED6A527CA7A /* popup.js */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.javascript; path = popup.js; sourceTree = "<group>"; };
 		DB16E5A36A1E7AB558F46350 /* SyncIntegrationUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SyncIntegrationUITests.swift; sourceTree = "<group>"; };
 		DC139E9219F262284C32839D /* SafariWebExtensionHandler.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SafariWebExtensionHandler.swift; sourceTree = "<group>"; };
+		DC8DFC4F4704374F010D64A8 /* icons */ = {isa = PBXFileReference; lastKnownFileType = folder; name = icons; path = SafariExtension/Resources/icons; sourceTree = SOURCE_ROOT; };
 		EBA5332F7F8B987B43A87730 /* CapdSync */ = {isa = PBXFileReference; lastKnownFileType = folder; name = CapdSync; path = ../Packages/CapdSync; sourceTree = SOURCE_ROOT; };
 		F3CC39402DBBF23BF8D48B12 /* CapdSystemIntegration */ = {isa = PBXFileReference; lastKnownFileType = folder; name = CapdSystemIntegration; path = ../Packages/CapdSystemIntegration; sourceTree = SOURCE_ROOT; };
 		FA93C87BCEDC3B3F0CB199DB /* PhoneSystemSearch.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhoneSystemSearch.swift; sourceTree = "<group>"; };
-		FDED563811D3C36270C9CEC1 /* toolbar-38.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = "toolbar-38.png"; sourceTree = "<group>"; };
 		FF06731FA974E59B0DEB2C90 /* CapdPhone.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = CapdPhone.entitlements; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
@@ -225,20 +207,11 @@
 			isa = PBXGroup;
 			children = (
 				19B123A4B4449144C6ED67D6 /* capture-popup.mjs */,
-				6EE6D0454285CBA6502D0A4F /* icon-48.png */,
-				56A257A103341E8B2EE4158E /* icon-64.png */,
-				7121B6956704846732780D0F /* icon-96.png */,
-				478D86719203C5AD263FEDB6 /* icon-128.png */,
-				B63C4653B8C067B543D0C431 /* icon-256.png */,
-				76794E509F4031FA54455F60 /* icon-512.png */,
+				DC8DFC4F4704374F010D64A8 /* icons */,
 				4E00140ACB070DAEA7B03F46 /* manifest.json */,
 				96D0DD4D9F5DAE7FA6331A4D /* popup.css */,
 				6D302F4847AA73EF8D4EA0B0 /* popup.html */,
 				D907FB1EB2917ED6A527CA7A /* popup.js */,
-				84299CE79E03209E2982CDF9 /* toolbar-16.png */,
-				C4EF27263271BD5350C9538B /* toolbar-19.png */,
-				B43070649716EDAABCE4CFAD /* toolbar-32.png */,
-				FDED563811D3C36270C9CEC1 /* toolbar-38.png */,
 			);
 			path = Resources;
 			sourceTree = "<group>";
@@ -532,20 +505,11 @@
 			buildActionMask = 2147483647;
 			files = (
 				1C0F9B363439A901FE32EFF8 /* capture-popup.mjs in Resources */,
-				7F66ECCB57FF5974677A685A /* icon-128.png in Resources */,
-				97A24273BE55BF7C7F781F91 /* icon-256.png in Resources */,
-				C221B3BD6096677EF38270E5 /* icon-48.png in Resources */,
-				620E25522D4A513FE0B05485 /* icon-512.png in Resources */,
-				820AC2B4F1013404ABBA6C83 /* icon-64.png in Resources */,
-				7FB60CA0B1368233C3609AE0 /* icon-96.png in Resources */,
+				6ACF07EF859A58299F77AF81 /* icons in Resources */,
 				47D3F5664A8756FF8965B622 /* manifest.json in Resources */,
 				5A38E51A45A38F0AEF28B0EA /* popup.css in Resources */,
 				FD671ACE0B1898A4664D705B /* popup.html in Resources */,
 				0EDBD434B03F79D78A90AF1C /* popup.js in Resources */,
-				08EB2535BB9AA6BF2C99CC68 /* toolbar-16.png in Resources */,
-				5260CABE88CC2901E42C2EAC /* toolbar-19.png in Resources */,
-				9449FC1E9C8720A551D160CE /* toolbar-32.png in Resources */,
-				763779C77A81909A0BBC90CC /* toolbar-38.png in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -667,7 +631,6 @@
 			buildSettings = {
 				APPLICATION_EXTENSION_API_ONLY = YES;
 				CODE_SIGN_ENTITLEMENTS = Shared/CapdPhone.entitlements;
-				COMPRESS_PNG_FILES = NO;
 				INFOPLIST_FILE = SafariExtension/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
@@ -686,7 +649,6 @@
 			buildSettings = {
 				APPLICATION_EXTENSION_API_ONLY = YES;
 				CODE_SIGN_ENTITLEMENTS = Shared/CapdPhone.entitlements;
-				COMPRESS_PNG_FILES = NO;
 				INFOPLIST_FILE = SafariExtension/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
