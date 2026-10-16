@@ -42,6 +42,38 @@ note to retain, and explicitly enable **Use this note to resolve all variants**
 before saving. The editor retains its opening revision and observed variants;
 a newer unseen note can require another review.
 
+## Safari capture
+
+The embedded **Save to capd** Safari web extension previews the current HTTP or
+HTTPS page's URL and title. Edit the title, add an optional note, then choose
+**Save**. Opening or dismissing its popup does not save anything. It captures
+the link and reviewed fields, not page text or a screenshot. URLs containing
+credentials and non-web URLs are rejected.
+
+The manifest requests only `activeTab` and `nativeMessaging`. It has no host
+patterns, content scripts, background scripts, or network access. The native
+handler accepts one bounded save command and returns only save status. It uses
+the share extension's local-only session and existing selected-library outbox;
+it does not read credentials or create a separate connection. Open capd to
+deliver pending captures through an existing authorized library connection.
+
+Safari enablement is separate from building or installing the app. After a
+properly signed installation, enable **Save to capd** under **Settings → Apps →
+Safari → Extensions** (or **Settings → Safari → Extensions** on older iOS).
+On a web page, open Safari's page menu, choose **Manage Extensions** if needed,
+then **Save to capd**. Use the current-page action; broad website access is not
+required. Private browsing has separate OS enablement controls.
+
+Physical use requires a separately provisioned Safari extension bundle,
+`dev.jxd.capd.iphone.prototype.safari`, associated with the app's existing App
+Group. The target reuses `Shared/CapdPhone.entitlements`; a build does not grant
+that access. Without matching App Group provisioning it fails to save safely.
+Do not reuse the share extension's provisioning profile for the new bundle.
+See [Safari capture architecture](../docs/designs/ios-safari-capture.md).
+
+The extension and monochrome toolbar PNGs derive from `Assets/icon.svg`.
+Run `Scripts/make-safari-icons.sh` (requires `rsvg-convert`) to regenerate them.
+
 ## Device connection and delivery
 
 A library without enrollment stays on this device. To connect an existing,
@@ -161,7 +193,12 @@ Portable checks:
 ```sh
 swift test --disable-sandbox --package-path Packages/CapdMobile --jobs 6
 swift test --disable-sandbox --package-path Packages/CapdSync --jobs 6
+node --test iOS/SafariTests/CapturePopupTests.mjs
 ```
+
+The existing CI library-helper discovery runs the Safari popup suite through
+`Scripts/test_safari_library_capture.py`. It requires Node.js 20 or newer and fails
+if the runtime is absent or any popup, permission, or icon check fails.
 
 `SyncIntegrationUITests` drives the actual app, a separate loopback authority, and a
 separate portable Mac fixture process. It requires `CAPD_REFERENCE_PORT` and

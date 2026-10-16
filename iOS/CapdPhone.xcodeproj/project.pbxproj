@@ -10,32 +10,44 @@
 		01540605EBE382F0CCB1B14C /* PhoneLibraryConnection.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9AE246EDC86BA766E1C08396 /* PhoneLibraryConnection.swift */; };
 		066939C79A7874CC77D8FA76 /* LibraryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 865B8CBF2E7C2E49FCF78738 /* LibraryView.swift */; };
 		0843E848622C66B7BE5147E0 /* CapdSync in Frameworks */ = {isa = PBXBuildFile; productRef = 32016C2DDDA9044286CE62B1 /* CapdSync */; };
+		0EDBD434B03F79D78A90AF1C /* popup.js in Resources */ = {isa = PBXBuildFile; fileRef = D907FB1EB2917ED6A527CA7A /* popup.js */; };
 		16A796D969FFE87A9155196F /* WebsiteCaptureRow.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8550204F6892D1E3529E10AA /* WebsiteCaptureRow.swift */; };
+		1C0F9B363439A901FE32EFF8 /* capture-popup.mjs in Resources */ = {isa = PBXBuildFile; fileRef = 19B123A4B4449144C6ED67D6 /* capture-popup.mjs */; };
 		26BE43D2BAF07B38B5EFC356 /* SyncPresentationView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 72541B549B40FFD6D1335B7F /* SyncPresentationView.swift */; };
 		2729C4F54903874D0B6D00B9 /* SyncIntegrationUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = DB16E5A36A1E7AB558F46350 /* SyncIntegrationUITests.swift */; };
 		28D8C92187642145CF43D646 /* CapdDesignSystem in Frameworks */ = {isa = PBXBuildFile; productRef = FAD119C9F26D4B583815F971 /* CapdDesignSystem */; };
 		3756FF3530BC526727D75A52 /* CapdPhoneShare.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = 289D50F35CCEED0C7513C6CB /* CapdPhoneShare.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		41286F9003765ADB9880DC81 /* ShareViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3117EC257394B3A35E8761D2 /* ShareViewController.swift */; };
+		47D3F5664A8756FF8965B622 /* manifest.json in Resources */ = {isa = PBXBuildFile; fileRef = 4E00140ACB070DAEA7B03F46 /* manifest.json */; };
 		4DD9983B9D5FE019AD48BD1A /* PhoneWebsiteIcons.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6DBB55ED5E3AD8A129207FF7 /* PhoneWebsiteIcons.swift */; };
 		55B5BC98FAAB1F3D0D65981D /* StylingUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0E857836222DA75C81B45803 /* StylingUITests.swift */; };
 		57B0E61CE8AC21294B29B314 /* CapdSystemIntegration in Frameworks */ = {isa = PBXBuildFile; productRef = 95C623CA3AF9279972352F83 /* CapdSystemIntegration */; };
 		583A60BA24ECF7F32D512D78 /* PhoneSearchProjection.swift in Sources */ = {isa = PBXBuildFile; fileRef = 64DABB156BB9B6935DAB07EF /* PhoneSearchProjection.swift */; };
 		595C6033F433E46DF5547627 /* QuietUXUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5C57E4197CB2EFB87AA2E7EE /* QuietUXUITests.swift */; };
+		5A38E51A45A38F0AEF28B0EA /* popup.css in Resources */ = {isa = PBXBuildFile; fileRef = 96D0DD4D9F5DAE7FA6331A4D /* popup.css */; };
 		5BE511C34C2E608B99079921 /* MobileEnvironment.swift in Sources */ = {isa = PBXBuildFile; fileRef = 13F4FF7B0C75828DD365DEC9 /* MobileEnvironment.swift */; };
+		5E6BD9064E40A2CF31DEA100 /* CapdPhoneSafari.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = CB0D1AB8D2E3A8E421FB50AB /* CapdPhoneSafari.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		664358DA0C16D562FEF5674F /* LibraryConnectionUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2EB24A1344CA7429A48C3120 /* LibraryConnectionUITests.swift */; };
+		6ACF07EF859A58299F77AF81 /* icons in Resources */ = {isa = PBXBuildFile; fileRef = DC8DFC4F4704374F010D64A8 /* icons */; };
 		6BD45A48619F330B688D48D7 /* SyncConnectivity.swift in Sources */ = {isa = PBXBuildFile; fileRef = AEB2701B5EA7C64824A3E94B /* SyncConnectivity.swift */; };
 		6D4EFE435E074F287D0BDD98 /* CapdAnswers in Frameworks */ = {isa = PBXBuildFile; productRef = 268DFFA386157C3FD1CCE14B /* CapdAnswers */; };
+		813F4C5E40AF32DC4095D437 /* PhoneSearchProjection.swift in Sources */ = {isa = PBXBuildFile; fileRef = 64DABB156BB9B6935DAB07EF /* PhoneSearchProjection.swift */; };
+		831EB88669E114DB32D11292 /* CapdSystemIntegration in Frameworks */ = {isa = PBXBuildFile; productRef = 952DB3BFDD93736F45D22FB2 /* CapdSystemIntegration */; };
 		857B4C557D98AD42C4A571DE /* FixtureApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1FDFF150E743ED04B890284D /* FixtureApp.swift */; };
 		8DD132EE0D57E0BD15EE54DC /* MobileEnvironment.swift in Sources */ = {isa = PBXBuildFile; fileRef = 13F4FF7B0C75828DD365DEC9 /* MobileEnvironment.swift */; };
+		957ECC1F55D85F060FE3D5CB /* MobileEnvironment.swift in Sources */ = {isa = PBXBuildFile; fileRef = 13F4FF7B0C75828DD365DEC9 /* MobileEnvironment.swift */; };
 		A72820FC04EAAEC2824C1670 /* CapdPhoneApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1F0C6E75A20B69503EC36647 /* CapdPhoneApp.swift */; };
 		A8AF32E151A2E041CF58FF47 /* CapdMobile in Frameworks */ = {isa = PBXBuildFile; productRef = BF7A41DAA9F141D8653E525D /* CapdMobile */; };
 		A9C1113E9F0934DC3DE3AC9E /* CaptureUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C8859FFD24300A1B57DABA40 /* CaptureUITests.swift */; };
 		AD0D2BA687DA2A92D9E71A5F /* AutomaticSyncUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9D8EC38C1A1EB29623CFB32C /* AutomaticSyncUITests.swift */; };
 		BDA800B44E7F55D2FA67DEC3 /* CapdWebsiteIcons in Frameworks */ = {isa = PBXBuildFile; productRef = B10D59641A94B92D36F0302C /* CapdWebsiteIcons */; };
 		C5AE819A65A93997BD981353 /* PhoneSystemSearch.swift in Sources */ = {isa = PBXBuildFile; fileRef = FA93C87BCEDC3B3F0CB199DB /* PhoneSystemSearch.swift */; };
+		C5CFCBD3555975EA9E718F59 /* CapdMobile in Frameworks */ = {isa = PBXBuildFile; productRef = DB011C7FBFC3143AA26115A6 /* CapdMobile */; };
 		C5D6D7EA4C28E25A97B1091B /* AskLibraryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 32762262D1FFE01581CD631F /* AskLibraryView.swift */; };
+		D0652E4A276778EEB2DB378D /* SafariWebExtensionHandler.swift in Sources */ = {isa = PBXBuildFile; fileRef = DC139E9219F262284C32839D /* SafariWebExtensionHandler.swift */; };
 		D33B43488450EAB2353620CE /* AppIcon.icon in Resources */ = {isa = PBXBuildFile; fileRef = 50E3689DFBCCEA2A86FBD62A /* AppIcon.icon */; };
 		D43CD3E325BA61EBF33BCC55 /* AnswersUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 963ED718B6457F1BAA285920 /* AnswersUITests.swift */; };
+		D9E98E177B7421F588D50E4D /* SafariServices.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A9047651774574E9A669A90A /* SafariServices.framework */; };
 		DA987C97D9C10A04CE3E0797 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = C80BDCC1A3482229B71C1EE9 /* Assets.xcassets */; };
 		E00C896D4AFA8BB226BA3B02 /* CapdSystemIntegration in Frameworks */ = {isa = PBXBuildFile; productRef = 332BA6FFFE5E696C6E8152FC /* CapdSystemIntegration */; };
 		E02D0395807C4D33B2FF7F44 /* IPadDiscoveryUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 886403389B01B6535D930DC5 /* IPadDiscoveryUITests.swift */; };
@@ -44,9 +56,17 @@
 		F75E68EC5E2E4E666C8A2918 /* PhoneSearchProjection.swift in Sources */ = {isa = PBXBuildFile; fileRef = 64DABB156BB9B6935DAB07EF /* PhoneSearchProjection.swift */; };
 		F7BFBF20D6F461E70411E850 /* CapdDesignSystem in Frameworks */ = {isa = PBXBuildFile; productRef = 2E2A0FA4371229E338EF431B /* CapdDesignSystem */; };
 		FC96EAB13D03C6C8F4E28B16 /* PhoneAppShortcuts.swift in Sources */ = {isa = PBXBuildFile; fileRef = 634F7E21C9E42B09D6A75F74 /* PhoneAppShortcuts.swift */; };
+		FD671ACE0B1898A4664D705B /* popup.html in Resources */ = {isa = PBXBuildFile; fileRef = 6D302F4847AA73EF8D4EA0B0 /* popup.html */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
+		15C593097CCEFEAAAF818FB2 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = A947FCC635A8C93D7FF7DFF8 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 91B22FB4926270E4641C1DB9;
+			remoteInfo = CapdPhoneSafari;
+		};
 		A61BCF4D2102BE9FBFB03064 /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
 			containerPortal = A947FCC635A8C93D7FF7DFF8 /* Project object */;
@@ -71,6 +91,7 @@
 			dstSubfolderSpec = 13;
 			files = (
 				3756FF3530BC526727D75A52 /* CapdPhoneShare.appex in Embed Foundation Extensions */,
+				5E6BD9064E40A2CF31DEA100 /* CapdPhoneSafari.appex in Embed Foundation Extensions */,
 			);
 			name = "Embed Foundation Extensions";
 			runOnlyForDeploymentPostprocessing = 0;
@@ -78,8 +99,10 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+		058F8A94FF9AF1D51B5B95F1 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		0E857836222DA75C81B45803 /* StylingUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StylingUITests.swift; sourceTree = "<group>"; };
 		13F4FF7B0C75828DD365DEC9 /* MobileEnvironment.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileEnvironment.swift; sourceTree = "<group>"; };
+		19B123A4B4449144C6ED67D6 /* capture-popup.mjs */ = {isa = PBXFileReference; path = "capture-popup.mjs"; sourceTree = "<group>"; };
 		1F0C6E75A20B69503EC36647 /* CapdPhoneApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CapdPhoneApp.swift; sourceTree = "<group>"; };
 		1FDFF150E743ED04B890284D /* FixtureApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FixtureApp.swift; sourceTree = "<group>"; };
 		283660568CC4584299338273 /* CapdMobile */ = {isa = PBXFileReference; lastKnownFileType = folder; name = CapdMobile; path = ../Packages/CapdMobile; sourceTree = SOURCE_ROOT; };
@@ -87,11 +110,13 @@
 		2EB24A1344CA7429A48C3120 /* LibraryConnectionUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LibraryConnectionUITests.swift; sourceTree = "<group>"; };
 		3117EC257394B3A35E8761D2 /* ShareViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShareViewController.swift; sourceTree = "<group>"; };
 		32762262D1FFE01581CD631F /* AskLibraryView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AskLibraryView.swift; sourceTree = "<group>"; };
+		4E00140ACB070DAEA7B03F46 /* manifest.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = manifest.json; sourceTree = "<group>"; };
 		50E3689DFBCCEA2A86FBD62A /* AppIcon.icon */ = {isa = PBXFileReference; lastKnownFileType = wrapper.icon; path = AppIcon.icon; sourceTree = "<group>"; };
 		5C57E4197CB2EFB87AA2E7EE /* QuietUXUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QuietUXUITests.swift; sourceTree = "<group>"; };
 		61E4499B1B2CF30036051DE9 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		634F7E21C9E42B09D6A75F74 /* PhoneAppShortcuts.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhoneAppShortcuts.swift; sourceTree = "<group>"; };
 		64DABB156BB9B6935DAB07EF /* PhoneSearchProjection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhoneSearchProjection.swift; sourceTree = "<group>"; };
+		6D302F4847AA73EF8D4EA0B0 /* popup.html */ = {isa = PBXFileReference; lastKnownFileType = text.html; path = popup.html; sourceTree = "<group>"; };
 		6DBB55ED5E3AD8A129207FF7 /* PhoneWebsiteIcons.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhoneWebsiteIcons.swift; sourceTree = "<group>"; };
 		72541B549B40FFD6D1335B7F /* SyncPresentationView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SyncPresentationView.swift; sourceTree = "<group>"; };
 		8550204F6892D1E3529E10AA /* WebsiteCaptureRow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebsiteCaptureRow.swift; sourceTree = "<group>"; };
@@ -100,18 +125,24 @@
 		8A7E2736D65D6A157FE1AFD4 /* CapdPhoneUITests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = CapdPhoneUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		95865E41F398B59B1604A610 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		963ED718B6457F1BAA285920 /* AnswersUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AnswersUITests.swift; sourceTree = "<group>"; };
+		96D0DD4D9F5DAE7FA6331A4D /* popup.css */ = {isa = PBXFileReference; lastKnownFileType = text.css; path = popup.css; sourceTree = "<group>"; };
 		97E15BD4C75A8AE200C9CF5F /* CapdWebsiteIcons */ = {isa = PBXFileReference; lastKnownFileType = folder; name = CapdWebsiteIcons; path = ../Packages/CapdWebsiteIcons; sourceTree = SOURCE_ROOT; };
 		9AE246EDC86BA766E1C08396 /* PhoneLibraryConnection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhoneLibraryConnection.swift; sourceTree = "<group>"; };
 		9D8EC38C1A1EB29623CFB32C /* AutomaticSyncUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AutomaticSyncUITests.swift; sourceTree = "<group>"; };
 		A264E6A3FA4A57D533CD62AC /* CapdDesignSystem */ = {isa = PBXFileReference; lastKnownFileType = folder; name = CapdDesignSystem; path = ../Packages/CapdDesignSystem; sourceTree = SOURCE_ROOT; };
 		A7086654B1FD09868982EE7B /* CapdAnswers */ = {isa = PBXFileReference; lastKnownFileType = folder; name = CapdAnswers; path = ../Packages/CapdAnswers; sourceTree = SOURCE_ROOT; };
+		A9047651774574E9A669A90A /* SafariServices.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = SafariServices.framework; path = System/Library/Frameworks/SafariServices.framework; sourceTree = SDKROOT; };
 		AEB2701B5EA7C64824A3E94B /* SyncConnectivity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SyncConnectivity.swift; sourceTree = "<group>"; };
 		B4CA6B13AB69199D6F88B8B0 /* CapdPhone.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = CapdPhone.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		B8BE02CD8D40A4250EDB9745 /* CapdPhoneFixtureHost.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = CapdPhoneFixtureHost.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		C80BDCC1A3482229B71C1EE9 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		C8859FFD24300A1B57DABA40 /* CaptureUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CaptureUITests.swift; sourceTree = "<group>"; };
+		CB0D1AB8D2E3A8E421FB50AB /* CapdPhoneSafari.appex */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = "wrapper.app-extension"; path = CapdPhoneSafari.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 		D1EB23FB345DC6EA0225CF6C /* LibraryConnectionView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LibraryConnectionView.swift; sourceTree = "<group>"; };
+		D907FB1EB2917ED6A527CA7A /* popup.js */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.javascript; path = popup.js; sourceTree = "<group>"; };
 		DB16E5A36A1E7AB558F46350 /* SyncIntegrationUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SyncIntegrationUITests.swift; sourceTree = "<group>"; };
+		DC139E9219F262284C32839D /* SafariWebExtensionHandler.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SafariWebExtensionHandler.swift; sourceTree = "<group>"; };
+		DC8DFC4F4704374F010D64A8 /* icons */ = {isa = PBXFileReference; lastKnownFileType = folder; name = icons; path = SafariExtension/Resources/icons; sourceTree = SOURCE_ROOT; };
 		EBA5332F7F8B987B43A87730 /* CapdSync */ = {isa = PBXFileReference; lastKnownFileType = folder; name = CapdSync; path = ../Packages/CapdSync; sourceTree = SOURCE_ROOT; };
 		F3CC39402DBBF23BF8D48B12 /* CapdSystemIntegration */ = {isa = PBXFileReference; lastKnownFileType = folder; name = CapdSystemIntegration; path = ../Packages/CapdSystemIntegration; sourceTree = SOURCE_ROOT; };
 		FA93C87BCEDC3B3F0CB199DB /* PhoneSystemSearch.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhoneSystemSearch.swift; sourceTree = "<group>"; };
@@ -139,6 +170,16 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		A599BCF12DAC1742739E0FB3 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				C5CFCBD3555975EA9E718F59 /* CapdMobile in Frameworks */,
+				831EB88669E114DB32D11292 /* CapdSystemIntegration in Frameworks */,
+				D9E98E177B7421F588D50E4D /* SafariServices.framework in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		EAE38D96E30C3B5B8A38CB03 /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
@@ -152,6 +193,29 @@
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
+		103AD1D68EFED2CAF09FCBCF /* SafariExtension */ = {
+			isa = PBXGroup;
+			children = (
+				058F8A94FF9AF1D51B5B95F1 /* Info.plist */,
+				DC139E9219F262284C32839D /* SafariWebExtensionHandler.swift */,
+				107906D05DE359226FD3D37E /* Resources */,
+			);
+			path = SafariExtension;
+			sourceTree = "<group>";
+		};
+		107906D05DE359226FD3D37E /* Resources */ = {
+			isa = PBXGroup;
+			children = (
+				19B123A4B4449144C6ED67D6 /* capture-popup.mjs */,
+				DC8DFC4F4704374F010D64A8 /* icons */,
+				4E00140ACB070DAEA7B03F46 /* manifest.json */,
+				96D0DD4D9F5DAE7FA6331A4D /* popup.css */,
+				6D302F4847AA73EF8D4EA0B0 /* popup.html */,
+				D907FB1EB2917ED6A527CA7A /* popup.js */,
+			);
+			path = Resources;
+			sourceTree = "<group>";
+		};
 		24319267E28CEFADACB89EEA /* FixtureHost */ = {
 			isa = PBXGroup;
 			children = (
@@ -196,11 +260,21 @@
 				329AB5807A39B9EB9711F62B /* App */,
 				24319267E28CEFADACB89EEA /* FixtureHost */,
 				D6B1586904C94189873570C3 /* Packages */,
+				103AD1D68EFED2CAF09FCBCF /* SafariExtension */,
 				C14D404F45CEB9B13EF1C9B9 /* Shared */,
 				A67DC2D064D485D3E7AAF34E /* ShareExtension */,
 				C58339AA9BF2A9CC7456D594 /* UITests */,
+				B0E52F1F91292F98C78855A1 /* Frameworks */,
 				C135AC6939A9D7768642D76A /* Products */,
 			);
+			sourceTree = "<group>";
+		};
+		B0E52F1F91292F98C78855A1 /* Frameworks */ = {
+			isa = PBXGroup;
+			children = (
+				A9047651774574E9A669A90A /* SafariServices.framework */,
+			);
+			name = Frameworks;
 			sourceTree = "<group>";
 		};
 		C135AC6939A9D7768642D76A /* Products */ = {
@@ -208,6 +282,7 @@
 			children = (
 				B4CA6B13AB69199D6F88B8B0 /* CapdPhone.app */,
 				B8BE02CD8D40A4250EDB9745 /* CapdPhoneFixtureHost.app */,
+				CB0D1AB8D2E3A8E421FB50AB /* CapdPhoneSafari.appex */,
 				289D50F35CCEED0C7513C6CB /* CapdPhoneShare.appex */,
 				8A7E2736D65D6A157FE1AFD4 /* CapdPhoneUITests.xctest */,
 			);
@@ -268,6 +343,7 @@
 			);
 			dependencies = (
 				26CB7E2007C942E72788DA22 /* PBXTargetDependency */,
+				62CEECBC4800B5ABF3A8C0B3 /* PBXTargetDependency */,
 			);
 			name = CapdPhone;
 			packageProductDependencies = (
@@ -319,6 +395,27 @@
 			productReference = B8BE02CD8D40A4250EDB9745 /* CapdPhoneFixtureHost.app */;
 			productType = "com.apple.product-type.application";
 		};
+		91B22FB4926270E4641C1DB9 /* CapdPhoneSafari */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = EC2164D824C3D1B34149344C /* Build configuration list for PBXNativeTarget "CapdPhoneSafari" */;
+			buildPhases = (
+				67D16A04BB012F1A37FEFAB4 /* Sources */,
+				C51239A3AB9073F3940C6BF3 /* Resources */,
+				A599BCF12DAC1742739E0FB3 /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = CapdPhoneSafari;
+			packageProductDependencies = (
+				DB011C7FBFC3143AA26115A6 /* CapdMobile */,
+				952DB3BFDD93736F45D22FB2 /* CapdSystemIntegration */,
+			);
+			productName = CapdPhoneSafari;
+			productReference = CB0D1AB8D2E3A8E421FB50AB /* CapdPhoneSafari.appex */;
+			productType = "com.apple.product-type.app-extension";
+		};
 		9B6EF42B3CB93DC4D237F017 /* CapdPhoneUITests */ = {
 			isa = PBXNativeTarget;
 			buildConfigurationList = FAE4445E61488BEE26986C92 /* Build configuration list for PBXNativeTarget "CapdPhoneUITests" */;
@@ -360,6 +457,10 @@
 						DevelopmentTeam = "";
 						ProvisioningStyle = Manual;
 					};
+					91B22FB4926270E4641C1DB9 = {
+						DevelopmentTeam = "";
+						ProvisioningStyle = Manual;
+					};
 					9B6EF42B3CB93DC4D237F017 = {
 						DevelopmentTeam = "";
 						ProvisioningStyle = Manual;
@@ -390,6 +491,7 @@
 			projectRoot = "";
 			targets = (
 				33A7261E1935A054205A4C9A /* CapdPhone */,
+				91B22FB4926270E4641C1DB9 /* CapdPhoneSafari */,
 				74F268EC18BCA31F449A16BE /* CapdPhoneShare */,
 				9B6EF42B3CB93DC4D237F017 /* CapdPhoneUITests */,
 				75FE8A6E0739F2B81027FB8C /* CapdPhoneFixtureHost */,
@@ -398,6 +500,19 @@
 /* End PBXProject section */
 
 /* Begin PBXResourcesBuildPhase section */
+		C51239A3AB9073F3940C6BF3 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				1C0F9B363439A901FE32EFF8 /* capture-popup.mjs in Resources */,
+				6ACF07EF859A58299F77AF81 /* icons in Resources */,
+				47D3F5664A8756FF8965B622 /* manifest.json in Resources */,
+				5A38E51A45A38F0AEF28B0EA /* popup.css in Resources */,
+				FD671ACE0B1898A4664D705B /* popup.html in Resources */,
+				0EDBD434B03F79D78A90AF1C /* popup.js in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		C9144EF6F98B764DBA0F65DD /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
@@ -443,6 +558,16 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		67D16A04BB012F1A37FEFAB4 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				957ECC1F55D85F060FE3D5CB /* MobileEnvironment.swift in Sources */,
+				813F4C5E40AF32DC4095D437 /* PhoneSearchProjection.swift in Sources */,
+				D0652E4A276778EEB2DB378D /* SafariWebExtensionHandler.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		B2C785DB175ACAB0A704A391 /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
@@ -471,6 +596,11 @@
 			target = 74F268EC18BCA31F449A16BE /* CapdPhoneShare */;
 			targetProxy = A61BCF4D2102BE9FBFB03064 /* PBXContainerItemProxy */;
 		};
+		62CEECBC4800B5ABF3A8C0B3 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 91B22FB4926270E4641C1DB9 /* CapdPhoneSafari */;
+			targetProxy = 15C593097CCEFEAAAF818FB2 /* PBXContainerItemProxy */;
+		};
 		91BDDA544164FC485220B0D1 /* PBXTargetDependency */ = {
 			isa = PBXTargetDependency;
 			target = 33A7261E1935A054205A4C9A /* CapdPhone */;
@@ -495,6 +625,42 @@
 				TARGETED_DEVICE_FAMILY = "1,2";
 			};
 			name = Debug;
+		};
+		136EFF4FF163012E68F275D6 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				APPLICATION_EXTENSION_API_ONLY = YES;
+				CODE_SIGN_ENTITLEMENTS = Shared/CapdPhone.entitlements;
+				INFOPLIST_FILE = SafariExtension/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = dev.jxd.capd.iphone.prototype.safari;
+				SDKROOT = iphoneos;
+				SKIP_INSTALL = YES;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		24CDC2D9A3642656D546E8C2 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				APPLICATION_EXTENSION_API_ONLY = YES;
+				CODE_SIGN_ENTITLEMENTS = Shared/CapdPhone.entitlements;
+				INFOPLIST_FILE = SafariExtension/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = dev.jxd.capd.iphone.prototype.safari;
+				SDKROOT = iphoneos;
+				SKIP_INSTALL = YES;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
 		};
 		295C4D8FA1B938A552352B9D /* Release */ = {
 			isa = XCBuildConfiguration;
@@ -785,6 +951,15 @@
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Debug;
 		};
+		EC2164D824C3D1B34149344C /* Build configuration list for PBXNativeTarget "CapdPhoneSafari" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				136EFF4FF163012E68F275D6 /* Debug */,
+				24CDC2D9A3642656D546E8C2 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
 		FAE4445E61488BEE26986C92 /* Build configuration list for PBXNativeTarget "CapdPhoneUITests" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
@@ -840,6 +1015,10 @@
 			isa = XCSwiftPackageProductDependency;
 			productName = CapdSystemIntegration;
 		};
+		952DB3BFDD93736F45D22FB2 /* CapdSystemIntegration */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = CapdSystemIntegration;
+		};
 		95C623CA3AF9279972352F83 /* CapdSystemIntegration */ = {
 			isa = XCSwiftPackageProductDependency;
 			productName = CapdSystemIntegration;
@@ -849,6 +1028,10 @@
 			productName = CapdWebsiteIcons;
 		};
 		BF7A41DAA9F141D8653E525D /* CapdMobile */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = CapdMobile;
+		};
+		DB011C7FBFC3143AA26115A6 /* CapdMobile */ = {
 			isa = XCSwiftPackageProductDependency;
 			productName = CapdMobile;
 		};
