@@ -99,3 +99,19 @@ test("manifest only grants activeTab and nativeMessaging; no persistent collecti
   }
   assert.match(manifest.content_security_policy.extension_pages, /connect-src 'none'/);
 });
+
+test("Safari extension and toolbar icons provide every required PNG size", async () => {
+  const manifest = JSON.parse(await readFile(new URL("../SafariExtension/Resources/manifest.json", import.meta.url)));
+  for (const [icons, sizes] of [[manifest.icons, [48, 64, 96, 128, 256, 512]], [manifest.action.default_icon, [16, 19, 32, 38]]]) {
+    assert.deepEqual(Object.keys(icons).map(Number).toSorted((a, b) => a - b), sizes);
+    for (const size of sizes) {
+      const filename = icons[String(size)];
+      assert.match(filename, /^(icon|toolbar)-\d+\.png$/);
+      const png = await readFile(new URL(`../SafariExtension/Resources/${filename}`, import.meta.url));
+      assert.equal(png.subarray(0, 8).toString("hex"), "89504e470d0a1a0a");
+      assert.equal(png.subarray(12, 16).toString(), "IHDR");
+      assert.equal(png.readUInt32BE(16), size);
+      assert.equal(png.readUInt32BE(20), size);
+    }
+  }
+});

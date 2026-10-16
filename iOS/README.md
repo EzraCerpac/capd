@@ -71,6 +71,9 @@ that access. Without matching App Group provisioning it fails to save safely.
 Do not reuse the share extension's provisioning profile for the new bundle.
 See [Safari capture architecture](../docs/designs/ios-safari-capture.md).
 
+The extension and monochrome toolbar PNGs derive from `Assets/icon.svg`.
+Run `Scripts/make-safari-icons.sh` (requires `rsvg-convert`) to regenerate them.
+
 ## Device connection and delivery
 
 A library without enrollment stays on this device. To connect an existing,
