@@ -43,6 +43,28 @@ targets:
       - package: CapdWebsiteIcons
       - target: CapdPhoneShare
         embed: true
+      - target: CapdPhoneSafari
+        embed: true
+  CapdPhoneSafari:
+    type: app-extension
+    platform: iOS
+    sources:
+      - path: SafariExtension
+        excludes: [Resources]
+      - path: SafariExtension/Resources
+        buildPhase: resources
+      - path: Shared
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: dev.jxd.capd.iphone.prototype.safari
+        INFOPLIST_FILE: SafariExtension/Info.plist
+        CODE_SIGN_ENTITLEMENTS: Shared/CapdPhone.entitlements
+        APPLICATION_EXTENSION_API_ONLY: YES
+        SKIP_INSTALL: YES
+    dependencies:
+      - package: CapdMobile
+      - package: CapdSystemIntegration
+      - sdk: SafariServices.framework
   CapdPhoneShare:
     type: app-extension
     platform: iOS

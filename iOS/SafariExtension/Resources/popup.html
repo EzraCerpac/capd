@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="light dark">
+    <title>Save to capd</title>
+    <link rel="stylesheet" href="popup.css">
+    <script type="module" src="popup.js"></script>
+  </head>
+  <body>
+    <main>
+      <h1>Save to capd</h1>
+      <form id="capture-form">
+        <label for="source">Current page</label>
+        <textarea id="source" rows="3" readonly aria-describedby="delivery"></textarea>
+        <label for="title">Title</label>
+        <input id="title" type="text" maxlength="4096" autocomplete="off">
+        <label for="note">Your note <span>(optional)</span></label>
+        <textarea id="note" rows="3" maxlength="16384"></textarea>
+        <p id="delivery">Saves to this device. Open capd to deliver it to your connected library.</p>
+        <p id="status" role="status" aria-live="polite">Loading current page…</p>
+        <button id="save" type="submit" disabled>Save</button>
+      </form>
+    </main>
+  </body>
+</html>

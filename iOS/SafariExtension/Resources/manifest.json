@@ -1,0 +1,16 @@
+{
+  "manifest_version": 3,
+  "name": "Save to capd",
+  "description": "Review and save the current page to your capd library.",
+  "version": "1.0",
+  "icons": { "128": "icon.svg" },
+  "permissions": ["activeTab", "nativeMessaging"],
+  "action": {
+    "default_title": "Save to capd",
+    "default_icon": "icon.svg",
+    "default_popup": "popup.html"
+  },
+  "content_security_policy": {
+    "extension_pages": "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'none'; img-src 'self'; base-uri 'none'; form-action 'none'"
+  }
+}

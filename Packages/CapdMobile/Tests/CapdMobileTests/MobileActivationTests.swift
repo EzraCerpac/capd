@@ -221,7 +221,12 @@ private struct ActivationFixture {
     #expect(await app.adapter.availability() == .ready)
     #expect(try app.store.search().count == captures.count)
     #expect(try app.store.pending().isEmpty)
-    let saved = try share.save(CaptureInput.make(text: "Shared after cutover", isLink: false))
+    let safariRequest = try SafariCaptureRequest(message: [
+        "command": SafariCaptureRequest.command,
+        "url": "https://example.invalid/safari-after-cutover",
+        "title": "Safari after cutover", "note": "Reviewed note",
+    ])
+    let saved = try share.save(safariRequest.capture)
     #expect(saved.libraryID == f.binding.libraryID && saved.sessionToken == app.token)
     #expect(try app.store.capture(id: saved.capture.id) != nil)
     #expect(try app.store.pending().map(\.sequence) == [1])
@@ -231,6 +236,9 @@ private struct ActivationFixture {
     _ = try await coordinator.sync()
     #expect(try app.store.pending().isEmpty)
     #expect(try server.baseline().deviceSequences[prep.enrollment.deviceID] == 1)
+    #expect(try server.baseline().captures.contains {
+        $0.source.url == safariRequest.capture.url && $0.source.title == "Safari after cutover"
+    })
     #expect(try archive.pending() == pending)  // Administrative receipts never ACK the old outbox.
 }
 
