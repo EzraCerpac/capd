@@ -667,6 +667,7 @@
 			buildSettings = {
 				APPLICATION_EXTENSION_API_ONLY = YES;
 				CODE_SIGN_ENTITLEMENTS = Shared/CapdPhone.entitlements;
+				COMPRESS_PNG_FILES = NO;
 				INFOPLIST_FILE = SafariExtension/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
@@ -685,6 +686,7 @@
 			buildSettings = {
 				APPLICATION_EXTENSION_API_ONLY = YES;
 				CODE_SIGN_ENTITLEMENTS = Shared/CapdPhone.entitlements;
+				COMPRESS_PNG_FILES = NO;
 				INFOPLIST_FILE = SafariExtension/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",

@@ -59,6 +59,7 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: dev.jxd.capd.iphone.prototype.safari
         INFOPLIST_FILE: SafariExtension/Info.plist
         CODE_SIGN_ENTITLEMENTS: Shared/CapdPhone.entitlements
+        COMPRESS_PNG_FILES: NO
         APPLICATION_EXTENSION_API_ONLY: YES
         SKIP_INSTALL: YES
     dependencies:
