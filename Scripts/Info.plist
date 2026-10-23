@@ -35,6 +35,12 @@
 	</array>
 	<key>CFBundleVersion</key>
 	<string>CAPD_VERSION</string>
+	<key>CapdSourceRepository</key>
+	<string>https://github.com/EzraCerpac/capd</string>
+	<key>CapdSourceBranch</key>
+	<string>main</string>
+	<key>CapdSourceRevision</key>
+	<string>CAPD_SOURCE_REVISION</string>
 	<key>LSApplicationCategoryType</key>
 	<string>public.app-category.productivity</string>
 	<key>LSMinimumSystemVersion</key>

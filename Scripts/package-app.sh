@@ -1,5 +1,5 @@
 #!/bin/sh
-# Builds the universal capd.app bundle and .dmg into dist/.
+# Builds a universal capd.app bundle and .dmg into dist/.
 #
 # CODESIGN_IDENTITY selects the Developer ID signing identity. Unset means
 # ad-hoc, which is enough to run the bundle locally but won't pass Gatekeeper.
@@ -10,6 +10,18 @@ cd "$(dirname "$0")/.."
 
 VERSION=$(sed -n 's/.*static let version = "\(.*\)".*/\1/p' Sources/CapdKit/CapdKit.swift)
 test -n "$VERSION" || { echo "error: could not read version from CapdKit.swift" >&2; exit 1; }
+SOURCE_REVISION=${CAPD_SOURCE_REVISION:-$(git rev-parse HEAD 2>/dev/null || true)}
+test "${#SOURCE_REVISION}" -eq 40 || {
+    echo "error: set CAPD_SOURCE_REVISION to the full source commit when packaging outside a git checkout" >&2
+    exit 1
+}
+
+ARCHS=${CAPD_ARCHS:-"arm64 x86_64"}
+set --
+for arch in $ARCHS; do
+    set -- "$@" --arch "$arch"
+done
+EXPECTED_ARCHS=$ARCHS
 
 IDENTITY="${CODESIGN_IDENTITY:--}"
 # Ad-hoc signatures cannot carry a secure timestamp, and notarization requires one.
@@ -19,15 +31,19 @@ else
     TIMESTAMP=--timestamp
 fi
 
-swift build -c release --arch arm64 --arch x86_64
+swift package resolve --build-system swiftbuild --force-resolved-versions
+swift build --build-system swiftbuild --disable-automatic-resolution -c release "$@"
 
-BIN=.build/apple/Products/Release
+BIN=$(swift build --build-system swiftbuild --disable-automatic-resolution \
+    -c release "$@" --show-bin-path)
 APP=dist/capd.app
 
 rm -rf dist
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 
-sed "s/CAPD_VERSION/$VERSION/g" Scripts/Info.plist > "$APP/Contents/Info.plist"
+sed -e "s/CAPD_VERSION/$VERSION/g" \
+    -e "s/CAPD_SOURCE_REVISION/$SOURCE_REVISION/g" \
+    Scripts/Info.plist > "$APP/Contents/Info.plist"
 cp Assets/capd.icns "$APP/Contents/Resources/"
 
 # capd and capd-agent ship next to the app executable: AgentBootstrap and
@@ -49,10 +65,12 @@ done
 
 for binary in "$APP/Contents/MacOS/CapdApp" "$APP/Contents/MacOS/capd" \
     "$APP/Contents/MacOS/capd-agent" "$APPEX/Contents/MacOS/CapdShareExtension"; do
-    lipo "$binary" -verify_arch arm64 x86_64 || {
-        echo "error: $(basename "$binary") is not a universal binary" >&2
-        exit 1
-    }
+    for arch in $EXPECTED_ARCHS; do
+        lipo "$binary" -verify_arch "$arch" || {
+            echo "error: $(basename "$binary") is missing $arch" >&2
+            exit 1
+        }
+    done
     lipo -info "$binary"
 done
 
@@ -65,6 +83,11 @@ codesign --force --options runtime "$TIMESTAMP" \
     --entitlements Scripts/capd.entitlements --sign "$IDENTITY" "$APP"
 
 codesign --verify --strict --deep "$APP"
+
+if [ "${CAPD_SKIP_DMG:-0}" = 1 ]; then
+    echo "packaged $APP"
+    exit 0
+fi
 
 STAGING=$(mktemp -d)
 cp -R "$APP" "$STAGING/"

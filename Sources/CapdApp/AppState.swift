@@ -65,7 +65,7 @@ final class AppState {
     init() {
         let settings = AppSettings()
         self.settings = settings
-        updates = UpdateChecker(settings: settings, client: .gitHubReleases)
+        updates = UpdateChecker(settings: settings, client: .forkMain)
         permissions = PermissionMonitor(environment: .live(settings: settings))
 
         do {
