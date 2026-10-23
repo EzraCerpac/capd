@@ -53,8 +53,12 @@ package final class AppSettings {
         didSet { defaults.set(lastUpdateCheck, forKey: Key.lastUpdateCheck) }
     }
 
-    package var latestKnownVersion: String? {
-        didSet { defaults.set(latestKnownVersion, forKey: Key.latestKnownVersion) }
+    package var latestKnownRevision: String? {
+        didSet { defaults.set(latestKnownRevision, forKey: Key.latestKnownRevision) }
+    }
+
+    package var checkedSourceRevision: String? {
+        didSet { defaults.set(checkedSourceRevision, forKey: Key.checkedSourceRevision) }
     }
 
     /// Persisted in the capture store rather than `UserDefaults`: the flag must reach
@@ -86,7 +90,8 @@ package final class AppSettings {
         checksForUpdates = defaults.object(forKey: Key.checksForUpdates) as? Bool ?? true
         axGrantedBefore = defaults.bool(forKey: Key.axGrantedBefore)
         lastUpdateCheck = defaults.object(forKey: Key.lastUpdateCheck) as? Date
-        latestKnownVersion = defaults.string(forKey: Key.latestKnownVersion)
+        latestKnownRevision = defaults.string(forKey: Key.latestKnownRevision)
+        checkedSourceRevision = defaults.string(forKey: Key.checkedSourceRevision)
     }
 
     private enum Key {
@@ -96,6 +101,7 @@ package final class AppSettings {
         static let contextualRemindersEnabled = "contextualRemindersEnabled"
         static let axGrantedBefore = "axGrantedBefore"
         static let lastUpdateCheck = "lastUpdateCheck"
-        static let latestKnownVersion = "latestKnownVersion"
+        static let latestKnownRevision = "latestKnownRevision"
+        static let checkedSourceRevision = "checkedSourceRevision"
     }
 }

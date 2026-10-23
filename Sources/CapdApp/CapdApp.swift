@@ -57,9 +57,9 @@ private struct SettingsMenuItem: View {
 @main
 struct CapdApp: App {
     private static let docsURL = URL(string: "https://capd.jxd.dev")!
-    private static let supportURL = URL(string: "https://github.com/jamiedavenport/capd/issues")!
+    private static let supportURL = URL(string: "https://github.com/EzraCerpac/capd/issues")!
     private static let releaseNotesURL =
-        URL(string: "https://github.com/jamiedavenport/capd/releases")!
+        URL(string: "https://github.com/EzraCerpac/capd/releases")!
 
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
     @State private var state: AppState
@@ -107,7 +107,7 @@ struct CapdApp: App {
                 if let version = state.updates.availableVersion {
                     Divider()
                     Button(
-                        "Update available (\(version)) — copy brew command",
+                        "Update available (\(version)) — copy update command",
                         systemImage: "arrow.down.circle"
                     ) {
                         NSPasteboard.general.clearContents()

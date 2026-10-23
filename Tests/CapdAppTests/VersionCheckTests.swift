@@ -1,4 +1,3 @@
-import CapdKit
 import Foundation
 import Testing
 
@@ -8,28 +7,55 @@ import Testing
 @MainActor
 @Suite("Version check")
 struct VersionCheckTests {
-    @Test("A newer released tag surfaces an available update")
-    func newerTagSurfacesUpdate() async throws {
-        let harness = Harness(tag: "v999.0.0")
+    @Test("A different fork main revision surfaces an available update")
+    func newerRevisionSurfacesUpdate() async {
+        let harness = Harness(revision: String(repeating: "b", count: 40))
 
         await harness.checker.checkIfDue()
 
         #expect(harness.requestCount == 1)
-        #expect(harness.checker.availableVersion == "v999.0.0")
+        #expect(harness.checker.availableVersion == "fork main · bbbbbbb")
     }
 
-    @Test("The running version stays quiet")
-    func runningVersionStaysQuiet() async throws {
-        let harness = Harness(tag: "v\(CapdKit.version)")
+    @Test("The running revision stays quiet")
+    func runningRevisionStaysQuiet() async {
+        let harness = Harness(revision: Harness.currentRevision)
 
         await harness.checker.checkIfDue()
 
         #expect(harness.checker.availableVersion == nil)
     }
 
+    @Test("Old cached release tags are ignored")
+    func oldCachedReleaseTagIsIgnored() {
+        let harness = Harness(revision: String(repeating: "b", count: 40))
+        harness.defaults.set("v0.0.9", forKey: "latestKnownVersion")
+
+        #expect(harness.checker.availableVersion == nil)
+    }
+
+    @Test("Changing installed revision invalidates the cache and checks immediately")
+    func installedRevisionChangeInvalidatesCache() async {
+        let harness = Harness(revision: String(repeating: "b", count: 40))
+        await harness.checker.checkIfDue()
+        harness.setSourceRevision(String(repeating: "b", count: 40))
+
+        #expect(harness.checker.availableVersion == nil)
+
+        await harness.checker.checkIfDue()
+
+        #expect(harness.requestCount == 2)
+        #expect(harness.checker.availableVersion == nil)
+    }
+
+    @Test("Update command targets the local fork updater")
+    func upgradeCommandTargetsForkUpdater() {
+        #expect(UpdateChecker.upgradeCommand == "mise -C ~/.config/mise run local:capd-update")
+    }
+
     @Test("Toggled off, no request is made")
-    func toggledOffMakesNoRequest() async throws {
-        let harness = Harness(tag: "v999.0.0")
+    func toggledOffMakesNoRequest() async {
+        let harness = Harness(revision: String(repeating: "b", count: 40))
         harness.settings.checksForUpdates = false
 
         await harness.checker.checkIfDue()
@@ -39,8 +65,8 @@ struct VersionCheckTests {
     }
 
     @Test("A second check within the week is skipped")
-    func withinWeekSkips() async throws {
-        let harness = Harness(tag: "v999.0.0")
+    func withinWeekSkips() async {
+        let harness = Harness(revision: String(repeating: "b", count: 40))
 
         await harness.checker.checkIfDue()
         harness.advance(by: 3 * 24 * 60 * 60)
@@ -50,8 +76,8 @@ struct VersionCheckTests {
     }
 
     @Test("A check after a week fetches again")
-    func afterWeekRefetches() async throws {
-        let harness = Harness(tag: "v999.0.0")
+    func afterWeekRefetches() async {
+        let harness = Harness(revision: String(repeating: "b", count: 40))
 
         await harness.checker.checkIfDue()
         harness.advance(by: 8 * 24 * 60 * 60)
@@ -61,8 +87,8 @@ struct VersionCheckTests {
     }
 
     @Test("A failed request retries on the next pass")
-    func failureRetriesNextPass() async throws {
-        let harness = Harness(tag: "v999.0.0")
+    func failureRetriesNextPass() async {
+        let harness = Harness(revision: String(repeating: "b", count: 40))
         harness.fails = true
 
         await harness.checker.checkIfDue()
@@ -72,45 +98,46 @@ struct VersionCheckTests {
         await harness.checker.checkIfDue()
 
         #expect(harness.requestCount == 2)
-        #expect(harness.checker.availableVersion == "v999.0.0")
+        #expect(harness.checker.availableVersion == "fork main · bbbbbbb")
     }
 
     @Test("A found update survives a relaunch")
-    func updateSurvivesRelaunch() async throws {
-        let harness = Harness(tag: "v999.0.0")
+    func updateSurvivesRelaunch() async {
+        let harness = Harness(revision: String(repeating: "b", count: 40))
         await harness.checker.checkIfDue()
 
         let relaunched = UpdateChecker(
             settings: AppSettings(defaults: harness.defaults),
-            client: ReleaseClient { throw URLError(.notConnectedToInternet) })
+            client: ReleaseClient { throw URLError(.notConnectedToInternet) },
+            sourceRevision: Harness.currentRevision)
 
-        #expect(relaunched.availableVersion == "v999.0.0")
+        #expect(relaunched.availableVersion == "fork main · bbbbbbb")
     }
 
     @Test("Settings persist across relaunches")
-    func settingsPersist() throws {
-        let harness = Harness(tag: "v999.0.0")
+    func settingsPersist() {
+        let harness = Harness(revision: String(repeating: "b", count: 40))
         harness.settings.fetchesPageBodies = false
         harness.settings.checksForUpdates = false
         harness.settings.contextualRemindersEnabled = true
 
         let relaunched = AppSettings(defaults: harness.defaults)
 
-        #expect(relaunched.fetchesPageBodies == false)
-        #expect(relaunched.checksForUpdates == false)
+        #expect(!relaunched.fetchesPageBodies)
+        #expect(!relaunched.checksForUpdates)
         #expect(relaunched.contextualRemindersEnabled)
     }
 
     @Test("Contextual reminders default off")
     func contextualRemindersDefaultOff() {
-        let harness = Harness(tag: "v999.0.0")
+        let harness = Harness(revision: String(repeating: "b", count: 40))
 
         #expect(!harness.settings.contextualRemindersEnabled)
     }
 
     @Test("Changing contextual reminders updates the live monitor")
     func contextualReminderCallback() {
-        let harness = Harness(tag: "v999.0.0")
+        let harness = Harness(revision: String(repeating: "b", count: 40))
         var changes: [Bool] = []
         harness.settings.contextualRemindersChanged = { changes.append($0) }
 
@@ -120,39 +147,42 @@ struct VersionCheckTests {
         #expect(changes == [true, false])
     }
 
-    @Test(
-        "Release tags order numerically",
-        arguments: [
-            (tag: "v0.2.0", current: "0.0.1", newer: true),
-            (tag: "0.10.0", current: "0.9.9", newer: true),
-            (tag: "v1.0.1", current: "1.0", newer: true),
-            (tag: "v1.0.0", current: "1.0.0", newer: false),
-            (tag: "v1.0", current: "1.0.0", newer: false),
-            (tag: "v0.0.1", current: "0.0.2", newer: false),
-            (tag: "v0.2.0-beta", current: "0.2.0", newer: false),
-            (tag: "nonsense", current: "0.0.1", newer: false),
-        ])
-    func tagsOrderNumerically(_ example: (tag: String, current: String, newer: Bool)) {
-        #expect(ReleaseVersion.isNewer(tag: example.tag, than: example.current) == example.newer)
+    @Test("Revision validation rejects release tags")
+    func revisionValidation() {
+        #expect(SourceRevision.isValid(String(repeating: "a", count: 40)))
+        #expect(!SourceRevision.isValid("v0.0.9"))
     }
 }
 
-/// An `UpdateChecker` wired to a counting stub client, a controllable clock, and a
-/// throwaway defaults suite.
 @MainActor
 private final class Harness {
+    static let currentRevision = String(repeating: "a", count: 40)
+
     let defaults: UserDefaults
     let settings: AppSettings
     private(set) var checker: UpdateChecker!
     private(set) var requestCount = 0
     var fails = false
+    private var sourceRevision: String
+    private let targetRevision: String
 
     private let suiteName = "dev.jxd.capd.tests.\(UUID().uuidString)"
     private var now = Date(timeIntervalSinceReferenceDate: 800_000_000)
 
-    init(tag: String) {
+    init(revision: String) {
+        targetRevision = revision
+        sourceRevision = Self.currentRevision
         defaults = UserDefaults(suiteName: suiteName)!
         settings = AppSettings(defaults: defaults)
+        makeChecker()
+    }
+
+    func setSourceRevision(_ revision: String) {
+        sourceRevision = revision
+        makeChecker()
+    }
+
+    private func makeChecker() {
         checker = UpdateChecker(
             settings: settings,
             client: ReleaseClient { @MainActor [unowned self] in
@@ -160,8 +190,9 @@ private final class Harness {
                 if fails {
                     throw URLError(.notConnectedToInternet)
                 }
-                return tag
+                return targetRevision
             },
+            sourceRevision: sourceRevision,
             now: { [unowned self] in now })
     }
 
